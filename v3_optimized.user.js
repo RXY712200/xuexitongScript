@@ -59,7 +59,7 @@
     function initializePlayer() {
         const app = {
             configs: {
-                playbackRate: 1.5,
+                playbackRate: 1.0,
                 autoplay: true,
                 retryInterval: 2000,
                 maxRetries: 10,
@@ -100,6 +100,10 @@
                 this.play();
             },
             nextUnit() {
+                if (this._isChapterTest()) {
+                    this._advanceChapterTest();
+                    return;
+                }
                 if (this._nextUnitPending) {
                     console.warn('%c已有小节切换正在进行，忽略重复请求', 'color:#FF9800');
                     return;
@@ -215,6 +219,10 @@
             _guardLastResumeTs: 0,
             async play() {
                 try {
+                    if (this._isChapterTest()) {
+                        this._advanceChapterTest();
+                        return;
+                    }
                     const el = this._getVideoEl();
                     if (el == null) {
                         if (this._currentStepTitle() === '视频') {
@@ -307,21 +315,13 @@
                 return this._currentStepTitle() === '章节测验';
             },
             _advanceChapterTest() {
-                if (this._chapterAdvanceTimes >= 3) {
-                    console.error('%c章节测验页面连续跳转失败，已停止以避免页面循环。请手动处理后执行 app.run()。', 'color:#F44336;font-weight:bold');
-                    return;
+                this._isPlaying = false;
+                this._clearCheckInterval();
+                if (this._delayedNextUnitTimer) {
+                    clearTimeout(this._delayedNextUnitTimer);
+                    this._delayedNextUnitTimer = null;
                 }
-
-                const nextButton = $('#prevNextFocusNext:visible, #right1:visible, .nextChapter:visible').first().get(0);
-                if (!nextButton) {
-                    console.warn('%c未找到章节测验的下一步按钮，已停止。', 'color:#FF9800');
-                    return;
-                }
-
-                this._chapterAdvanceTimes++;
-                console.log('%c检测到章节测验，尝试进入下一学习步骤', 'color:#607D8B');
-                nextButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                setTimeout(() => this.play(), 2000);
+                console.warn('%c检测到章节测验，已停止自动导航。请手动完成测验后执行 app.run()。', 'color:#FF9800');
             },
             _bindStepNavigation() {
                 if (this._stepNavigationBound) {
