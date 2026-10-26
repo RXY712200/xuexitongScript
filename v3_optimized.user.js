@@ -215,7 +215,43 @@
             cancelWhere(test, reason = 'settings') { for (const action of [...pending.values()]) if (test(action.category)) action.cancel(reason); } };
     }
 
-    // Parent entry/document adapters remain opt-in; the recorded popup uses confirmed evidence only.
+    // The native card is evidenced; its closure URL and native popup handle are not exposed.
+    // Recognition is not proof of recorded status or popup ownership.
+    const platformLiveEntry = {
+        inspect(entry) {
+            const doc = entry?.ownerDocument;
+            if (!doc || !entry.isConnected) return 'invalid';
+            const links = doc.querySelectorAll('[id="openUrl"]');
+            if (!links.length) return 'unresolved'; // The platform may create this asynchronously.
+            if (links.length !== 1 || links[0].tagName !== 'A') return 'invalid';
+            const link = links[0], href = link.getAttribute('href')?.trim();
+            if (!href || /^javascript:\s*void\s*\(\s*0\s*\)\s*;?$/i.test(href)) return 'unresolved';
+            try {
+                const url = new URL(href, doc.baseURI);
+                if (url.origin !== 'https://zhibo.chaoxing.com') return 'invalid';
+            } catch (_) { return 'invalid'; }
+            if (link.target !== '_blank') return 'unresolved';
+            return link.relList.contains('noopener') || link.relList.contains('noreferrer') ? 'manual-policy' : 'approved-origin-only';
+        },
+        discover({ document: doc }) {
+            const frame = videoAdapter.cardFrame();
+            if (window.location?.origin !== 'https://mooc1.chaoxing.com' || !doc ||
+                frame?.id !== 'iframe' || frame.getAttribute('info') !== 'card' || doc !== videoAdapter.cardDocument()) return null;
+            const entries = doc.querySelectorAll('a.liveHref');
+            if (!entries.length) return null;
+            const entry = entries[0];
+            const recognized = () => entry.isConnected && doc.querySelectorAll('a.liveHref').length === 1 &&
+                doc.querySelector('a.liveHref') === entry &&
+                !!entry.querySelector(':scope > div.liveCard > div.live-ct') &&
+                /^javascript:\s*void\s*\(\s*0\s*\)\s*;?$/i.test(entry.getAttribute('href')?.trim() || '') &&
+                this.inspect(entry) !== 'invalid';
+            return { tasks: [{ kind: 'live', element: entry, nativeEntry: true }],
+                validateScope: () => entries.length === 1 && frame === videoAdapter.cardFrame() &&
+                    doc === videoAdapter.cardDocument() && recognized() };
+        },
+    };
+
+    // Document adapters remain opt-in; the recorded popup uses confirmed evidence only.
     function bootRecordedPopup() {
         if (window.top !== window || !window.opener) return;
         const flag = name => {
@@ -258,7 +294,26 @@
                 types.has(data.type) && Number.isSafeInteger(data.seq) && data.seq > session.received &&
                 Number.isFinite(data.timestamp) && data.timestamp >= session.started - 5000 && data.timestamp <= Date.now() + 30000;
         };
-        function createParent({ entry, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn() }) {
+        function createParent({ entry, nativeEntry = false, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn() }) {
+            if (nativeEntry) {
+                const scope = platformLiveEntry.discover({ document: entry?.ownerDocument });
+                if (!scope?.validateScope() || scope.tasks[0].element !== entry) throw new Error('Unsupported native live entry');
+                let started = false, disposed = false;
+                return {
+                    manualOnly: true, dispose() { disposed = true; },
+                    start() {
+                        if (started || disposed || !isValid()) return;
+                        started = true;
+                        if (!scope.validateScope()) return onError('直播入口已变化，停止自动处理');
+                        // Native anchor.click() returns no WindowProxy. Do not substitute
+                        // window.open(), rewrite target/URL, introspect closures or run the
+                        // business handler merely to discover its destination.
+                        const state = platformLiveEntry.inspect(entry);
+                        onError(state === 'invalid' ? '直播目标不受支持，请手动检查原生入口' :
+                            '已识别平台直播入口，但原生链接不提供可验证的窗口引用；请手动点击直播卡片并处理，脚本不会自动推进');
+                    },
+                };
+            }
             const url = new URL(entry.href, env.location.href);
             const crossOrigin = url.origin !== env.location.origin;
             if (!entry.isConnected || entry.tagName !== 'A' || entry.target !== '_blank' ||
@@ -479,7 +534,7 @@
             tick();
             return { cancel, tick };
         }
-        return { createParent, installChild, readDocument };
+        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry) };
     }
 
     function initializePlayer() {
@@ -696,7 +751,7 @@
                 this._renderSettings = render;
                 render(); document.body.append(host);
             },
-            taskAdapter: null, // No real viewer/live profile is enabled without evidence.
+            taskAdapter: null, // Explicit adapters override the built-in native-entry/manual-handoff profile.
             _processedTasks: new WeakSet(),
             _chapterOf(node) {
                 for (let el = node; el; el = el.parentElement) {
@@ -749,8 +804,7 @@
             },
             _taskSet() {
                 try {
-                    if (!this.taskAdapter) return null;
-                    const scope = this.taskAdapter.discover({ node: catalog.current(), document: videoAdapter.cardDocument() });
+                    const scope = (this.taskAdapter || platformLiveEntry).discover({ node: catalog.current(), document: videoAdapter.cardDocument() });
                     if (!scope) return null;
                     if (!Array.isArray(scope.tasks) || typeof scope.validateScope !== 'function' || !scope.validateScope()) return { invalid: true };
                     const belongs = element => {
@@ -815,7 +869,15 @@
                     console.log(record.kind === 'document' ? '文档已到可验证底部，仅记为本地操作完成。' : '直播窗口已关闭；本地结束信号不代表平台已计入完成。');
                     this._verifyExternal(0);
                 };
-                const failed = reason => this._block(reason);
+                const failed = reason => {
+                    if (pending.nativeEntry) {
+                        this._settingsMessage = reason;
+                        this._renderSettings?.();
+                        const summary = this._settingsPanel?.shadowRoot?.querySelector('summary');
+                        if (summary) summary.textContent = '学习设置 · 直播需手动处理';
+                    }
+                    this._block(reason);
+                };
                 if (pending.kind === 'document') {
                     this._state = 'READING_DOCUMENT';
                     try {
@@ -831,13 +893,14 @@
                     this._hadLive = true;
                     this._state = 'WAITING_LIVE'; // Set before window.open(), including popup-block failure.
                     try {
-                        this._liveController = window.__xuexitongTaskSupport.createParent({ entry: pending.element,
+                        this._liveController = window.__xuexitongTaskSupport.createParent({ entry: pending.element, nativeEntry: pending.nativeEntry === true,
                             generation: record.generation, threshold: this.configs.liveNearEndThreshold,
                             isValid: () => this._state === 'WAITING_LIVE' && this._taskContextValid(record),
                             onResult: completed, onError: failed, scheduleClose: close => this._runAction('liveReturn', 'live-return', () => {
                                 this._liveReturnPendingNavigation = true; close();
                             }, { isValid: () => this._taskContextValid(record) && this._state === 'WAITING_LIVE' }) });
-                        this._runAction('liveOpen', 'live-open', () => this._liveController?.start(),
+                        if (this._liveController.manualOnly) this._liveController.start(); // Safety notice, not an opening action.
+                        else this._runAction('liveOpen', 'live-open', () => this._liveController?.start(),
                             { isValid: () => this._taskContextValid(record) && this._state === 'WAITING_LIVE' });
                     } catch (_) { failed('直播入口或通信来源尚不受支持'); }
                 }

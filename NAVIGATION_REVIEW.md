@@ -590,3 +590,56 @@ Nine files: `v3_optimized.js`, generated `v3_optimized.user.js`, `scripts/build-
 
 No authenticated course-to-popup-to-course run, actual HLS playback, server credit/attendance verification, physical tab/application-switch test, Chrome user-activation/popup-policy acceptance or real course layout test was performed. The real parent entry DOM/opening mechanism is still missing: taskAdapter remains opt-in, no speculative entry selector was added, and the live feature remains disabled by default. Document adapters also remain opt-in/default-off. Other popup origins, absent opener/COOP separation, unsupported players/statuses and unrecognized locks need additional evidence or manual handling. Generic aria-disabled/disabled/lock-text checks do not establish recognition of every platform-specific access restriction. Long sessions have no completion timeout; background throttling may postpone monitoring. A browser can deny opening/closing. Missing communication remains waiting/safe rather than proving completion. Master remains unchanged; publication is review-only and requires independent ChatGPT acceptance.
 Additional final gates: `node --check` passed for all 13 JavaScript files; `git diff --check` passed. Privacy audit output: `PASS: nine candidate files reviewed; credential literals/signed-identity URLs/private keys absent; zero tracked private fixtures; all eight private files excluded.` The complete source/test diff and generated payload were inspected before explicit staging; publication is limited to these nine files. Pattern checks supplement manual diff review and do not constitute an exhaustive data-loss-prevention guarantee.
+
+## 2026-10-26: Real native-entry recognition and safe manual handoff
+
+STATUS: PARTIAL. This implements the provable entry-recognition/manual-fallback portion, not unattended native-popup opening and return. Review base: `58a252a6eb935b1cc249fe7944b5758d2675b7be`. This section supersedes the earlier statement that the parent entry structure was wholly unavailable.
+
+### Real entry evidence used
+
+The user supplied a sanitized DevTools description: `a.liveHref > div.liveCard > div.live-ct` inside `iframe#iframe[info="card"]`, with placeholder `javascript:void(0);`. The registered business handler first calls `setLiveANDCourseRelation()`, then assigns its captured URL to platform-owned `#openUrl`, sets `_blank`, and clicks that anchor. The closure URL and relation function internals were not provided. No authenticated page or complete private handler snapshot was inspected in this implementation.
+
+### Entry adapter and platform behavior
+
+The built-in fallback profile selects only the unique evidenced course frame on the exact confirmed course origin, ignores outer/auxiliary live-looking elements, and requires a unique matching task card. Existing explicit task adapters retain precedence. Missing/dynamically created `#openUrl` is unresolved; duplicate/non-anchor links and unapproved destinations are invalid. Inspection follows current/replaced DOM links rather than caching a URL. A usable target must have the exact approved HTTPS replay origin and `_blank`; noopener/noreferrer mean manual policy. Origin approval alone never proves recorded status, popup ownership or task completion. No URL is logged, persisted or placed into protocol packets by this profile.
+
+The profile enters the existing parent coordinator's native-entry branch. With live disabled (unchanged default), automation pauses. With live enabled, WAITING_LIVE is entered before the branch immediately stops with a manual notice, without adding a randomized safety-warning delay. The compact existing settings panel displays `直播需手动处理` and the instruction to click the platform card manually. No automatic business-handler invocation, relationship-function call, anchor click, window.open replacement, link rewrite, handler interception, closure extraction or extra popup is performed. The actual user-triggered platform handler remains untouched. Known assessment deferral and ordinary video checks are unchanged.
+
+This deliberately does not retrofit native anchor navigation into window.open: doing so would change the evidenced opening mechanism without verifying the relationship function and browser-policy implications. Native anchor.click returns undefined, not a WindowProxy. In the local real-Chrome synthetic native-click test, a `_blank` popup was created with no opener. Its child coordinator stayed inactive. The existing owned-window protocol cannot safely attach merely by origin or a claimed completion message; no wildcard trust, guessed window identity or broadcast adoption was added. The manual-only branch never calls onResult, marks a task processed, closes a window or continues course navigation. Repeated automation discovery/run/callbacks do not invoke the handler. Repeated deliberate manual user clicks remain platform behavior, not a script deduplication claim.
+
+### Tests executed and actual output
+
+Node v24.18.1, Chrome 156.0.8078.48 headless, Playwright supplied through PLAYWRIGHT_MODULE and local jQuery through JQUERY_PATH. All external networking was blocked/intercepted; pages and relation function are synthetic. The relation stub records call order only and does not model the unverified real function's internals. Native anchor navigation and actual opener behavior were exercised in Chrome; media state elsewhere remains simulated.
+
+```text
+node scripts/build-userscript.mjs
+[exit 0; no output]
+node tests/verify-v3.mjs
+V3 source and userscript payload are synchronized and syntactically valid.
+node tests/customization-v3.mjs
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+node tests/preserved-v3.mjs
+PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.
+PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.
+PASS: 58a252a recorded adapter, owned-popup lifecycle/protocol, child recovery, assessment rules, scheduler and settings preserved exactly.
+node tests/navigation-v3.mjs
+RESULT: 188 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+node tests/recorded-live-v3.mjs
+RESULT: 21 passed; 0 failed. Synthetic browser evidence only.
+node tests/native-entry-v3.mjs
+RESULT: 19 passed; 0 failed. Synthetic entry/manual-fallback evidence only.
+```
+
+The new 19 tests cover scoped recognition/default-off behavior, auxiliary exclusion, repeated automation without duplicate business calls, untouched registered handler and its original sequence under manual click, async link creation, dynamic link replacement, read-only inspection, invalid/duplicate entries, exact frame identity, disposed callbacks after seven cancellation/invalidation cases, immediate visible manual notice, actual native popup/opener behavior, unowned message rejection and preserved noopener/noreferrer. Existing 188 + 21 cases continue to run, including cross-origin owned-popup messaging, delayed/missing completion markers, document and assessment behavior, 1.0x, background recovery and nine-category scheduler/UI checks. Eight of the 188 are inert local private outer-structure examples; no authenticated platform compatibility follows from them.
+
+Preservation checks now additionally compare the previous reviewed recorded-popup bootstrap, normal owned-parent lifecycle, complete protocol block and child implementation byte-for-byte (normalized line endings) against 58a252a. Assessment rules, action scheduler and saved-settings methods are also unchanged. The task-set method has exactly the intended built-in fallback substitution; explicit adapters still work.
+
+### Changed files and privacy boundary
+
+Seven files: source and generated V3 script, `tests/preserved-v3.mjs`, new `tests/native-entry-v3.mjs`, new `fixtures/synthetic/native-live-entry.html`, README and this report. No grant, metadata match, stable/legacy implementation, DeepSeek file or repository setting changes. Public fixtures use generic titles, synthetic destinations and a clearly marked test stub, with no private snapshot, real replay URL, signature, course/account identifiers or authentication data. All eight private files stay excluded and untracked. There are no runtime AI services.
+
+### Remaining live-platform limitations
+
+Automatic native entry to owned cross-origin replay return remains unsupported. The native card alone does not establish whether the session is recorded or genuinely live; the separately verified popup adapter still requires its recorded flags and player evidence. The actual relationship function effects, authenticated handler behavior, delayed/blocked popup policy, browser opener/COOP/sandbox policies, live HLS/background playback, server credit and end-to-end return remain unverified. A platform-supported, security-preserving way to obtain a verifiable popup/session relationship would be needed before enabling automatic handoff. An already populated approved #openUrl does not authorize bypassing the business handler. Users must open/handle this native flow manually; the script does not resume automatically afterward or claim credit. No merge/tag/release is part of publication.
+
+Final static/privacy gates: all 14 JavaScript syntax checks passed; source/generated payload consistency and git diff --check passed. Manual diff review plus credential-literal/signed-identity-URL/private-key pattern checks covered all seven candidate files. Zero private fixtures are tracked; all eight remain locally excluded. Pattern checks supplement inspection and are not an exhaustive privacy guarantee.

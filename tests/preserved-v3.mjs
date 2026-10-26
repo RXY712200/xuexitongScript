@@ -29,9 +29,12 @@ console.log('PASS: background guards/stall code preserved; recovery adds only st
 const reviewed = execFileSync('git', ['show', '64900befe4ffa90effc8333077dcb7677ac4a8e6:v3_optimized.js'], { encoding: 'utf8' });
 for (const name of ['_bindPageGuards', '_startVideoMonitoring', '_checkVideoStatus', '_completeVideo',
     '_handlePlayError', '_bindStepNavigation', '_initCellData', '_schedule', '_verificationPresent',
-    '_taskSet', '_discoverMedia', '_taskContextValid', '_externalNavigationEligible', '_navigationEligible']) {
+    '_discoverMedia', '_taskContextValid', '_externalNavigationEligible', '_navigationEligible']) {
     assert.equal(method(current, name), method(reviewed, name), `${name} must match 64900be`);
 }
+assert.equal(method(current, '_taskSet'), method(reviewed, '_taskSet').replace(
+    '                    if (!this.taskAdapter) return null;\n                    const scope = this.taskAdapter.discover',
+    '                    const scope = (this.taskAdapter || platformLiveEntry).discover'));
 assert.equal(method(current, '_tryResumePlayback'), method(reviewed, '_tryResumePlayback').replace(
     '            _tryResumePlayback(reason) {', '            _tryResumePlayback(reason) {\n                if (!this.settings.features.background) return;'));
 const accept = source => source.slice(source.indexOf('        const accept = (event,'), source.indexOf('        function createParent('));
@@ -42,3 +45,20 @@ const catalogOnly = source => source.slice(source.indexOf('    const catalog = {
 assert.ok(catalogOnly(current).includes("const videoAdapter ="));
 assert.equal(catalogOnly(current).trim(), reviewed.slice(reviewed.indexOf('    const catalog = {'), reviewed.indexOf('    // Evidence adapters are opt-in.')).trim());
 console.log('PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.');
+
+const popupBaseline = execFileSync('git', ['show', '58a252a6eb935b1cc249fe7944b5758d2675b7be:v3_optimized.js'], { encoding: 'utf8' });
+for (const name of ['_assessmentTarget', '_targetAfter', '_actionEnabled', '_runAction', 'updateSettings']) {
+    assert.equal(method(current, name), method(popupBaseline, name), `${name} must match 58a252a`);
+}
+const block = (source, start, end) => {
+    const first = source.indexOf(start), last = source.indexOf(end, first);
+    assert.ok(first >= 0 && last > first, start);
+    return source.slice(first, last);
+};
+for (const [start, end] of [
+    ['    function bootRecordedPopup()', '    function createTaskSupport('],
+    ["        const protocol = 'xuexitong-live-v1'", '        function createParent('],
+    ['            const url = new URL(entry.href', '        function installChild('],
+    ['        function installChild(', '        function readDocument('],
+]) assert.equal(block(current, start, end), block(popupBaseline, start, end));
+console.log('PASS: 58a252a recorded adapter, owned-popup lifecycle/protocol, child recovery, assessment rules, scheduler and settings preserved exactly.');
