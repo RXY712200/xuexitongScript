@@ -85,9 +85,18 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
     await page.evaluate(async enableCooldown => {
         for (const fn of [...window.__intervals.values()]) fn();
         await Promise.resolve();
+        window.__settingsDefaults = JSON.parse(JSON.stringify(app.settings));
         window.__cooldownDefaults = [app.configs.randomCooldownEnabled, app.configs.randomCooldownMinMs, app.configs.randomCooldownMaxMs];
-        // Existing immediate-navigation scenarios explicitly disable the new option.
-        app.configs.randomCooldownEnabled = enableCooldown;
+        // Historical scenarios explicitly choose legacy navigation timing and immediate other actions.
+        const settings = JSON.parse(JSON.stringify(app.settings));
+        settings.preset = 'legacy'; settings.randomDelaysEnabled = enableCooldown;
+        settings.features.document = true; settings.features.live = true;
+        for (const [category, rule] of Object.entries(settings.delays)) {
+            rule.enabled = enableCooldown && ['nextLesson', 'nextChapter', 'assessment'].includes(category);
+            if (['nextLesson', 'nextChapter', 'assessment'].includes(category)) { rule.minMs = 5000; rule.maxMs = 12000; }
+        }
+        app.updateSettings(settings);
+        app.run(); await Promise.resolve();
     }, enableCooldown);
     return { page, close: () => context.close() };
 }
@@ -267,7 +276,7 @@ try {
     }));
     await check('synthetic pending play promise invalidated by quiz stop', () => using([], async page => {
         await page.evaluate(() => {
-            const v = app._videoEl; v.play = () => new Promise(resolve => { window.__resolvePlay = resolve; });
+            const v = app._videoEl; app._isPlaying = false; v.__paused = true; v.play = () => new Promise(resolve => { window.__resolvePlay = resolve; });
             app.play(); document.querySelector('.prev_title').title = '章节测验'; app.play(); window.__resolvePlay();
         });
         assert.equal(await state(page), 'BLOCKED');
@@ -282,7 +291,7 @@ try {
         assert.equal(await page.evaluate(() => app._timers.size), size);
     }));
     await check('synthetic muted fallback remains active', () => using([], async page => {
-        await page.evaluate(async () => { const v = app._videoEl; let calls = 0; v.play = () => ++calls === 1 ? Promise.reject(new Error('autoplay blocked')) : Promise.resolve(); await app.play(); await Promise.resolve(); });
+        await page.evaluate(async () => { const v = app._videoEl; app._isPlaying = false; v.__paused = true; let calls = 0; v.play = () => ++calls === 1 ? Promise.reject(new Error('autoplay blocked')) : Promise.resolve(); await app.play(); await Promise.resolve(); });
         assert.equal(await page.evaluate(() => app._videoEl.muted), true);
         assert.equal(await state(page), 'PLAYING');
         assert.notEqual(await page.evaluate(() => app._checkInterval), null);
@@ -559,6 +568,8 @@ try {
                 return { tasks: [...doc.querySelectorAll('.synthetic-document')].map(element => ({ kind: 'document', element })),
                     validateScope: () => doc === document.querySelector('iframe[info="card"]').contentDocument && !doc.querySelector('.synthetic-unknown') };
             } };
+            app.settings.randomDelaysEnabled = true; app.settings.delays.documentScroll.enabled = true;
+            app.settings.delays.documentScroll.minMs = 400; app.settings.delays.documentScroll.maxMs = 1200;
             window.__scrollPositions = []; window.__docDelays = [];
             let draw = 0; const values = [0.1, 0.5, 0.9]; Math.random = () => values[draw++ % values.length];
             app.run();
@@ -623,7 +634,7 @@ try {
             assert.equal(await state(page), 'BLOCKED');
         }));
     }
-    async function startLive(page, { duration = 100, deniedClose = false } = {}) {
+    async function startLive(page, { duration = 100, deniedClose = false, beforeOpen = null } = {}) {
         const popupPromise = page.context().waitForEvent('page');
         await page.evaluate(() => {
             const doc = document.querySelector('iframe[info="card"]').contentDocument;
@@ -644,6 +655,7 @@ try {
             };
             app.run();
         });
+        if (beforeOpen) await beforeOpen(page);
         const child = await popupPromise;
         await child.waitForLoadState();
         await child.addScriptTag({ content: jquery });
@@ -692,10 +704,7 @@ try {
             await child.evaluate(completion => { if (completion === 'ended') window.__ended = true; else window.__position = 99; window.__child.check(); }, completion);
             await closed;
             await page.evaluate(() => app._liveController.tick());
-            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
-            assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [5000]);
-            await flush(page);
-            assert.equal(await state(page), 'PLAYING');
+            assert.equal(await state(page), 'PLAYING'); // Return already consumed its one logical delay (disabled in this fixture).
             assert.equal(await page.evaluate(() => document.querySelector('.posCatalog_active').id), 'node1');
         }));
     }
@@ -790,7 +799,7 @@ try {
         const child = await startLive(page, { duration: 'infinite' }); await confirmParentMarker(page);
         const closed = child.waitForEvent('close');
         await child.evaluate(() => { window.__sessionFinished = true; window.__child.check(); }); await closed;
-        await page.evaluate(() => app._liveController.tick()); assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+        await page.evaluate(() => app._liveController.tick()); assert.equal(await state(page), 'PLAYING');
     }));
     await check('synthetic malformed or unrelated live completion cannot close the child', () => using(liveOptions, async page => {
         const child = await startLive(page);
@@ -827,7 +836,7 @@ try {
         await confirmParentMarker(page); const closed = child.waitForEvent('close');
         await child.evaluate(() => { window.__ended = true; window.__child.check(); }); await closed;
         await page.evaluate(() => app._liveController.tick());
-        assert.equal(await state(page), 'NAVIGATION_COOLDOWN'); assert.equal(unrelated.isClosed(), false);
+        assert.equal(await state(page), 'PLAYING'); assert.equal(unrelated.isClosed(), false);
     }));
     await check('synthetic same-document parent URL change invalidates live waiting', () => using(liveOptions, async page => {
         const child = await startLive(page);
@@ -862,6 +871,287 @@ try {
             return [first === second, window.__plays];
         }), [true, 1]);
         assert.equal(await state(page), 'WAITING_LIVE');
+    }));
+    async function shortSettings(page, { allFeatures = false, disableVideoStart = false } = {}) {
+        await page.evaluate(({ allFeatures, disableVideoStart }) => {
+            const settings = JSON.parse(JSON.stringify(window.__settingsDefaults));
+            if (allFeatures) for (const key of Object.keys(settings.features)) settings.features[key] = true;
+            if (disableVideoStart) settings.delays.videoStart.enabled = false;
+            app.updateSettings(settings);
+            window.__actionDraws = 0; Math.random = () => { window.__actionDraws++; return 0; };
+        }, { allFeatures, disableVideoStart });
+    }
+    const ranges = { videoStart: [300, 900], nextVideo: [500, 1500], documentScroll: [400, 1200], nextDocument: [500, 1500], nextLesson: [1000, 2500], nextChapter: [1500, 3500], assessment: [1000, 2500], liveOpen: [500, 1500], liveReturn: [500, 1500] };
+    for (const [category, bounds] of Object.entries(ranges)) for (const maximum of [false, true]) {
+        await check(`action settings ${category} ${maximum ? 'maximum' : 'minimum'} integer bound`, () => using([], async page => {
+            await shortSettings(page, { allFeatures: true });
+            await page.evaluate(({ category, maximum }) => {
+                window.__actionFired = 0; Math.random = () => maximum ? 0.999999999 : 0;
+                app._runAction(category, 'range-test', () => window.__actionFired++);
+            }, { category, maximum });
+            assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [bounds[maximum ? 1 : 0]]);
+            await flush(page); assert.equal(await page.evaluate(() => window.__actionFired), 1);
+        }));
+    }
+    await check('action settings independently draw single-millisecond values and log three decimals', () => using([], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => {
+            const values = [0, 1.1 / 1501, 0.5]; let draws = 0; Math.random = () => values[draws++]; window.__fired = 0;
+            for (let i = 0; i < 3; i++) app._runAction('nextLesson', `independent-${i}`, () => window.__fired++);
+            window.__drawCount = draws;
+        });
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [1000, 1001, 1750]);
+        assert.equal(await page.evaluate(() => window.__drawCount), 3);
+        assert.ok(await page.evaluate(() => window.__logs.includes('导航冷却 1.001s')));
+        await flush(page); assert.equal(await page.evaluate(() => window.__fired), 3);
+    }));
+    for (const mode of ['global', 'category']) {
+        await check(`action settings disabled ${mode} delays do not sample or queue a wait`, () => using([], async page => {
+            await shortSettings(page);
+            const result = await page.evaluate(mode => {
+                const settings = JSON.parse(JSON.stringify(app.settings));
+                if (mode === 'global') settings.randomDelaysEnabled = false; else settings.delays.nextLesson.enabled = false;
+                app.updateSettings(settings); window.__fired = 0;
+                Math.random = () => { throw new Error('Disabled delay sampled RNG'); };
+                app._runAction('nextLesson', 'disabled', () => window.__fired++);
+                return [window.__fired, app._actions.pending.size];
+            }, mode);
+            assert.deepEqual(result, [1, 0]);
+        }));
+    }
+    for (const [feature, category] of [['videoPlayback', 'videoStart'], ['nextVideo', 'nextVideo'], ['nextLesson', 'nextLesson'], ['nextChapter', 'nextChapter'], ['assessment', 'assessment'], ['document', 'documentScroll'], ['live', 'liveOpen']]) {
+        await check(`action settings independent feature switch ${feature}`, () => using([], async page => {
+            await shortSettings(page, { allFeatures: true });
+            await page.evaluate(({ feature, category }) => {
+                window.__fired = 0;
+                app._runAction(category, 'feature-pending', () => window.__fired++);
+                window.__staleAction = [...window.__timeouts.values()][0];
+                const settings = JSON.parse(JSON.stringify(app.settings)); settings.features[feature] = false; app.updateSettings(settings);
+                window.__staleAction(); settings.features[feature] = true; app.updateSettings(settings);
+            }, { feature, category });
+            assert.equal(await page.evaluate(() => window.__fired), 0);
+            assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
+            assert.equal(await page.evaluate(() => app._videoEl.playbackRate), 1);
+        }));
+    }
+    await check('action settings default video startup delays once and does not replay active video', () => using([], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => { app._videoEl.__plays = 0; app._videoEl.__paused = true; app.run(); app.play(); app.play(); });
+        assert.equal(await state(page), 'ACTION_PENDING');
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [300]);
+        await flush(page); assert.equal(await page.evaluate(() => app._videoEl.__plays), 1);
+        await page.evaluate(() => app.play()); assert.equal(await page.evaluate(() => app._videoEl.__plays), 1);
+        assert.equal(await state(page), 'PLAYING');
+    }));
+    await check('action settings within-lesson next video uses only nextVideo category', () => using([outer(1, true), 3], async page => {
+        await shortSettings(page, { disableVideoStart: true });
+        await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page);
+        assert.equal(await page.evaluate(() => app._actions.pending.get('video-start').category), 'nextVideo');
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [500]);
+        await flush(page); assert.equal(await state(page), 'PLAYING');
+    }));
+    for (const category of ['nextLesson', 'nextChapter', 'assessment']) {
+        await check(`action settings navigation precedence ${category} creates one timer and click`, () => using([
+            category === 'assessment' ? assessmentPage() : category === 'nextChapter'
+                ? '<div class="prev_title" title="视频"></div><div id="coursetree"><ul><li><ul>' + node(0, true, true) + '</ul></li><li><ul>' + node(1) + '</ul></li></ul></div><iframe info="card"></iframe>' : outer(2, true),
+            category === 'assessment' ? 0 : 1,
+        ], async page => {
+            await shortSettings(page, { disableVideoStart: true });
+            await page.evaluate(category => {
+                window.__clickCount = 0; document.querySelector('#node1 .posCatalog_name').onclick = () => window.__clickCount++;
+                if (category === 'assessment') app.run(); else { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); }
+            }, category);
+            if (category !== 'assessment') await flush(page);
+            assert.equal(await page.evaluate(() => app._actions.pending.get('navigation').category), category);
+            assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+            assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [ranges[category][0]]);
+            await page.evaluate(() => { app.nextUnit(); app.nextUnit(); });
+            await flush(page); assert.equal(await page.evaluate(() => window.__clickCount), 1);
+        }));
+    }
+    await check('action settings next document first step has one nextDocument delay', () => using([outer(2), 0], async page => {
+        await shortSettings(page, { allFeatures: true }); await installDocuments(page, 2);
+        for (let i = 0; i < 40; i++) {
+            if (await page.evaluate(() => app._actions.pending.get('document-step')?.category === 'nextDocument')) break;
+            await flush(page);
+        }
+        assert.equal(await page.evaluate(() => app._actions.pending.get('document-step').category), 'nextDocument');
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+        const delay = await page.evaluate(() => [...window.__timeoutDelays.values()][0]); assert.ok(delay >= 500 && delay <= 1500);
+        await flush(page); assert.equal(await page.evaluate(() => app._actions.pending.get('document-step').category), 'documentScroll');
+    }));
+    await check('action settings live open and return are delayed once with no stacked catalog cooldown', () => using(liveOptions, async page => {
+        await shortSettings(page, { allFeatures: true });
+        const child = await startLive(page, { beforeOpen: async page => {
+            assert.equal(await state(page), 'WAITING_LIVE');
+            assert.equal(await page.evaluate(() => window.__openCalls), 0);
+            assert.equal(await page.evaluate(() => app._actions.pending.get('live-open').category), 'liveOpen');
+            await flush(page);
+        } });
+        await child.waitForFunction(() => window.__plays === 1);
+        await confirmParentMarker(page);
+        await child.evaluate(() => { window.__ended = true; window.__child.check(); });
+        await page.waitForFunction(() => app._actions.pending.has('live-return'));
+        assert.equal(child.isClosed(), false); assert.equal(await page.evaluate(() => app._actions.pending.get('live-return').category), 'liveReturn');
+        await page.evaluate(() => app._liveController.tick());
+        const closed = child.waitForEvent('close'); await flush(page); await closed;
+        await page.evaluate(() => app._liveController.tick());
+        assert.equal(await page.evaluate(() => app._actions.pending.has('navigation')), false);
+        assert.equal(await page.evaluate(() => app._actions.pending.get('video-start').category), 'videoStart');
+        await flush(page); assert.equal(await state(page), 'PLAYING');
+        assert.equal(await page.evaluate(() => window.__openCalls), 1);
+    }));
+    await check('action settings background toggle preserves immediate recovery without action timers', () => using([], async page => {
+        await shortSettings(page);
+        const result = await page.evaluate(() => {
+            const v = app._videoEl, before = v.__plays; const settings = JSON.parse(JSON.stringify(app.settings));
+            settings.features.background = false; app.updateSettings(settings); window.dispatchEvent(new Event('blur'));
+            v.__paused = true; app._checkVideoStatus(); const disabled = v.__plays - before;
+            settings.features.background = true; app.updateSettings(settings); const beforeEvent = v.__plays - before;
+            window.dispatchEvent(new Event('blur')); document.dispatchEvent(new Event('visibilitychange'));
+            return [disabled, beforeEvent, v.__plays - before, app._actions.pending.size, v.playbackRate];
+        });
+        assert.deepEqual(result, [0, 0, 1, 0, 1]);
+    }));
+    for (const reason of ['user', 'page', 'blocked', 'destroy']) {
+        await check(`action settings cancellation ${reason} rejects stale callbacks`, () => using([], async page => {
+            await shortSettings(page);
+            await page.evaluate(reason => {
+                window.__fired = 0; app._runAction('nextLesson', 'cancel-test', () => window.__fired++);
+                window.__stale = [...window.__timeouts.values()][0];
+                if (reason === 'user') document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                if (reason === 'page') document.querySelector('.prev_title').title = 'Different content';
+                if (reason === 'blocked') app._block('Synthetic safety stop');
+                if (reason === 'destroy') app.destroy();
+            }, reason);
+            await page.evaluate(() => window.__stale());
+            assert.equal(await page.evaluate(() => window.__fired), 0);
+            assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
+        }));
+    }
+    await check('action settings UI mounts compact, expands, validates and restores defaults', () => using([outer(), 1, false, null, false, true], async page => {
+        const host = page.locator('#xuexitong-v3-settings'); assert.equal(await host.count(), 1);
+        assert.equal(await host.locator('details').evaluate(el => el.open), false);
+        await host.locator('summary').click(); assert.equal(await host.locator('details').evaluate(el => el.open), true);
+        await host.locator('[data-preset]').selectOption('short');
+        assert.equal(await host.locator('input[data-feature]').count(), 8);
+        assert.equal(await host.locator('input[data-enable]').count(), 9);
+        const min = host.locator('input[data-category="nextLesson"][data-bound="minMs"]');
+        await min.fill('-1'); await min.dispatchEvent('change');
+        assert.equal(await page.evaluate(() => app.settings.delays.nextLesson.minMs), 1000);
+        assert.ok((await host.locator('[data-status]').textContent()).includes('整数毫秒'));
+        await min.fill('1137'); await min.dispatchEvent('change');
+        assert.equal(await page.evaluate(() => app.settings.delays.nextLesson.minMs), 1137);
+        await host.locator('[data-preset]').selectOption('legacy');
+        assert.equal(await page.evaluate(() => app.settings.delays.nextChapter.maxMs), 12000);
+        await host.locator('[data-reset]').click();
+        assert.equal(await page.evaluate(() => app.settings.preset), 'short');
+        assert.deepEqual(await page.evaluate(() => [app.settings.features.document, app.settings.features.live, app.settings.features.background]), [false, false, true]);
+        await page.evaluate(() => app.destroy()); assert.equal(await host.count(), 0);
+    }));
+    await check('action settings panel clicks do not cancel actions until a relevant setting changes', () => using([outer(), 1, false, null, false, true], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => { window.__fired = 0; app._runAction('nextLesson', 'panel-test', () => window.__fired++); });
+        const host = page.locator('#xuexitong-v3-settings'); await host.locator('summary').click();
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+        await host.locator('input[data-feature="nextLesson"]').uncheck();
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
+        await host.locator('input[data-feature="nextLesson"]').check();
+        await flush(page); assert.equal(await page.evaluate(() => window.__fired), 0);
+        assert.equal(await page.evaluate(() => app._videoEl.playbackRate), 1);
+    }));
+    await check('action settings persist whitelisted fields across a new document without account data', () => using([outer(), 1, false, null, false, true], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => {
+            const settings = JSON.parse(JSON.stringify(app.settings)); settings.features.nextLesson = false; settings.personalAccount = 'discard-me'; app.updateSettings(settings);
+        });
+        await page.evaluate(() => { app.settings.extraIdentity = 'discard-this-field'; });
+        await page.locator('#xuexitong-v3-settings').locator('summary').click();
+        await page.waitForFunction(() => JSON.parse(localStorage.getItem('xuexitong.v3.action-settings.v1')).collapsed === false);
+        const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('xuexitong.v3.action-settings.v1')));
+        assert.equal(saved.extraIdentity, undefined);
+        assert.equal(saved.personalAccount, undefined); assert.equal(saved.features.nextLesson, false);
+        await page.reload(); await page.setContent(outer()); await page.addScriptTag({ content: jquery });
+        await page.evaluate(() => { window.setInterval = fn => { window.__boot = fn; return 1; }; });
+        await page.addScriptTag({ content: source }); await page.evaluate(() => window.__boot());
+        assert.equal(await page.evaluate(() => app.settings.features.nextLesson), false);
+        assert.equal(await page.locator('#xuexitong-v3-settings').count(), 1);
+    }));
+    await check('action settings edits never restart a completed task', () => using([outer(1, true)], async page => {
+        await page.evaluate(() => { window.__finishedVideo = app._videoEl; const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); }); await flush(page);
+        assert.equal(await state(page), 'FINISHED');
+        const before = await page.evaluate(() => window.__finishedVideo.__plays);
+        await shortSettings(page); await page.evaluate(() => { const s = JSON.parse(JSON.stringify(app.settings)); s.features.videoPlayback = false; app.updateSettings(s); s.features.videoPlayback = true; app.updateSettings(s); });
+        await flush(page); assert.equal(await state(page), 'FINISHED');
+        assert.equal(await page.evaluate(() => window.__finishedVideo.__plays), before);
+        assert.equal(await page.evaluate(() => app._completedVideos.has(window.__finishedVideo)), true);
+    }));
+    for (const disableDuringLoad of [false, true]) {
+        await check(`action settings video tab consumes one start delay; disabled during load=${disableDuringLoad}`, () => using([outer(1, false, '学习目标') + '<div class="prev_white">2视频</div>', 0], async page => {
+            await shortSettings(page);
+            await page.evaluate(() => {
+                document.querySelector('.prev_white').onclick = () => { document.querySelector('.prev_title').title = '视频'; window.__addVideos(1); };
+                app.run();
+            });
+            assert.equal(await page.evaluate(() => app._actions.pending.get('video-tab').category), 'videoStart');
+            await flush(page);
+            if (disableDuringLoad) await page.evaluate(() => { const s = JSON.parse(JSON.stringify(app.settings)); s.features.videoPlayback = false; app.updateSettings(s); });
+            await flush(page);
+            assert.equal(await page.evaluate(() => window.__actionDraws), 1);
+            assert.equal(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('video').__plays), disableDuringLoad ? 0 : 1);
+        }));
+    }
+    await check('action settings ended player invalidates pending startup without replay', () => using([], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => { const v = app._videoEl; v.__plays = 0; v.__paused = true; app.run(); v.__ended = true; });
+        await flush(page);
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => app._videoEl.__plays), 0);
+    }));
+    await check('action settings disabling next chapter also cancels a pending assessment handoff', () => using([assessmentPage(), 0], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => {
+            window.__handoff = 0; document.querySelector('#node1 .posCatalog_name').onclick = () => window.__handoff++;
+            app.run(); const stale = [...window.__timeouts.values()][0];
+            const s = JSON.parse(JSON.stringify(app.settings)); s.features.nextChapter = false; app.updateSettings(s); stale();
+        });
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
+        assert.equal(await page.evaluate(() => window.__handoff), 0);
+    }));
+    await check('action settings disabling live cancels a delayed popup before creation', () => using(liveOptions, async page => {
+        await shortSettings(page, { allFeatures: true });
+        await page.evaluate(() => {
+            const doc = document.querySelector('iframe').contentDocument;
+            doc.body.innerHTML = '<a target="_blank" href="https://course.test/live">Synthetic lecture</a>';
+            app.taskAdapter = { discover: () => ({ tasks: [{ kind: 'live', element: doc.querySelector('a') }], validateScope: () => true }) };
+            window.__opens = 0; window.open = () => { window.__opens++; return null; }; app.run();
+            const stale = [...window.__timeouts.values()][0]; const s = JSON.parse(JSON.stringify(app.settings)); s.features.live = false; app.updateSettings(s); stale();
+        });
+        assert.equal(await page.evaluate(() => window.__opens), 0);
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
+    }));
+    await check('action settings zero-delay document steps remain incremental and nonblocking', () => using([outer(), 0], async page => {
+        await shortSettings(page, { allFeatures: true }); await installDocuments(page);
+        await page.evaluate(() => { const s = JSON.parse(JSON.stringify(app.settings)); s.randomDelaysEnabled = false; app.updateSettings(s); app.run(); });
+        assert.equal(await state(page), 'READING_DOCUMENT');
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [0]);
+        assert.equal(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('.synthetic-document').scrollTop), 0);
+        await flush(page);
+        const top = await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('.synthetic-document').scrollTop);
+        assert.ok(top > 0 && top < 600);
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [0]);
+    }));
+    await check('action settings custom long video-tab wait does not consume loading retries', () => using([outer(1, false, '学习目标') + '<div class="prev_white">2视频</div>', 0], async page => {
+        await shortSettings(page);
+        await page.evaluate(() => {
+            const s = JSON.parse(JSON.stringify(app.settings)); s.preset = 'custom'; s.delays.videoStart.minMs = 120000; s.delays.videoStart.maxMs = 120000; app.updateSettings(s);
+            app.run(); for (let i = 0; i < 50; i++) app.play();
+        });
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+        assert.equal(await page.evaluate(() => app._tryTimes), 0);
+        assert.ok(await page.evaluate(() => [...window.__timeoutDelays.values()].includes(120000)));
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

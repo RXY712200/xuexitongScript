@@ -414,3 +414,129 @@ RESULT: 128 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no
 - No real profile is registered. Synthetic tests explicitly inject adapters into a known test scope; users must not infer real Chaoxing compatibility or universal CAPTCHA recognition.
 
 Only source, generated userscript, tests and sanitized documentation are published to the fork review branch. No private HTML, platform-progress write, fabricated attendance, mouse simulation, fingerprint spoofing, runtime AI dependency, master merge, tag or release is included. Independent acceptance remains pending.
+
+## Universal short action delays and per-feature settings panel
+
+Parent baseline: `64900befe4ffa90effc8333077dcb7677ac4a8e6`. This section supersedes the earlier lesson-only 5000–12000ms default. Metadata remains V3.4.0. Engineering checks pass; authenticated platform acceptance and real document/live adapter evidence remain outstanding.
+
+### Settings and defaults
+
+The compact Chinese `学习设置` panel mounts once in a Shadow DOM at the course page's upper-right corner, initially collapsed. It has independent switches for video playback, next video, next lesson, next chapter, assessment handoff, document reading, live coordination and background protection, plus a global randomized-delay switch. Background protection and ordinary video/navigation switches default on; document/live default off and their evidence adapters remain null. Every action category has its own delay checkbox and integer minimum/maximum fields.
+
+| Category | Short preset inclusive milliseconds |
+| --- | --- |
+| videoStart | 300–900 |
+| nextVideo | 500–1500 |
+| documentScroll | 400–1200 |
+| nextDocument | 500–1500 |
+| nextLesson | 1000–2500 |
+| nextChapter | 1500–3500 |
+| assessment | 1000–2500 |
+| liveOpen | 500–1500 |
+| liveReturn | 500–1500 |
+
+Short is the default. The legacy preset supplies 5000–12000ms ranges; custom fields permit nonnegative integer milliseconds up to 2147483647, with min <= max. Invalid input is rejected immediately without saving. Restore Defaults restores short ranges and default feature flags. The panel does not display account/course/session data.
+
+Only a validated, whitelisted settings schema is saved under `xuexitong.v3.action-settings.v1` in same-origin localStorage. The schema contains version, preset, collapsed state, feature booleans and action ranges; unknown fields are discarded, including during collapse/expand persistence. Storage denial falls back to in-memory operation. Storage events synchronize settings with same-origin coordinators; live completion messages do not use storage. @grant none, @match, dependencies and existing build conventions are unchanged.
+
+`app.settings` / `app.updateSettings()` expose the validated configuration. Legacy `configs.autoplay` and `randomCooldownEnabled` are aliases to the corresponding feature/global settings. The old min/max cooldown fields remain navigation compatibility overrides only under the explicitly selected legacy preset; the category panel is the current configuration surface. Preset changes preserve feature selections; Restore Defaults restores them too.
+
+### Shared scheduler and no stacking
+
+One reusable createActionScheduler implementation serves course actions, document steps, live open/close and the child player's startup. Each logical action has one pending key; duplicate requests reuse the existing pending action rather than sample again. Enabled waits use `min + floor(Math.random() * (max - min + 1))`, including endpoints and single-millisecond variation, with three-decimal seconds in logs. Global/category delay switches remove the random wait, not the automation feature. Zero-delay recurring document steps still yield through a cancellable setTimeout, avoiding synchronous scroll loops.
+
+The wrapper captures coordinator generation, active node, title, URL and cards Document, plus action-specific eligibility. It validates before scheduling and before execution. Temporary DOM/lifecycle watchers cancel obsolete actions, manual navigation, blocking, destruction and affected settings changes. Settings-panel interactions are excluded from generic page-click cancellation; actual relevant setting changes still cancel the matching action. Cancelled work does not automatically restart when a switch is re-enabled. Native videos already playing normally are neither paused nor replayed. Disabling one unrelated feature does not stop normal playback. The panel and its storage listener are removed on destruction.
+
+Chapter navigation takes precedence over lesson navigation; assessment handoff has its own category and also requires next-chapter permission. A video-tab selection and its subsequent player start share a single videoStart wait. Within-lesson video transitions use nextVideo. A next document's first increment uses nextDocument rather than stacking another documentScroll delay; subsequent increments use documentScroll. Live close/return uses one liveReturn action after a validated child result, then bypasses redundant catalog waiting after actual closure and required platform confirmation. Any subsequent video playback is a separate videoStart action. Opening waits in WAITING_LIVE before calling window.open, so duplicate requests cannot create another window. Custom long video-tab waits do not consume player-loading retries before the tab action runs.
+
+Completion recognition, verification, warnings, cancellation and destruction remain immediate. Document-bottom confirmation only yields with a nonrandom zero-delay check; actual scroll increments alone receive action waits. Pause/focus/stall recovery retains its original timing and cooldown, with only an explicit default-on background feature gate. Live heartbeat/session checking is never used as randomized completion or elapsed-time credit.
+
+### Executed validation
+
+Commands run from the repository with the locally resolved Playwright/jQuery environment described earlier:
+
+```text
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs
+node tests/customization-v3.mjs
+node tests/preserved-v3.mjs
+node tests/navigation-v3.mjs
+node --check (all 12 JS/MJS files)
+git diff --cached --check
+```
+
+All passed. The suite retains the previous 128 scenarios and adds 51 action/settings scenarios: **179 passed, 0 failed** (eight private-reference DOM cases and 171 synthetic cases). Historical immediate-navigation tests explicitly disable other action waits; former long-cooldown cases explicitly select legacy timing. Live-return expectations now assert that no extra catalog cooldown is stacked. Startup-error fixtures explicitly model paused startup rather than replaying an already active video.
+
+New cases cover every category's minimum/maximum, integer resolution, independent draws, three-decimal logs, disabled global/category delays, independent feature cancellation, navigation precedence, next-video/document integration, delayed live open/return, instantaneous recovery with no action timer, stale callbacks and page changes, compact UI mounting/collapse/expansion, input validation, legacy/default/custom controls, persistence across a fresh document, whitelist filtering and cleanup. They also cover settings edits after completion, disabling video during tab loading, an ended player invalidating startup, disabling next chapter during assessment handoff, cancelling a not-yet-open popup, nonblocking zero-delay document increments and a long custom video-tab wait.
+
+Preservation checks compare exact guard/monitor/completion code, catalog/media discovery, chapter eligibility and live-message validation against the reviewed parent. Background recovery differs only by the user-controlled background gate. The existing source/userscript payload identity, DeepSeek/legacy preservation and 1.0x checks remain. Actual output includes:
+
+```text
+V3 source and userscript payload are synchronized and syntactically valid.
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+PASS: immediate recovery/monitoring, legitimate completion, chapter rules, scoped discovery and live message validation preserved; explicit background switch is the only recovery gate.
+RESULT: 179 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+```
+
+All new-case output follows:
+
+```text
+PASS action settings videoStart minimum integer bound
+PASS action settings videoStart maximum integer bound
+PASS action settings nextVideo minimum integer bound
+PASS action settings nextVideo maximum integer bound
+PASS action settings documentScroll minimum integer bound
+PASS action settings documentScroll maximum integer bound
+PASS action settings nextDocument minimum integer bound
+PASS action settings nextDocument maximum integer bound
+PASS action settings nextLesson minimum integer bound
+PASS action settings nextLesson maximum integer bound
+PASS action settings nextChapter minimum integer bound
+PASS action settings nextChapter maximum integer bound
+PASS action settings assessment minimum integer bound
+PASS action settings assessment maximum integer bound
+PASS action settings liveOpen minimum integer bound
+PASS action settings liveOpen maximum integer bound
+PASS action settings liveReturn minimum integer bound
+PASS action settings liveReturn maximum integer bound
+PASS action settings independently draw single-millisecond values and log three decimals
+PASS action settings disabled global delays do not sample or queue a wait
+PASS action settings disabled category delays do not sample or queue a wait
+PASS action settings independent feature switch videoPlayback
+PASS action settings independent feature switch nextVideo
+PASS action settings independent feature switch nextLesson
+PASS action settings independent feature switch nextChapter
+PASS action settings independent feature switch assessment
+PASS action settings independent feature switch document
+PASS action settings independent feature switch live
+PASS action settings default video startup delays once and does not replay active video
+PASS action settings within-lesson next video uses only nextVideo category
+PASS action settings navigation precedence nextLesson creates one timer and click
+PASS action settings navigation precedence nextChapter creates one timer and click
+PASS action settings navigation precedence assessment creates one timer and click
+PASS action settings next document first step has one nextDocument delay
+PASS action settings live open and return are delayed once with no stacked catalog cooldown
+PASS action settings background toggle preserves immediate recovery without action timers
+PASS action settings cancellation user rejects stale callbacks
+PASS action settings cancellation page rejects stale callbacks
+PASS action settings cancellation blocked rejects stale callbacks
+PASS action settings cancellation destroy rejects stale callbacks
+PASS action settings UI mounts compact, expands, validates and restores defaults
+PASS action settings panel clicks do not cancel actions until a relevant setting changes
+PASS action settings persist whitelisted fields across a new document without account data
+PASS action settings edits never restart a completed task
+PASS action settings video tab consumes one start delay; disabled during load=false
+PASS action settings video tab consumes one start delay; disabled during load=true
+PASS action settings ended player invalidates pending startup without replay
+PASS action settings disabling next chapter also cancels a pending assessment handoff
+PASS action settings disabling live cancels a delayed popup before creation
+PASS action settings zero-delay document steps remain incremental and nonblocking
+PASS action settings custom long video-tab wait does not consume loading retries
+RESULT: 179 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+```
+
+### Publication scope and limitations
+
+Only six files change: v3_optimized.js, its generated userscript, navigation/preservation tests, README and this review report. Private HTML remains locally excluded and untracked. No real document/live adapter, external service, progress write, AI runtime, grant change, fingerprint spoofing or release is added.
+
+These are local Chrome DOM/UI/popup tests. Media, timers, and long-session clocks remain simulated; no authenticated Chaoxing playback, physical application/tab switching or real viewer/live integration has been executed. Browser throttling may delay callbacks beyond the sampled interval. Delayed window.open may be blocked by real popup policy; that remains a safe stop. Native storage can be denied, and settings are scoped by browser origin. A cancelled/disabled action pauses automation and may require explicit manual selection/re-identification; re-enabling a setting never silently replays a completed task. Fixed-corner UI needs live layout acceptance on the user's actual course page. Independent ChatGPT review is pending before any merge into master.

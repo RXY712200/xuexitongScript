@@ -131,6 +131,88 @@
         },
     };
 
+    const SETTINGS_KEY = 'xuexitong.v3.action-settings.v1';
+    const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', nextLesson: '自动下一课节',
+        nextChapter: '自动下一章节', assessment: '章末测验交接', document: '文档阅读', live: '直播窗口协调', background: '后台播放保护' };
+    const ACTIONS = {
+        videoStart: ['视频开始', 300, 900, 'videoPlayback'], nextVideo: ['课内下一视频', 500, 1500, 'nextVideo'],
+        documentScroll: ['文档逐步滚动', 400, 1200, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
+        nextLesson: ['下一课节', 1000, 2500, 'nextLesson'], nextChapter: ['下一章节', 1500, 3500, 'nextChapter'],
+        assessment: ['测验交接', 1000, 2500, 'assessment'], liveOpen: ['打开直播窗口', 500, 1500, 'live'],
+        liveReturn: ['直播关闭与返回', 500, 1500, 'live'],
+    };
+    const navigationActions = new Set(['nextLesson', 'nextChapter', 'assessment', 'liveReturn']);
+    function defaultSettings(preset = 'short') {
+        return { version: 1, preset, collapsed: true, randomDelaysEnabled: true,
+            features: Object.fromEntries(Object.keys(FEATURES).map(key => [key, !['document', 'live'].includes(key)])),
+            delays: Object.fromEntries(Object.entries(ACTIONS).map(([key, [, minMs, maxMs]]) =>
+                [key, { enabled: true, minMs: preset === 'legacy' ? 5000 : minMs, maxMs: preset === 'legacy' ? 12000 : maxMs }])) };
+    }
+    function validateSettings(input) {
+        const result = defaultSettings();
+        if (!input || input.version !== 1) throw new Error('设置版本无效');
+        if (!['short', 'legacy', 'custom'].includes(input.preset)) throw new Error('预设无效');
+        result.preset = input.preset;
+        for (const field of ['collapsed', 'randomDelaysEnabled']) {
+            if (typeof input[field] !== 'boolean') throw new Error('开关值无效');
+            result[field] = input[field];
+        }
+        for (const key of Object.keys(FEATURES)) {
+            if (typeof input.features?.[key] !== 'boolean') throw new Error('功能开关无效');
+            result.features[key] = input.features[key];
+        }
+        for (const key of Object.keys(ACTIONS)) {
+            const rule = input.delays?.[key];
+            if (!rule || typeof rule.enabled !== 'boolean' || !Number.isSafeInteger(rule.minMs) ||
+                !Number.isSafeInteger(rule.maxMs) || rule.minMs < 0 || rule.maxMs < rule.minMs || rule.maxMs > 2147483647) {
+                throw new Error('延迟范围须为非负整数毫秒，且最小值不大于最大值');
+            }
+            result.delays[key] = { enabled: rule.enabled, minMs: rule.minMs, maxMs: rule.maxMs };
+        }
+        return result;
+    }
+    function loadSettings(env) {
+        try { const raw = env.localStorage.getItem(SETTINGS_KEY); return raw ? validateSettings(JSON.parse(raw)) : defaultSettings(); }
+        catch (_) { return defaultSettings(); }
+    }
+    // The same scheduler serves parent actions, document steps and child-player startup.
+    function createActionScheduler(env, { rule, enabled, onQueued = () => {}, onDone = () => {}, onError = () => {} }) {
+        const pending = new Map();
+        const run = (category, key, callback, options = {}) => {
+            if (pending.has(key)) return pending.get(key);
+            const range = rule(category);
+            if (!ACTIONS[category] || !range || !Number.isSafeInteger(range.minMs) || !Number.isSafeInteger(range.maxMs) ||
+                range.minMs < 0 || range.maxMs < range.minMs || range.maxMs > 2147483647) {
+                onError('自动动作延迟配置无效'); return null;
+            }
+            if (!enabled(category)) { options.onCancel?.('feature'); return null; }
+            if (options.isValid && !options.isValid()) { options.onCancel?.('stale'); return null; }
+            const delay = range.enabled ? range.minMs + Math.floor(Math.random() * (range.maxMs - range.minMs + 1)) : 0;
+            const action = { category, key, done: false, timer: null, cleanup: null, cancel(reason = 'cancel') {
+                if (action.done) return;
+                action.done = true; pending.delete(key);
+                if (action.timer !== null) { env.clearTimeout(action.timer); onDone(action.timer); }
+                action.cleanup?.(); options.onCancel?.(reason);
+            } };
+            const fire = () => {
+                if (action.done) return;
+                if (options.isValid && !options.isValid()) return action.cancel('stale');
+                action.done = true; pending.delete(key); action.cleanup?.();
+                if (action.timer !== null) onDone(action.timer);
+                callback();
+            };
+            pending.set(key, action);
+            if (range.enabled) console.log(`${navigationActions.has(category) ? '导航冷却' : '自动动作 ' + ACTIONS[category][0]} ${(delay / 1000).toFixed(3)}s`);
+            if (delay || options.defer) {
+                action.cleanup = options.watch?.(() => action.cancel('user')) || null;
+                action.timer = env.setTimeout(fire, delay); onQueued(action.timer);
+            } else fire();
+            return action;
+        };
+        return { run, pending, cancelAll(reason = 'cancel') { for (const action of [...pending.values()]) action.cancel(reason); },
+            cancelWhere(test, reason = 'settings') { for (const action of [...pending.values()]) if (test(action.category)) action.cancel(reason); } };
+    }
+
     // Evidence adapters are opt-in. No live URL, player selector or document viewer is guessed.
     function createTaskSupport(env) {
         const protocol = 'xuexitong-live-v1';
@@ -146,7 +228,7 @@
                 types.has(data.type) && Number.isSafeInteger(data.seq) && data.seq > session.received &&
                 Number.isFinite(data.timestamp) && data.timestamp >= session.started - 5000 && data.timestamp <= Date.now() + 30000;
         };
-        function createParent({ entry, generation, threshold, isValid, onResult, onError }) {
+        function createParent({ entry, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn() }) {
             const url = new URL(entry.href, env.location.href);
             if (!entry.isConnected || entry.tagName !== 'A' || entry.target !== '_blank' ||
                 entry.relList?.contains('noopener') || entry.relList?.contains('noreferrer') || url.origin !== env.location.origin ||
@@ -163,8 +245,10 @@
             const tick = () => {
                 if (disposed) return;
                 if (!isValid()) return fail('Original live task changed');
+                if (!child) return;
                 if (child.closed) {
                     if (!result) return fail('Live window closed before a validated result');
+                    if (!closeAttempted) return;
                     dispose(); onResult(result); return;
                 }
                 try {
@@ -172,6 +256,7 @@
                         (childDocument && child.document !== childDocument)) {
                         return fail('Live window left its supported document/origin');
                     }
+                    if (result && !closeAttempted) return;
                     if (closeAttempted) return fail('Live window closure denied or not confirmed; handle manually');
                     send(child, session, 'LIVE_OPENED', { threshold });
                 } catch (_) { fail('Live window communication unavailable'); }
@@ -196,8 +281,11 @@
                     data.position <= data.duration + 1;
                 if (!ended && !near) return;
                 result = { kind: near ? 'near-end' : 'completed', basis: near ? 'local-position' : 'local-ended' };
-                closeAttempted = true;
-                try { child.close(); } catch (_) { return fail('Live window closure denied; handle manually'); }
+                scheduleClose(() => {
+                    if (disposed || !isValid()) return;
+                    closeAttempted = true;
+                    try { child.close(); } catch (_) { fail('Live window closure denied; handle manually'); }
+                });
                 // Closure is confirmed on the next poll, not inferred from close() succeeding.
             }
             return {
@@ -216,10 +304,16 @@
             if (env.__xuexitongLiveChild && !env.__xuexitongLiveChild.disposed) return env.__xuexitongLiveChild;
             if (!env.opener || !adapter || typeof adapter.isRecognized !== 'function' || !adapter.isRecognized()) return null;
             let session = null, video = null, timer, terminal = false, disposed = false;
+            let settings = loadSettings(env);
+            const actions = createActionScheduler(env, {
+                rule: category => ({ ...settings.delays[category], enabled: settings.randomDelaysEnabled && settings.delays[category].enabled }),
+                enabled: () => settings.features.live && settings.features.videoPlayback,
+                onError: () => report('LIVE_ERROR'),
+            });
             const listeners = [];
             const listen = (target, type, handler) => { target.addEventListener(type, handler); listeners.push([target, type, handler]); };
             const dispose = () => {
-                disposed = true; env.clearInterval(timer);
+                disposed = true; env.clearInterval(timer); actions.cancelAll();
                 for (const [target, type, handler] of listeners) target.removeEventListener(type, handler);
             };
             const report = (type, extra) => { if (session && !disposed && env.opener && !env.opener.closed) send(env.opener, session, type, extra); };
@@ -254,40 +348,55 @@
                     listen(video, 'ratechange', () => { if (video.playbackRate !== 1) video.playbackRate = 1; });
                     for (const type of ['timeupdate', 'durationchange', 'ended', 'play']) listen(video, type, check);
                     report('LIVE_READY');
-                    video.play().catch(() => report('LIVE_ERROR'));
+                    actions.run('videoStart', 'child-video-start', () => video.play().catch(() => report('LIVE_ERROR')),
+                        { isValid: () => !disposed && !!env.opener && !env.opener.closed && video.isConnected && adapter.isRecognized() });
                     timer = env.setInterval(check, 10000);
                 }
                 if (!accept(event, session, env.opener)) return;
                 session.received = data.seq;
                 check();
             });
+            listen(env, 'storage', event => { if (event.key === SETTINGS_KEY) {
+                const previous = settings; settings = loadSettings(env);
+                if (previous.features.live !== settings.features.live || previous.features.videoPlayback !== settings.features.videoPlayback ||
+                    previous.randomDelaysEnabled !== settings.randomDelaysEnabled || JSON.stringify(previous.delays.videoStart) !== JSON.stringify(settings.delays.videoStart)) actions.cancelAll('settings');
+                if (!settings.features.live) { report('LIVE_ERROR'); dispose(); }
+            } });
             listen(env, 'pagehide', () => { if (!terminal) report('LIVE_CLOSED'); dispose(); });
             if (env[BOOT_TIMER_KEY]) { env.clearInterval(env[BOOT_TIMER_KEY]); env[BOOT_TIMER_KEY] = null; }
             return env.__xuexitongLiveChild = { check, dispose, get active() { return !!session; }, get disposed() { return disposed; } };
         }
-        function readDocument({ element, isValid, onComplete, onError }) {
-            let timer, cancelled = false, previous = -1, unchanged = 0, bottomHeight = -1;
-            const cancel = () => { cancelled = true; env.clearTimeout(timer); };
+        function readDocument({ element, isValid, onComplete, onError, scheduleStep }) {
+            let timer, scheduled, cancelled = false, previous = -1, unchanged = 0, bottomHeight = -1, begun = false;
+            const cancel = () => { cancelled = true; env.clearTimeout(timer); scheduled?.cancel(); };
             const fail = reason => { cancel(); onError(reason); };
             const tick = () => {
                 if (cancelled) return;
                 if (!isValid() || !element.isConnected || element.clientHeight <= 0) return fail('Document viewer unavailable');
                 const bottom = element.scrollHeight - element.clientHeight;
                 if (!Number.isFinite(bottom) || bottom < 0) return fail('Document bottom cannot be verified');
-                if (element.scrollTop >= bottom - 1) {
+                if (begun && element.scrollTop >= bottom - 1) {
                     if (bottomHeight === element.scrollHeight) { cancel(); onComplete(); return; }
                     bottomHeight = element.scrollHeight;
-                } else {
-                    bottomHeight = -1;
-                    if (element.scrollTop === previous) unchanged++; else unchanged = 0;
-                    if (unchanged >= 10) return fail('Document scrolling made no progress');
-                    previous = element.scrollTop;
-                    element.scrollTop = Math.min(bottom, element.scrollTop + 40 + Math.floor(Math.random() * 81));
+                    timer = env.setTimeout(tick, 0); // Verification yields, but is never randomized.
+                    return;
                 }
-                timer = env.setTimeout(tick, 400 + Math.floor(Math.random() * 801));
+                bottomHeight = -1;
+                if (begun && element.scrollTop === previous) unchanged++; else unchanged = 0;
+                if (unchanged >= 10) return fail('Document scrolling made no progress');
+                previous = element.scrollTop;
+                const step = () => {
+                    if (cancelled) return;
+                    if (!isValid() || !element.isConnected || element.clientHeight <= 0) return fail('Document viewer unavailable');
+                    if (!begun) { element.scrollTop = 0; begun = true; }
+                    element.scrollTop = Math.min(element.scrollHeight - element.clientHeight,
+                        element.scrollTop + 40 + Math.floor(Math.random() * 81));
+                    tick();
+                };
+                if (scheduleStep) scheduled = scheduleStep(step);
+                else timer = env.setTimeout(step, 400 + Math.floor(Math.random() * 801));
             };
-            element.scrollTop = 0;
-            timer = env.setTimeout(tick, 400);
+            tick();
             return { cancel, tick };
         }
         return { createParent, installChild, readDocument };
@@ -338,6 +447,10 @@
                 this._processedTasks = new WeakSet();
                 this._externalCompletion = null;
                 this._hadLive = false;
+                this._liveReturnPendingNavigation = false;
+                this._preparedVideoNode = null;
+                this._lastProcessedKind = null;
+                this._nextVideoRequested = false;
                 this._completionNode = null;
                 this._completionVideo = null;
                 this._tryTimes = 0;
@@ -352,7 +465,7 @@
                 this.play();
             },
             nextUnit() {
-                if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state) || this._nextUnitPending) return;
+                if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
@@ -369,6 +482,139 @@
                     return;
                 }
                 this._queueNavigation(next);
+            },
+            updateSettings(input, persist = true) {
+                let next;
+                try { next = validateSettings(input); } catch (error) { this._settingsMessage = error.message; return false; }
+                const previous = this.settings;
+                this.settings = next;
+                if (previous.preset !== next.preset && next.preset === 'legacy') {
+                    this.configs.randomCooldownMinMs = 5000; this.configs.randomCooldownMaxMs = 12000;
+                }
+                this._actions.cancelWhere(category => !this._actionEnabled(category) ||
+                    previous.randomDelaysEnabled !== next.randomDelaysEnabled ||
+                    JSON.stringify(previous.delays[category]) !== JSON.stringify(next.delays[category]));
+                if ((!next.features.document && this._documentController) ||
+                    (!next.features.live && this._liveController)) this._block('对应功能已关闭');
+                if (next.features.background && !this._pageGuards) this._bindPageGuards();
+                if (!next.features.background) this._removePageGuards();
+                if (persist) {
+                    try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); this._settingsMessage = '已保存；取消的动作不会自动重启'; }
+                    catch (_) { this._settingsMessage = '存储不可用，本页设置仍生效'; }
+                }
+                this._renderSettings?.();
+                return true;
+            },
+            _actionEnabled(category) {
+                return !this._destroyed && this.settings.features[ACTIONS[category][3]] &&
+                    (category !== 'nextVideo' || this.settings.features.videoPlayback) &&
+                    (category !== 'assessment' || this.settings.features.nextChapter) &&
+                    (!['videoStart', 'nextVideo'].includes(category) || this.configs.autoplay);
+            },
+            _actionRule(category) {
+                const value = { ...this.settings.delays[category] };
+                if (this.settings.preset === 'legacy' && navigationActions.has(category)) {
+                    value.minMs = this.configs.randomCooldownMinMs; value.maxMs = this.configs.randomCooldownMaxMs;
+                }
+                value.enabled = value.enabled && this.settings.randomDelaysEnabled;
+                return value;
+            },
+            _runAction(category, key, callback, options = {}) {
+                const generation = this._generation, node = catalog.current(), title = this._currentStepTitle();
+                const href = window.location.href, content = videoAdapter.cardDocument();
+                const valid = () => !this._destroyed && generation === this._generation && node === catalog.current() &&
+                    title === this._currentStepTitle() && href === window.location.href && content === videoAdapter.cardDocument() &&
+                    this._actionEnabled(category) && (!options.isValid || options.isValid());
+                return this._actions.run(category, key, callback, { ...options, isValid: valid,
+                    onCancel: reason => {
+                        options.onCancel?.(reason);
+                        if (this._destroyed || ['BLOCKED', 'ADVANCING'].includes(this._state)) return;
+                        if (['user', 'stale'].includes(reason)) this._block('自动动作上下文已变化');
+                        else {
+                            if (this._isPlaying) return;
+                            this._documentController?.cancel(); this._documentController = null;
+                            this._liveController?.dispose(); this._liveController = null;
+                            this._state = 'PAUSED_AUTOMATION'; this._playPending = false;
+                        }
+                    },
+                    watch: cancel => {
+                        const observer = new MutationObserver(() => { if (!valid()) cancel(); });
+                        const listeners = [];
+                        const listen = (el, type, handler = cancel) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
+                        const click = event => { if (!event.composedPath().includes(this._settingsPanel)) cancel(); };
+                        for (const doc of new Set([document, ...this._discoverMedia().documents])) {
+                            observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
+                            listen(doc, 'click', click);
+                            for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');
+                        }
+                        if (this._completionVideo) listen(this._completionVideo, 'play');
+                        for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) listen(window, type);
+                        return () => { observer.disconnect(); for (const [el, type, fn] of listeners) el.removeEventListener(type, fn, true); this._cooldownCleanup = null; };
+                    },
+                });
+            },
+            _removePageGuards() {
+                if (!this._pageGuards) return;
+                const { preventPause, resumePlaybackNow } = this._pageGuards;
+                for (const type of ['mouseleave', 'mouseout']) {
+                    document.removeEventListener(type, preventPause); window.removeEventListener(type, preventPause);
+                }
+                window.removeEventListener('blur', resumePlaybackNow);
+                document.removeEventListener('visibilitychange', resumePlaybackNow);
+                this._pageGuards = null;
+            },
+            _mountSettingsPanel() {
+                if (typeof document.createElement !== 'function') return;
+                const host = document.createElement('div'); host.id = 'xuexitong-v3-settings';
+                host.style.cssText = 'position:fixed;right:8px;top:8px;z-index:2147483647;pointer-events:none';
+                const root = host.attachShadow({ mode: 'open' });
+                this._settingsPanel = host;
+                const render = () => {
+                    root.innerHTML = '<style>:host{font:12px/1.5 sans-serif;color:#222}details{pointer-events:auto;background:#fff;border:1px solid #aaa;border-radius:6px;box-shadow:0 2px 8px #0002}summary{padding:5px 9px;cursor:pointer}section{width:264px;max-height:65vh;overflow:auto;padding:8px;box-sizing:border-box}label{display:block;margin:3px 0}input[type=number]{width:65px;font:inherit}fieldset{margin:5px 0;padding:4px;border:1px solid #ddd}button,select{font:inherit}p{margin:5px 0}</style><details><summary>学习设置</summary><section><label><input type="checkbox" data-global>随机延迟总开关</label><label>预设 <select data-preset><option value="short">短延迟</option><option value="legacy">旧版长延迟</option><option value="custom">自定义</option></select></label><div data-features></div><div data-delays></div><button type="button" data-reset>恢复默认</button><p>文档、直播仍需已验证适配器。更改设置不会重启已完成任务。</p><p role="status" data-status></p></section></details>';
+                    root.querySelector('details').open = !this.settings.collapsed;
+                    root.querySelector('[data-global]').checked = this.settings.randomDelaysEnabled;
+                    root.querySelector('[data-preset]').value = this.settings.preset;
+                    for (const [key, label] of Object.entries(FEATURES)) {
+                        const row = document.createElement('label'); const input = document.createElement('input');
+                        input.type = 'checkbox'; input.dataset.feature = key; input.checked = this.settings.features[key];
+                        row.append(input, label); root.querySelector('[data-features]').append(row);
+                    }
+                    for (const [key, [label]] of Object.entries(ACTIONS)) {
+                        const row = document.createElement('fieldset'); row.dataset.category = key;
+                        const legend = document.createElement('legend'); const check = document.createElement('input');
+                        check.type = 'checkbox'; check.dataset.enable = key; check.checked = this.settings.delays[key].enabled; legend.append(check, label); row.append(legend);
+                        for (const [bound, text] of [['minMs', '最小'], ['maxMs', '最大']]) {
+                            const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.max = '2147483647'; input.step = '1';
+                            input.dataset.category = key; input.dataset.bound = bound; input.value = this.settings.delays[key][bound]; input.setAttribute('aria-label', `${label}${text}毫秒`);
+                            row.append(text, input);
+                        }
+                        row.append(' ms'); root.querySelector('[data-delays]').append(row);
+                    }
+                    root.querySelector('[data-status]').textContent = this._settingsMessage || '仅保存功能和延迟设置，不保存账号或课程信息';
+                    root.querySelector('details').addEventListener('toggle', event => {
+                        this.settings.collapsed = !event.target.open;
+                        try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(validateSettings(this.settings))); } catch (_) { /* Page-only settings remain usable. */ }
+                    });
+                };
+                const change = event => {
+                    const input = event.target, next = JSON.parse(JSON.stringify(this.settings));
+                    if (input.dataset.feature) next.features[input.dataset.feature] = input.checked;
+                    else if (input.hasAttribute('data-global')) next.randomDelaysEnabled = input.checked;
+                    else if (input.hasAttribute('data-preset')) {
+                        if (input.value !== 'custom') next.delays = defaultSettings(input.value).delays;
+                        next.preset = input.value;
+                    } else if (input.dataset.enable) next.delays[input.dataset.enable].enabled = input.checked;
+                    else if (input.dataset.bound) {
+                        next.delays[input.dataset.category][input.dataset.bound] = input.value.trim() === '' ? NaN : Number(input.value); next.preset = 'custom';
+                    }
+                    if (!this.updateSettings(next)) root.querySelector('[data-status]').textContent = this._settingsMessage;
+                };
+                root.addEventListener('change', change);
+                root.addEventListener('click', event => { if (event.target.hasAttribute('data-reset')) { this.updateSettings(defaultSettings()); render(); } });
+                this._settingsStorage = event => { if (event.key === SETTINGS_KEY) { this.updateSettings(loadSettings(window), false); render(); } };
+                window.addEventListener('storage', this._settingsStorage);
+                this._renderSettings = render;
+                render(); document.body.append(host);
             },
             taskAdapter: null, // No real viewer/live profile is enabled without evidence.
             _processedTasks: new WeakSet(),
@@ -469,6 +715,7 @@
                     if (media.videos.some(video => !this._completedVideos.has(video))) return false;
                     this._verifyExternal(0); return true;
                 }
+                if (!this.settings.features[pending.kind === 'document' ? 'document' : 'live']) { this._state = 'PAUSED_AUTOMATION'; return true; }
                 this._cancelTasks();
                 this._detachVideoEvents();
                 this._videoEl = null;
@@ -486,6 +733,7 @@
                     this._documentController = null;
                     this._liveController = null;
                     this._processedTasks.add(pending.element);
+                    this._lastProcessedKind = pending.kind;
                     record.localDone = true; record.result = result;
                     console.log(record.kind === 'document' ? '文档已到可验证底部，仅记为本地操作完成。' : '直播窗口已关闭；本地结束信号不代表平台已计入完成。');
                     this._verifyExternal(0);
@@ -494,7 +742,12 @@
                 if (pending.kind === 'document') {
                     this._state = 'READING_DOCUMENT';
                     try {
+                        let first = true;
                         this._documentController = window.__xuexitongTaskSupport.readDocument({ element: pending.element,
+                            scheduleStep: tick => {
+                                const category = first && this._lastProcessedKind === 'document' ? 'nextDocument' : 'documentScroll'; first = false;
+                                return this._runAction(category, 'document-step', tick, { defer: true, isValid: () => this._taskContextValid(record) && pending.element.clientHeight > 0 });
+                            },
                             isValid: () => this._taskContextValid(record), onComplete: () => completed('local-bottom'), onError: failed });
                     } catch (_) { failed('文档视图不支持可验证的滚动'); }
                 } else {
@@ -504,8 +757,11 @@
                         this._liveController = window.__xuexitongTaskSupport.createParent({ entry: pending.element,
                             generation: record.generation, threshold: this.configs.liveNearEndThreshold,
                             isValid: () => this._state === 'WAITING_LIVE' && this._taskContextValid(record),
-                            onResult: completed, onError: failed });
-                        this._liveController.start();
+                            onResult: completed, onError: failed, scheduleClose: close => this._runAction('liveReturn', 'live-return', () => {
+                                this._liveReturnPendingNavigation = true; close();
+                            }, { isValid: () => this._taskContextValid(record) && this._state === 'WAITING_LIVE' }) });
+                        this._runAction('liveOpen', 'live-open', () => this._liveController?.start(),
+                            { isValid: () => this._taskContextValid(record) && this._state === 'WAITING_LIVE' });
                     } catch (_) { failed('直播入口或通信来源尚不受支持'); }
                 }
                 return true;
@@ -520,6 +776,7 @@
                 if (media.inaccessible || media.unsupported) return this._block('任务包含未知或不可访问的内容');
                 if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
                     media.videos.some(video => !this._completedVideos.has(video))) {
+                    this._liveReturnPendingNavigation = false;
                     this._state = 'DISCOVERING'; this.play(); return;
                 }
                 if ((this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') {
@@ -561,59 +818,21 @@
             _queueNavigation(target) {
                 if (this._state !== 'READY_TO_ADVANCE') return;
                 if (!this._navigationEligible(target)) return this._block('导航条件已变化');
-                if (!this.configs.randomCooldownEnabled) return this.playCurrentIndex(target);
-                const min = this.configs.randomCooldownMinMs;
-                const max = this.configs.randomCooldownMaxMs;
-                if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) ||
-                    min < 0 || max < min || max > 2147483647) {
-                    return this._block('导航冷却范围必须为有效的整数毫秒');
+                const entries = catalog.entries(), adjacent = entries[entries.indexOf(this._completionNode) + 1];
+                const assessment = this._externalCompletion?.kind === 'assessment' || adjacent !== target;
+                const chapter = this._chapterOf(target) !== this._chapterOf(this._completionNode);
+                const category = assessment ? 'assessment' : this._liveReturnPendingNavigation ? 'liveReturn' : chapter ? 'nextChapter' : 'nextLesson';
+                if (!this.settings.features[chapter ? 'nextChapter' : 'nextLesson'] || !this._actionEnabled(category)) {
+                    this._state = 'PAUSED_AUTOMATION'; return;
                 }
-                const generation = this._generation;
-                const node = this._completionNode;
-                const video = this._completionVideo;
-                const content = videoAdapter.cardDocument();
-                if (!content) return this._block('无法确认内容 iframe');
-                const delay = min + Math.floor(Math.random() * (max - min + 1));
+                if (this._liveReturnPendingNavigation) { this._liveReturnPendingNavigation = false; this.playCurrentIndex(target); return; }
                 this._state = 'NAVIGATION_COOLDOWN';
-                console.log(`导航冷却 ${(delay / 1000).toFixed(3)}s`);
-                const valid = () => generation === this._generation && node === this._completionNode &&
-                    video === this._completionVideo && content === videoAdapter.cardDocument() &&
-                    this._navigationEligible(target);
-                const cancel = () => this._block('页面操作或任务变化已取消导航冷却');
-                const observer = new MutationObserver(() => {
-                    if (this._state === 'NAVIGATION_COOLDOWN' && !valid()) cancel();
-                });
-                const listeners = [];
-                const listen = (element, event) => {
-                    element.addEventListener(event, cancel, true);
-                    listeners.push([element, event]);
-                };
-                // Watch only while waiting. No pauses, focus simulation or activity synthesis.
-                for (const doc of new Set([document, ...this._discoverMedia().documents])) {
-                    observer.observe(doc, { subtree: true, childList: true, attributes: true, characterData: true });
-                    listen(doc, 'click');
-                    for (const frame of doc.querySelectorAll('iframe')) {
-                        if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');
-                    }
-                }
-                if (video) listen(video, 'play');
-                listen(window, 'pagehide');
-                listen(window, 'beforeunload');
-                listen(window, 'popstate');
-                listen(window, 'hashchange');
-                this._cooldownCleanup = () => {
-                    observer.disconnect();
-                    for (const [element, event] of listeners) element.removeEventListener(event, cancel, true);
-                    this._cooldownCleanup = null;
-                };
-                this._schedule(() => {
-                    if (this._state !== 'NAVIGATION_COOLDOWN') return;
-                    if (!valid()) return this._block('冷却后导航条件未通过重新确认');
-                    this._cooldownCleanup();
-                    this._state = 'READY_TO_ADVANCE';
-                    this.playCurrentIndex(target);
-                }, delay);
+                this._runAction(category, 'navigation', () => {
+                    if (this._state !== 'NAVIGATION_COOLDOWN' || !this._navigationEligible(target)) return this._block('冷却后导航条件失效');
+                    this._state = 'READY_TO_ADVANCE'; this.playCurrentIndex(target);
+                }, { isValid: () => this._navigationEligible(target) });
             },
+            _cooldownCleanup: null,
             _state: 'DISCOVERING',
             _generation: 0,
             _timers: new Set(),
@@ -633,11 +852,11 @@
                 return timer;
             },
             _cancelTasks() {
+                this._actions?.cancelAll();
                 this._documentController?.cancel();
                 this._documentController = null;
                 this._liveController?.dispose();
                 this._liveController = null;
-                if (this._cooldownCleanup) this._cooldownCleanup();
                 this._generation++;
                 this._playPending = false;
                 for (const timer of this._timers) clearTimeout(timer);
@@ -684,6 +903,7 @@
                 if (next) {
                     this._videoEl = next;
                     this._state = 'READY';
+                    this._nextVideoRequested = true;
                     this.play();
                     return;
                 }
@@ -716,6 +936,7 @@
                 }, this.configs.videoCheckInterval);
             },
             _tryResumePlayback(reason) {
+                if (!this.settings.features.background) return;
                 const now = Date.now();
                 if (now - this._guardLastResumeTs < this.configs.guardResumeCooldownMs) {
                     return;
@@ -782,18 +1003,18 @@
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
-            async play() {
+            async play(actionReady = false) {
                 try {
                     if (this._isChapterTest()) {
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
                         this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
                         return this._block('当前播放页面或播放器已变化');
                     }
-                    if (this._playPending) return;
+                    if (this._playPending || this._actions.pending.has('video-start') || this._actions.pending.has('video-tab')) return;
                     if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
                     const tasks = this._discoverMedia();
@@ -814,6 +1035,17 @@
                     }
                     if (!catalog.current()) return this._block('无法唯一确定当前目录节点');
                     if (this._completedVideos.has(el)) return;
+                    if (this._isPlaying && !el.paused && !el.ended) { this._state = 'PLAYING'; return; }
+                    if (!this._actionEnabled(this._nextVideoRequested ? 'nextVideo' : 'videoStart')) { this._state = 'PAUSED_AUTOMATION'; return; }
+                    if (!actionReady && this._preparedVideoNode !== catalog.current()) {
+                        const category = this._nextVideoRequested ? 'nextVideo' : 'videoStart';
+                        this._state = 'ACTION_PENDING';
+                        this._runAction(category, 'video-start', () => { this._state = 'READY'; this.play(true); },
+                            { isValid: () => el.isConnected && !el.ended && !this._completedVideos.has(el) && el === this._getVideoEl() });
+                        return;
+                    }
+                    this._preparedVideoNode = null;
+                    this._nextVideoRequested = false;
                     const generation = this._generation;
                     const node = catalog.current();
                     this._playNode = node;
@@ -856,8 +1088,10 @@
                 if (tabs.length !== 1 || this._stepSwitchPending) return false;
                 this._stepSwitchPending = true;
                 this._stepSwitchAt = Date.now();
-                console.log('尝试点击“视频”页签');
-                tabs[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                this._runAction('videoStart', 'video-tab', () => {
+                    tabs[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    this._preparedVideoNode = catalog.current();
+                }, { isValid: () => tabs[0].isConnected });
                 return true;
             },
             _currentStepTitle() {
@@ -988,7 +1222,7 @@
                         this._tryTimes = 0;
                         this._state = 'DISCOVERING';
                         this._initCellData();
-                        if (this.configs.autoplay) this.play();
+                        this.play(); // Video, document and live switches are evaluated independently.
                     } else if (++attempts >= this.configs.maxRetries) {
                         this._block('目录切换或内容 iframe 加载未确认');
                     } else {
@@ -1112,6 +1346,9 @@
             },
             destroy() {
                 this._destroyed = true;
+                this._settingsPanel?.remove();
+                this._renderSettings = null;
+                window.removeEventListener('storage', this._settingsStorage);
                 this._cancelTasks();
                 this._state = 'BLOCKED';
                 this._isPlaying = false;
@@ -1137,12 +1374,26 @@
             get: () => 1.0,
             set: () => {},
         });
+        app.settings = loadSettings(window);
+        app._actions = createActionScheduler(window, {
+            rule: category => app._actionRule(category), enabled: category => app._actionEnabled(category),
+            onQueued: timer => app._timers.add(timer), onDone: timer => app._timers.delete(timer), onError: reason => app._block(reason),
+        });
+        Object.defineProperty(app.configs, 'randomCooldownEnabled', {
+            enumerable: true, get: () => app.settings.randomDelaysEnabled,
+            set: value => { const next = JSON.parse(JSON.stringify(app.settings)); next.randomDelaysEnabled = !!value; app.updateSettings(next); },
+        });
+        Object.defineProperty(app.configs, 'autoplay', {
+            enumerable: true, get: () => app.settings.features.videoPlayback,
+            set: value => { const next = JSON.parse(JSON.stringify(app.settings)); next.features.videoPlayback = !!value; app.updateSettings(next); },
+        });
+        app._mountSettingsPanel();
         window.app = app;
         window[APP_KEY] = app;
 
         try {
             app.run();
-            app._bindPageGuards();
+            if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);
             console.log("请检查是否在正确的课程播放页面，或者页面结构是否再次发生改变。");
