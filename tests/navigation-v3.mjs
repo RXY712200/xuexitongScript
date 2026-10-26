@@ -16,7 +16,7 @@ let passed = 0;
 const failures = [];
 const node = (i, active = false, complete = false) => `<li><div class="posCatalog_select ${active ? 'posCatalog_active' : ''}" id="node${i}"><span class="posCatalog_name" title="Content ${i}">Content ${i}</span>${complete ? '<span class="icon_Completed"></span>' : '<input class="jobUnfinishCount" value="1">'}</div></li>`;
 const outer = (entries = 1, complete = false, title = '视频') => `<div class="prev_title" title="${title}"></div><div id="coursetree"><ul><li><ul>${Array.from({ length: entries }, (_, i) => node(i, i === 0, complete)).join('')}</ul></li></ul></div><iframe info="card"></iframe>`;
-async function setup(html = outer(), count = 1, nested = false, scopeCase = null) {
+async function setup(html = outer(), count = 1, nested = false, scopeCase = null, enableCooldown = false) {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
     const page = await context.newPage();
@@ -38,8 +38,11 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
         Date.now = () => window.__clock;
         let id = 0;
         window.__timeouts = new Map(); window.__intervals = new Map();
-        window.setTimeout = fn => { window.__timeouts.set(++id, fn); return id; };
-        window.clearTimeout = id => window.__timeouts.delete(id);
+        window.__timeoutDelays = new Map(); window.__logs = [];
+        const log = console.log.bind(console);
+        console.log = (...args) => { window.__logs.push(args.join(' ')); log(...args); };
+        window.setTimeout = (fn, delay) => { window.__timeouts.set(++id, fn); window.__timeoutDelays.set(id, delay); return id; };
+        window.clearTimeout = id => { window.__timeouts.delete(id); window.__timeoutDelays.delete(id); };
         window.setInterval = fn => { window.__intervals.set(++id, fn); return id; };
         window.clearInterval = id => window.__intervals.delete(id);
         window.__addVideos = (count, nested = false) => {
@@ -77,13 +80,19 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
         }
     }, { count, nested, scopeCase, scopeMedia });
     await page.addScriptTag({ content: source });
-    await page.evaluate(async () => { for (const fn of [...window.__intervals.values()]) fn(); await Promise.resolve(); });
+    await page.evaluate(async enableCooldown => {
+        for (const fn of [...window.__intervals.values()]) fn();
+        await Promise.resolve();
+        window.__cooldownDefaults = [app.configs.randomCooldownEnabled, app.configs.randomCooldownMinMs, app.configs.randomCooldownMaxMs];
+        // Existing immediate-navigation scenarios explicitly disable the new option.
+        app.configs.randomCooldownEnabled = enableCooldown;
+    }, enableCooldown);
     return { page, close: () => context.close() };
 }
 async function flush(page, rounds = 1) {
     await page.evaluate(async rounds => {
         for (let i = 0; i < rounds; i++) {
-            const callbacks = [...window.__timeouts.values()]; window.__timeouts.clear();
+            const callbacks = [...window.__timeouts.values()]; window.__timeouts.clear(); window.__timeoutDelays.clear();
             for (const fn of callbacks) fn();
             await Promise.resolve(); await Promise.resolve();
         }
@@ -401,6 +410,137 @@ try {
         await flush(page);
         assert.equal(await state(page), 'PLAYING');
         assert.deepEqual(await page.evaluate(() => [document.querySelector('.posCatalog_active').id, window.__scopeClicks, app.cellData.currentNCellIndex, window.__auxReads]), ['leaf-38', 1, 38, 0]);
+    }));
+    const cooldownOptions = [outer(2, true), 1, false, null, true];
+    async function enterCooldown(page, random = 0.5) {
+        await page.evaluate(random => {
+            Math.random = () => { window.__randomDraws = (window.__randomDraws || 0) + 1; return random; };
+            window.__navClicks = 0;
+            document.querySelector('#node1 .posCatalog_name').onclick = () => window.__navClicks++;
+            const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended'));
+        }, random);
+        await flush(page);
+        assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+    }
+    for (const [random, expected] of [[0, 5000], [0.999999999, 12000], [327 / 7001, 5327], [4684 / 7001, 9684]]) {
+        await check(`synthetic cooldown integer milliseconds ${expected}`, () => using(cooldownOptions, async page => {
+            await enterCooldown(page, random);
+            assert.deepEqual(await page.evaluate(() => [window.__cooldownDefaults, [...window.__timeoutDelays.values()], window.__randomDraws, window.__navClicks]), [[true, 5000, 12000], [expected], 1, 0]);
+            assert.equal(await page.evaluate(() => window.__logs.filter(line => line.startsWith('导航冷却 ')).at(-1)), `导航冷却 ${(expected / 1000).toFixed(3)}s`);
+            await flush(page);
+            assert.equal(await page.evaluate(() => window.__navClicks), 1);
+        }));
+    }
+    await check('synthetic independent random draw for every eligible navigation', () => using([outer(4, true), 1, false, null, true], async page => {
+        await page.evaluate(() => {
+            const values = [0, 1 / 7001, 0.5]; window.__draws = 0;
+            Math.random = () => values[window.__draws++];
+            for (const index of [1, 2, 3]) document.querySelector(`#node${index} .posCatalog_name`).onclick = () => {
+                document.querySelector('.posCatalog_active').classList.remove('posCatalog_active'); document.querySelector(`#node${index}`).classList.add('posCatalog_active');
+                const f = document.createElement('iframe'); f.setAttribute('info', 'card'); document.querySelector('iframe[info="card"]').replaceWith(f); window.__addVideos(1);
+            };
+        });
+        const delays = [];
+        for (let index = 0; index < 3; index++) {
+            await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+            await flush(page);
+            delays.push(await page.evaluate(() => [...window.__timeoutDelays.values()][0]));
+            await flush(page); assert.equal(await state(page), 'PLAYING');
+        }
+        assert.deepEqual(delays, [5000, 5001, 8500]);
+        assert.equal(await page.evaluate(() => window.__draws), 3);
+    }));
+    await check('synthetic active playback and unconfirmed completion never draw a cooldown', () => using([outer(2), 1, false, null, true], async page => {
+        await page.evaluate(() => { window.__draws = 0; Math.random = () => { window.__draws++; return 0.5; }; });
+        assert.equal(await state(page), 'PLAYING');
+        assert.equal(await page.evaluate(() => app._timers.size), 0);
+        await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page, 12); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__draws), 0);
+    }));
+    await check('synthetic duplicate completion and nextUnit schedule only one cooldown', () => using(cooldownOptions, async page => {
+        await enterCooldown(page);
+        await page.evaluate(() => { const v = app._videoEl; v.dispatchEvent(new Event('ended')); app._checkVideoStatus(); app.nextUnit(); app.nextUnit(); });
+        assert.deepEqual(await page.evaluate(() => [app._timers.size, window.__randomDraws, window.__navClicks]), [1, 1, 0]);
+        await flush(page); assert.equal(await page.evaluate(() => window.__navClicks), 1);
+    }));
+    for (const cancel of ['destroy', 'block', 'click', 'chapter', 'title', 'pagehide', 'popstate', 'unsupported-task', 'player-replacement', 'target-removal', 'assessment', 'replay', 'content-reload', 'nested-click', 'completion-marker']) {
+        await check(`synthetic cooldown cancellation and stale callback: ${cancel}`, () => using(cooldownOptions, async page => {
+            await enterCooldown(page);
+            await page.evaluate(async cancel => {
+                window.__staleCooldown = [...window.__timeouts.values()][0];
+                if (cancel === 'destroy') app.destroy();
+                if (cancel === 'block') app._block('Synthetic stop');
+                if (cancel === 'click') document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                if (cancel === 'chapter') { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); }
+                if (cancel === 'title') document.querySelector('.prev_title').title = 'Unknown resource';
+                if (cancel === 'pagehide' || cancel === 'popstate') window.dispatchEvent(new Event(cancel));
+                if (cancel === 'unsupported-task') document.querySelector('iframe').contentDocument.body.append(document.createElement('audio'));
+                if (cancel === 'player-replacement') app._videoEl.remove();
+                if (cancel === 'target-removal') document.querySelector('#node1').remove();
+                if (cancel === 'assessment') document.querySelector('.prev_title').title = '章节测验';
+                if (cancel === 'replay') app._videoEl.dispatchEvent(new Event('play'));
+                if (cancel === 'content-reload') document.querySelector('iframe[info="card"]').dispatchEvent(new Event('load'));
+                if (cancel === 'nested-click') app._videoEl.ownerDocument.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                if (cancel === 'completion-marker') document.querySelector('#node0 .icon_Completed').remove();
+                await Promise.resolve(); await Promise.resolve();
+                window.__staleCooldown();
+            }, cancel);
+            assert.equal(await state(page), 'BLOCKED');
+            assert.deepEqual(await page.evaluate(() => [app._timers.size, window.__navClicks, app._cooldownCleanup]), [0, 0, null]);
+        }));
+    }
+    await check('synthetic expiry revalidates completion even without a mutation event', () => using(cooldownOptions, async page => {
+        await enterCooldown(page);
+        await page.evaluate(() => { document.querySelector('.jobUnfinishCount')?.remove(); document.querySelector('#node0').insertAdjacentHTML('beforeend', '<input class="jobUnfinishCount" value="0">'); });
+        // Let the observer see valid state, then change only the value property.
+        await page.evaluate(() => { document.querySelector('#node0 .jobUnfinishCount').value = '1'; });
+        await flush(page);
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__navClicks), 0);
+    }));
+    await check('synthetic expiry revalidates task ended state and generation', () => using(cooldownOptions, async page => {
+        await enterCooldown(page);
+        await page.evaluate(() => { app._completionVideo.__ended = false; });
+        await flush(page); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__navClicks), 0);
+    }));
+    await check('synthetic run invalidates stale cooldown generation', () => using(cooldownOptions, async page => {
+        await enterCooldown(page);
+        await page.evaluate(() => { const stale = [...window.__timeouts.values()][0]; app.run(); stale(); });
+        assert.equal(await page.evaluate(() => window.__navClicks), 0);
+        assert.notEqual(await state(page), 'ADVANCING');
+    }));
+    await check('synthetic disabled cooldown navigates without drawing randomness', () => using([outer(2, true)], async page => {
+        await page.evaluate(() => { Math.random = () => { throw new Error('disabled cooldown drew randomness'); }; window.__clicks = 0; document.querySelector('#node1 .posCatalog_name').onclick = () => window.__clicks++; const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page); assert.equal(await page.evaluate(() => window.__clicks), 1);
+    }));
+    for (const [min, max] of [[7000, 5000], [1.5, 12000], [0, 2147483648]]) {
+        await check(`synthetic invalid cooldown range ${min}/${max} safely blocks`, () => using(cooldownOptions, async page => {
+            await page.evaluate(({ min, max }) => { app.configs.randomCooldownMinMs = min; app.configs.randomCooldownMaxMs = max; const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); }, { min, max });
+            await flush(page); assert.equal(await state(page), 'BLOCKED');
+        }));
+    }
+    await check('synthetic cooldown does not weaken fixed rate or background recovery', () => using(cooldownOptions, async page => {
+        assert.deepEqual(await page.evaluate(() => { const v = app._videoEl; const before = v.__plays; app.configs.playbackRate = 2; window.dispatchEvent(new Event('blur')); return [v.__plays - before, v.playbackRate, app.configs.playbackRate, app._timers.size]; }), [1, 1, 1, 0]);
+    }));
+    await check('synthetic auxiliary-frame load does not cancel a valid cooldown', () => using([scopeOuter, 1, true, 'inaccessible-aux', true], async page => {
+        await page.evaluate(() => { const n = document.querySelector('#leaf-37'); n.querySelector('input').value = '0'; n.insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>'); const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page); assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+        await page.evaluate(() => document.querySelector('#aux-editor').dispatchEvent(new Event('load')));
+        assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+        assert.equal(await page.evaluate(() => window.__auxReads), 0);
+    }));
+    await check('synthetic successful cooldown callback cannot navigate twice', () => using(cooldownOptions, async page => {
+        await enterCooldown(page);
+        await page.evaluate(() => { const callback = [...window.__timeouts.values()][0]; callback(); callback(); });
+        assert.equal(await page.evaluate(() => window.__navClicks), 1);
+    }));
+    await check('synthetic configurable fixed integer range is respected', () => using(cooldownOptions, async page => {
+        await page.evaluate(() => { app.configs.randomCooldownMinMs = 7041; app.configs.randomCooldownMaxMs = 7041; });
+        await enterCooldown(page);
+        assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [7041]);
+        assert.equal(await page.evaluate(() => window.__logs.filter(line => line.startsWith('导航冷却 ')).at(-1)), '导航冷却 7.041s');
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

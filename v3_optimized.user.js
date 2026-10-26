@@ -139,6 +139,9 @@
                 guardNoProgressMs: 7000,
                 guardResumeCooldownMs: 1500,
                 autoAdvanceNoVideo: false,
+                randomCooldownEnabled: true,
+                randomCooldownMinMs: 5000,
+                randomCooldownMaxMs: 12000,
             },
             _videoEl: null,
             _treeContainerEl: null,
@@ -181,7 +184,7 @@
             },
             nextUnit() {
                 if (this._isChapterTest()) return this._advanceChapterTest();
-                if (this._state === 'ADVANCING' || this._nextUnitPending) return;
+                if (['ADVANCING', 'NAVIGATION_COOLDOWN'].includes(this._state) || this._nextUnitPending) return;
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
                     catalog.status(this._completionNode) !== 'completed') {
                     return this._block('平台完成状态尚未确认，停止自动导航');
@@ -195,7 +198,80 @@
                     console.log('已到当前可见目录末尾；不代表整个课程已完成。');
                     return;
                 }
-                this.playCurrentIndex(next);
+                this._queueNavigation(next);
+            },
+            _navigationEligible(target) {
+                if (this._destroyed || this._isPlaying || this._isChapterTest() ||
+                    catalog.current() !== this._completionNode ||
+                    this._currentStepTitle() !== this._playStepTitle ||
+                    catalog.status(this._completionNode) !== 'completed' ||
+                    !this._completionVideo?.isConnected || !this._completionVideo.ended ||
+                    document.querySelectorAll('.prev_list .prev_white').length > 1) return false;
+                const entries = catalog.entries();
+                const index = entries.indexOf(this._completionNode);
+                if (index < 0 || entries[index + 1] !== target ||
+                    assessmentTitle(target?.querySelector('.posCatalog_name')?.getAttribute('title') ||
+                        target?.textContent || '')) return false;
+                const tasks = videoAdapter.discover();
+                return !tasks.inaccessible && !tasks.unsupported &&
+                    tasks.videos.includes(this._completionVideo) &&
+                    tasks.videos.every(video => video.ended && this._completedVideos.has(video));
+            },
+            _queueNavigation(target) {
+                if (this._state !== 'READY_TO_ADVANCE') return;
+                if (!this._navigationEligible(target)) return this._block('导航条件已变化');
+                if (!this.configs.randomCooldownEnabled) return this.playCurrentIndex(target);
+                const min = this.configs.randomCooldownMinMs;
+                const max = this.configs.randomCooldownMaxMs;
+                if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) ||
+                    min < 0 || max < min || max > 2147483647) {
+                    return this._block('导航冷却范围必须为有效的整数毫秒');
+                }
+                const generation = this._generation;
+                const node = this._completionNode;
+                const video = this._completionVideo;
+                const content = videoAdapter.cardDocument();
+                if (!content) return this._block('无法确认内容 iframe');
+                const delay = min + Math.floor(Math.random() * (max - min + 1));
+                this._state = 'NAVIGATION_COOLDOWN';
+                console.log(`导航冷却 ${(delay / 1000).toFixed(3)}s`);
+                const valid = () => generation === this._generation && node === this._completionNode &&
+                    video === this._completionVideo && content === videoAdapter.cardDocument() &&
+                    this._navigationEligible(target);
+                const cancel = () => this._block('页面操作或任务变化已取消导航冷却');
+                const observer = new MutationObserver(() => {
+                    if (this._state === 'NAVIGATION_COOLDOWN' && !valid()) cancel();
+                });
+                const listeners = [];
+                const listen = (element, event) => {
+                    element.addEventListener(event, cancel, true);
+                    listeners.push([element, event]);
+                };
+                // Watch only while waiting. No pauses, focus simulation or activity synthesis.
+                for (const doc of new Set([document, ...videoAdapter.discover().documents])) {
+                    observer.observe(doc, { subtree: true, childList: true, attributes: true, characterData: true });
+                    listen(doc, 'click');
+                    for (const frame of doc.querySelectorAll('iframe')) {
+                        if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');
+                    }
+                }
+                listen(video, 'play');
+                listen(window, 'pagehide');
+                listen(window, 'beforeunload');
+                listen(window, 'popstate');
+                listen(window, 'hashchange');
+                this._cooldownCleanup = () => {
+                    observer.disconnect();
+                    for (const [element, event] of listeners) element.removeEventListener(event, cancel, true);
+                    this._cooldownCleanup = null;
+                };
+                this._schedule(() => {
+                    if (this._state !== 'NAVIGATION_COOLDOWN') return;
+                    if (!valid()) return this._block('冷却后导航条件未通过重新确认');
+                    this._cooldownCleanup();
+                    this._state = 'READY_TO_ADVANCE';
+                    this.playCurrentIndex(target);
+                }, delay);
             },
             _state: 'DISCOVERING',
             _generation: 0,
@@ -216,6 +292,7 @@
                 return timer;
             },
             _cancelTasks() {
+                if (this._cooldownCleanup) this._cooldownCleanup();
                 this._generation++;
                 this._playPending = false;
                 for (const timer of this._timers) clearTimeout(timer);
@@ -365,7 +442,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
                         this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
                         return this._block('当前播放页面或播放器已变化');

@@ -228,3 +228,80 @@ RESULT: 58 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no 
 Privacy boundary: fixtures/private remains locally ignored and untracked. Public synthetic fixtures use only generic generated labels, counters and IDs; no original HTML, course titles, account/session fields, credentials, or personal learning records are included. Source/build consistency, syntax, protected-source preservation, the staged diff and privacy checks are required before publication.
 
 Remaining limitations: no authenticated real-platform playback, actual focus/application switching, decoded-media timing, or true cross-origin requests were exercised. Access denial is simulated with a throwing contentDocument getter. The original eight local files remain compact outer structures, not inner media samples. Unsupported audio/lecture players, ambiguous task completion, multi-tab mappings and unrelated auxiliary frames *inside* the cards scope remain conservative blockers. Independent review is still needed; do not merge into master on the basis of these synthetic results alone.
+
+## Randomized navigation cooldown (V3.4.0)
+
+Parent baseline: `6a44a2a4ca303f0f6102a73eeb4ed2261dd3ff99`. This is an operation-rate-limiting/stability change, not a platform-detection bypass or an implementation acceptance claim. Metadata stays at V3.4.0.
+
+Defaults:
+
+```javascript
+randomCooldownEnabled: true,
+randomCooldownMinMs: 5000,
+randomCooldownMaxMs: 12000,
+```
+
+After natural media completion and the existing observable catalog completion checks, `nextUnit()` identifies a next eligible catalog target and queues one nonblocking, cancellable navigation timer. It draws a fresh integer with `min + Math.floor(Math.random() * (max - min + 1))` for each eligible navigation, inclusive of both bounds. Independent draws may legitimately repeat. It logs seconds with exactly three decimal places, for example `9.684s`. Setting `app.configs.randomCooldownEnabled = false` disables the randomized wait. Millisecond bounds are configurable; negative, fractional, reversed or above-native-timer-limit ranges stop safely. The limit is 2147483647ms.
+
+The added NAVIGATION_COOLDOWN state prevents repeated completion/nextUnit calls from scheduling additional waits or bypassing a pending wait. Same-page remaining videos continue normal playback: no random wait is applied before those videos, because their individual platform task-completion mapping is not available. No cooldown is queued at the end of the visible catalog or before an assessment/unsupported target. No actively playing video is paused.
+
+At expiry, the callback verifies the generation, active node, current title, completion-video identity and ended state, observable completed status, cards Document identity, discovered task safety, and next target's current adjacency/assessment status before navigating. All discovered videos must remain naturally ended and recorded in the in-memory completed-video set. No platform progress is manufactured.
+
+Only during the wait, MutationObserver watches the outer DOM and selected task documents for invalidation. Temporary listeners cancel on manual clicks, content-frame load, replay, pagehide/beforeunload and history/hash navigation. Existing `_cancelTasks()` removes observers/listeners and cancels the setTimeout on run, blocking, manual step reentry, or destruction. State/generation checks also discard stale callbacks that are already queued. Property-only changes that do not emit a mutation (such as setting an input value) are caught by the expiry checks. Unrelated outer auxiliary-frame load events do not cancel valid waits, and their content documents remain outside discovery scope.
+
+Preserved methods are compared against 6a44a2a: catalog/video-adapter source, run, page guards, pause/stall recovery and cooldowns, completion handling, media discovery, chapter switching, muted fallback and step reentry. `play()` differs only by refusing reentry during NAVIGATION_COOLDOWN. The prior scope-remediation whole-source equality check has been replaced with these explicit invariants because this authorized feature necessarily changes navigation and cancellation outside videoAdapter. The original V3.3.0 preservation assertions remain.
+
+Executed commands (local test-tool environment as documented above):
+
+```text
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs
+node tests/customization-v3.mjs
+node tests/preserved-v3.mjs
+node tests/navigation-v3.mjs
+node --check (all 12 JS/MJS files)
+git diff --cached --check
+```
+
+Results: generated payload synchronization, syntax, VM safety and preservation passed. The existing 58 browser scenarios explicitly disable the new wait to retain their original immediate-navigation assertions. There are 33 additional cooldown scenarios covering default enabled settings, inclusive endpoints, integer millisecond values, 5000/5001 variation, independent draws, custom ranges, exact log formatting, invalid ranges, disabled mode, no cooldown during playback/unconfirmed completion, duplicate events, timer/listener cleanup, stale generations, revoked completion, changed tasks, auxiliary frames, 1.0x and background recovery.
+
+The latest suite output for new cooldown cases and its final result:
+
+```text
+PASS synthetic cooldown integer milliseconds 5000
+PASS synthetic cooldown integer milliseconds 12000
+PASS synthetic cooldown integer milliseconds 5327
+PASS synthetic cooldown integer milliseconds 9684
+PASS synthetic independent random draw for every eligible navigation
+PASS synthetic active playback and unconfirmed completion never draw a cooldown
+PASS synthetic duplicate completion and nextUnit schedule only one cooldown
+PASS synthetic cooldown cancellation and stale callback: destroy
+PASS synthetic cooldown cancellation and stale callback: block
+PASS synthetic cooldown cancellation and stale callback: click
+PASS synthetic cooldown cancellation and stale callback: chapter
+PASS synthetic cooldown cancellation and stale callback: title
+PASS synthetic cooldown cancellation and stale callback: pagehide
+PASS synthetic cooldown cancellation and stale callback: popstate
+PASS synthetic cooldown cancellation and stale callback: unsupported-task
+PASS synthetic cooldown cancellation and stale callback: player-replacement
+PASS synthetic cooldown cancellation and stale callback: target-removal
+PASS synthetic cooldown cancellation and stale callback: assessment
+PASS synthetic cooldown cancellation and stale callback: replay
+PASS synthetic cooldown cancellation and stale callback: content-reload
+PASS synthetic cooldown cancellation and stale callback: nested-click
+PASS synthetic cooldown cancellation and stale callback: completion-marker
+PASS synthetic expiry revalidates completion even without a mutation event
+PASS synthetic expiry revalidates task ended state and generation
+PASS synthetic run invalidates stale cooldown generation
+PASS synthetic disabled cooldown navigates without drawing randomness
+PASS synthetic invalid cooldown range 7000/5000 safely blocks
+PASS synthetic invalid cooldown range 1.5/12000 safely blocks
+PASS synthetic invalid cooldown range 0/2147483648 safely blocks
+PASS synthetic cooldown does not weaken fixed rate or background recovery
+PASS synthetic auxiliary-frame load does not cancel a valid cooldown
+PASS synthetic successful cooldown callback cannot navigate twice
+PASS synthetic configurable fixed integer range is respected
+RESULT: 91 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+```
+
+Remaining limitations: all random values, media states and timers are controlled in these tests; no statistical independence claim or authenticated platform compatibility is established. Real browser throttling can delay callbacks, so 1ms is the sampling resolution, not a promise of wall-clock timer accuracy. Actual application/tab switching and uninterrupted live media remain manual acceptance requirements. The existing unsupported audio/lecture/tab mappings and DOM-only completion limitations still apply. Private reference HTML remains excluded; no private data, runtime AI, activity simulation or fingerprint spoofing is added. Publication is restricted to the existing fork review branch; no merge into master is authorized.

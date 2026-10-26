@@ -53,12 +53,19 @@ configs: {
     maxRetries: 10,
     videoCheckInterval: 1000,
     autoAdvanceNoVideo: false,
+    randomCooldownEnabled: true,
+    randomCooldownMinMs: 5000,
+    randomCooldownMaxMs: 12000,
 }
 ```
 
 ### 3. 视频结束后
 
 视频自然结束后，脚本先处理已识别的其余视频，再等待当前目录节点的 `.icon_Completed` 标记；正数待完成计数或不明确状态会阻止导航。该标记只作为页面可观察信号，不代表已独立验证服务端记录。未观察到确认时会有界重试并停止。
+
+目录导航完成条件满足且存在合格的下一节点后，默认随机等待 5000–12000 毫秒（含两端），每次独立抽取整数毫秒并记录三位小数秒数，例如 `9.684s`。这仅用于稳定性和操作限频，不保证绕过平台检测。不会暂停正在播放的视频，也不会给同一内容页内尚待播放的视频插入随机停顿。
+
+可通过 `app.configs.randomCooldownEnabled` 开关以及 `randomCooldownMinMs` / `randomCooldownMaxMs` 设置范围。范围须为非负整数毫秒，最大值不超过 2147483647；无效范围会安全停止。等待结束会重新确认任务、完成状态、页面和导航目标；页面变化、手动操作或任务失效会取消等待。浏览器可能延后实际回调时间，1 毫秒指抽样粒度。
 
 ### 4. 章节测验
 

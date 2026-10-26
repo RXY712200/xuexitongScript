@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 const baseline = execFileSync('git', ['show', 'e907cdda9d50fd80c61721061ed0988dfec621a4:v3_optimized.js'], { encoding: 'utf8' });
 const current = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
 function method(source, name) {
-    const start = source.indexOf(`            ${name}(`);
+    const start = Math.max(source.indexOf(`            ${name}(`), source.indexOf(`            async ${name}(`));
     assert.ok(start >= 0, name);
     const end = source.indexOf('\n            },', start);
     assert.ok(end >= 0, name);
@@ -26,12 +26,15 @@ for (const path of ['deepseek-console/xuexitong-console.js', 'deepseek-console/d
 }
 console.log('PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.');
 
-const reviewed = execFileSync('git', ['show', '82814b4427cfd9f48a2789eb3160ada42a3d9807:v3_optimized.js'], { encoding: 'utf8' });
-function outsideAdapter(source) {
-    const start = source.indexOf('    const videoAdapter = {');
-    const end = source.indexOf('    function initializePlayer()', start);
-    assert.ok(start >= 0 && end > start);
-    return source.slice(0, start) + source.slice(end);
+const reviewed = execFileSync('git', ['show', '6a44a2a4ca303f0f6102a73eeb4ed2261dd3ff99:v3_optimized.js'], { encoding: 'utf8' });
+assert.equal(current.slice(0, current.indexOf('    function initializePlayer()')),
+    reviewed.slice(0, reviewed.indexOf('    function initializePlayer()')));
+for (const name of ['run', '_bindPageGuards', '_startVideoMonitoring', '_tryResumePlayback',
+    '_checkVideoStatus', '_completeVideo', '_continueCompleted', 'playCurrentIndex',
+    '_getVideoEl', '_handlePlayError', '_bindStepNavigation']) {
+    assert.equal(method(current, name), method(reviewed, name), `${name} must match 6a44a2a`);
 }
-assert.equal(outsideAdapter(current), outsideAdapter(reviewed));
-console.log('PASS: scope remediation changes only videoAdapter; all catalog, coordinator, playback, focus, pause, stall, cooldown and rate code matches reviewed 82814b4.');
+console.log('PASS: catalog/media scope, playback/recovery and completion checks match 6a44a2a; cooldown changes are confined to navigation and cancellation.');
+assert.equal(method(current, 'play'), method(reviewed, 'play').replace(
+    "['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'FINISHED']",
+    "['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'FINISHED']"));
