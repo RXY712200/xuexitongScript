@@ -25,3 +25,13 @@ for (const path of ['deepseek-console/xuexitong-console.js', 'deepseek-console/d
         execFileSync('git', ['show', `e907cdda9d50fd80c61721061ed0988dfec621a4:${path}`], { encoding: 'utf8' }).replace(/\r\n/g, '\n'));
 }
 console.log('PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.');
+
+const reviewed = execFileSync('git', ['show', '82814b4427cfd9f48a2789eb3160ada42a3d9807:v3_optimized.js'], { encoding: 'utf8' });
+function outsideAdapter(source) {
+    const start = source.indexOf('    const videoAdapter = {');
+    const end = source.indexOf('    function initializePlayer()', start);
+    assert.ok(start >= 0 && end > start);
+    return source.slice(0, start) + source.slice(end);
+}
+assert.equal(outsideAdapter(current), outsideAdapter(reviewed));
+console.log('PASS: scope remediation changes only videoAdapter; all catalog, coordinator, playback, focus, pause, stall, cooldown and rate code matches reviewed 82814b4.');

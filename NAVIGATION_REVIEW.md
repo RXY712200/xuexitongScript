@@ -38,7 +38,7 @@ Added: separate catalog rules, a normal-video discovery adapter, and coordinator
 
 Added: per-session timer cancellation and generation checks, active-node and content-title checks, stale-player rejection, pending-play protection, and a per-element completion WeakSet. Duplicate ended/monitor signals converge on one completion action. Navigation stays locked until the target becomes active and the identified cards iframe has a new Document. Unrelated iframe changes cannot acknowledge navigation.
 
-Added: video discovery across accessible nested iframe documents (bounded to four levels); recognized videos are selected dynamically and played sequentially after natural ended events. Audio, nonmatching players, inaccessible frames, deep frames, and unrecognized nonempty leaf frames stop automation. Discovery currently examines every iframe conservatively; an unrelated iframe may therefore stop it.
+Added: video discovery across accessible nested iframe documents (bounded to four levels); recognized videos are selected dynamically and played sequentially after natural ended events. Audio, nonmatching players, inaccessible frames, deep frames, and unrecognized nonempty leaf frames stop automation. The initial reviewed implementation examined every outer iframe; the scope remediation below replaces that entry point with the unique cards frame.
 
 Modified: navigation requires the current catalog completed icon with no positive unfinished count. Zero alone, malformed counts, missing markers, and contradictory positive counts do not prove completion. Missing confirmation is polled with the existing retry bounds and then stops. The script only reads these signals; it does not create completion markers or submit progress. This is observable DOM evidence, not independently verified server state.
 
@@ -154,7 +154,7 @@ VM and Chrome synthetic tests pass for fixed configuration and correcting a chan
 
 Implemented and tested locally: outer catalog discovery/status signals; normal video elements matching the original V3 selectors; dynamic simultaneous video counts; sequential natural completion; nested accessible documents; safe assessment/unknown fallback; bounded completion confirmation and leaf navigation.
 
-Unsupported: dedicated audio and recorded-lecture adapters, arbitrary numeric-tab navigation, non-V3/custom/canvas players, inaccessible cross-origin documents, frame nesting beyond the bound, ambiguous completion, dynamically replaced catalog nodes without stable identity, same-Document iframe content replacement during navigation, and directories not yet loaded into the DOM. A title alone never selects a new media adapter. Inaccessible or unrelated frames may conservatively block otherwise playable content.
+Unsupported: dedicated audio and recorded-lecture adapters, arbitrary numeric-tab navigation, non-V3/custom/canvas players, inaccessible cross-origin documents, frame nesting beyond the bound, ambiguous completion, dynamically replaced catalog nodes without stable identity, same-Document iframe content replacement during navigation, and directories not yet loaded into the DOM. A title alone never selects a new media adapter. Inaccessible or unrecognized frames inside the selected cards scope conservatively block playback. Unrelated outer auxiliary frames are excluded by the scope remediation below.
 
 Necessary next evidence: sanitized rendered inner cards/player DOM before and after legitimate completion, mappings between content tabs and individual modules, audio/lecture player events, live catalog updates after completion, and a human authenticated run covering actual tab/application switching and mouse movement. Do not send cookies or authentication tokens.
 
@@ -173,3 +173,58 @@ This is a tested implementation candidate with deliberately conservative navigat
 ## Public review publication privacy check
 
 The eight private reference files remain excluded locally and are not part of the publication. Only implementation, build, tests, and sanitized documentation are included. Machine-specific usernames/tool paths have been replaced with generic examples. Public test runs require access to separately supplied private reference files for the eight reference-DOM cases; those files are deliberately not published. No live platform acceptance is asserted.
+
+
+## Independent-review remediation: course-task iframe scope
+
+Reviewed parent: `82814b4427cfd9f48a2789eb3160ada42a3d9807`. Overall acceptance remains PARTIAL; this remediation addresses only the reported auxiliary-frame compatibility risk. Version stays 3.4.0.
+
+Exact runtime change: `videoAdapter.cardFrame()` centralizes selection of a unique outer `iframe[info="card"]` or `iframe[src*="/knowledge/cards"]`. `cardDocument()` uses that same selection. `discover()` starts at that frame's Document (depth 1), replacing `visit(document, 0)`. It never falls back to outer videos or auxiliary frames. Missing or ambiguous cards roots are unsupported; a null/inaccessible selected document is inaccessible. Recursive checks inside the selected document and the existing depth limit remain unchanged, so inaccessible/unsupported nested task content still blocks. This does not infer subframe roles from arbitrary frame names: all descendants of the selected cards document remain conservatively in scope.
+
+A preservation assertion against the reviewed parent verifies that **all source outside videoAdapter is unchanged**, including the catalog rules, coordinator, strict 1.0x behavior, focus guards, pause/stall recovery, and cooldowns. The userscript was regenerated by the existing build; build script, metadata, dependencies, DeepSeek, and legacy implementations are unchanged.
+
+Two public fixtures under `fixtures/synthetic/` are generated examples, not private-page extracts:
+
+- `course-with-auxiliary-frames.html`: 65 `.posCatalog_select` nodes (15 synthetic grouping nodes plus 50 mixed-depth content leaves), active leaf 37, and seven top-level iframes. Six auxiliary frames represent editor, popup, reporting, attachment, notification, and help UI. The course iframe is deliberately third rather than first.
+- `course-task-video.html`: a synthetic legacy V3 video element inserted into a same-origin nested task frame by the browser harness. Media events, play promises, and completion changes are mocked.
+
+The test harness selects the course frame explicitly rather than the first iframe. The former generic inaccessible-frame regression was clarified to place the denied frame **inside** the course document; the safe-stop assertion is retained. Ten new cases exercise normal, unsupported, and inaccessible auxiliary frames; unsupported audio, unknown, and inaccessible task frames; inaccessible/missing/ambiguous cards roots; active-leaf recognition and one confirmed leaf-37-to-leaf-38 transition. Auxiliary frame access is instrumented and expected to remain zero. Recovery on blur still works with those auxiliary frames present. Safety cases verify PLAYING before introducing task failures.
+
+Before the runtime correction, the expanded suite reproduced four failures (54 passed, 4 failed): all three large-page playback variants and the large-directory navigation case. After correction, the entire suite passed: eight private reference-DOM cases plus 50 synthetic cases. These counts describe executed local Chrome tests, not live course coverage.
+
+Commands rerun from the repository (Playwright and jQuery environment variables resolved locally as in the earlier sanitized command examples):
+
+```text
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs
+node tests/customization-v3.mjs
+node tests/preserved-v3.mjs
+node tests/navigation-v3.mjs
+git diff --cached --check
+```
+
+Build exits 0 without output. The source/userscript synchronization and VM safety checks passed. The preservation suite additionally reports:
+
+```text
+PASS: scope remediation changes only videoAdapter; all catalog, coordinator, playback, focus, pause, stall, cooldown and rate code matches reviewed 82814b4.
+```
+
+New browser case outputs and final result:
+
+```text
+PASS synthetic scoped discovery with 65 nodes / 7 frames: normal-aux
+PASS synthetic scoped discovery with 65 nodes / 7 frames: unsupported-aux
+PASS synthetic scoped discovery with 65 nodes / 7 frames: inaccessible-aux
+PASS synthetic selected task audio still blocks with auxiliary frames present
+PASS synthetic selected task unknown still blocks with auxiliary frames present
+PASS synthetic selected task inaccessible still blocks with auxiliary frames present
+PASS synthetic inaccessible selected cards root blocks
+PASS synthetic ambiguous cards roots block instead of falling back to auxiliary frames
+PASS synthetic missing cards root blocks instead of scanning outer videos
+PASS synthetic large-directory completion advances leaf 37 to leaf 38 only
+RESULT: 58 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+```
+
+Privacy boundary: fixtures/private remains locally ignored and untracked. Public synthetic fixtures use only generic generated labels, counters and IDs; no original HTML, course titles, account/session fields, credentials, or personal learning records are included. Source/build consistency, syntax, protected-source preservation, the staged diff and privacy checks are required before publication.
+
+Remaining limitations: no authenticated real-platform playback, actual focus/application switching, decoded-media timing, or true cross-origin requests were exercised. Access denial is simulated with a throwing contentDocument getter. The original eight local files remain compact outer structures, not inner media samples. Unsupported audio/lecture players, ambiguous task completion, multi-tab mappings and unrelated auxiliary frames *inside* the cards scope remain conservative blockers. Independent review is still needed; do not merge into master on the basis of these synthetic results alone.

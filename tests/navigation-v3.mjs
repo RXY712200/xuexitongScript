@@ -8,13 +8,15 @@ const { chromium } = process.env.PLAYWRIGHT_MODULE
     : require('playwright');
 const jquery = readFileSync(process.env.JQUERY_PATH, 'utf8');
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
+const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
+const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
 const failures = [];
 const node = (i, active = false, complete = false) => `<li><div class="posCatalog_select ${active ? 'posCatalog_active' : ''}" id="node${i}"><span class="posCatalog_name" title="Content ${i}">Content ${i}</span>${complete ? '<span class="icon_Completed"></span>' : '<input class="jobUnfinishCount" value="1">'}</div></li>`;
 const outer = (entries = 1, complete = false, title = '视频') => `<div class="prev_title" title="${title}"></div><div id="coursetree"><ul><li><ul>${Array.from({ length: entries }, (_, i) => node(i, i === 0, complete)).join('')}</ul></li></ul></div><iframe info="card"></iframe>`;
-async function setup(html = outer(), count = 1, nested = false) {
+async function setup(html = outer(), count = 1, nested = false, scopeCase = null) {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
     const page = await context.newPage();
@@ -31,7 +33,7 @@ async function setup(html = outer(), count = 1, nested = false) {
     }, html);
     await page.setContent(sanitized);
     await page.addScriptTag({ content: jquery });
-    await page.evaluate(({ count, nested }) => {
+    await page.evaluate(({ count, nested, scopeCase, scopeMedia }) => {
         window.__clock = 100000;
         Date.now = () => window.__clock;
         let id = 0;
@@ -41,12 +43,13 @@ async function setup(html = outer(), count = 1, nested = false) {
         window.setInterval = fn => { window.__intervals.set(++id, fn); return id; };
         window.clearInterval = id => window.__intervals.delete(id);
         window.__addVideos = (count, nested = false) => {
-            let doc = document.querySelector('iframe').contentDocument;
+            let doc = document.querySelector('iframe[info="card"]').contentDocument;
             if (nested) {
                 const frame = doc.createElement('iframe'); doc.body.append(frame); doc = frame.contentDocument;
             }
+            if (scopeCase && count) doc.body.innerHTML = new DOMParser().parseFromString(scopeMedia, 'text/html').body.innerHTML;
             for (let i = 0; i < count; i++) {
-                const v = doc.createElement('video'); v.id = `video_html5_api_${i}`;
+                const v = doc.querySelectorAll('video')[i] || doc.createElement('video'); v.id = `video_html5_api_${i}`;
                 v.__ended = false; v.__paused = false; v.__plays = 0;
                 Object.defineProperties(v, {
                     ended: { get: () => v.__ended },
@@ -57,7 +60,22 @@ async function setup(html = outer(), count = 1, nested = false) {
             }
         };
         window.__addVideos(count, nested);
-    }, { count, nested });
+        if (scopeCase) {
+            window.__auxReads = 0;
+            for (const aux of document.querySelectorAll('iframe[id^="aux-"]')) {
+                aux.contentDocument.body.textContent = 'Synthetic auxiliary UI';
+            }
+            if (scopeCase === 'unsupported-aux') {
+                document.querySelector('#aux-editor').contentDocument.body.append(document.createElement('audio'));
+            }
+            if (scopeCase === 'inaccessible-aux') {
+                Object.defineProperty(document.querySelector('#aux-report'), 'contentDocument', { get() {
+                    window.__auxReads++;
+                    throw new DOMException('Synthetic access denial', 'SecurityError');
+                } });
+            }
+        }
+    }, { count, nested, scopeCase, scopeMedia });
     await page.addScriptTag({ content: source });
     await page.evaluate(async () => { for (const fn of [...window.__intervals.values()]) fn(); await Promise.resolve(); });
     return { page, close: () => context.close() };
@@ -140,8 +158,8 @@ try {
         const result = await page.evaluate(() => { const old = app._videoEl; old.remove(); return app._getVideoEl() === old; });
         assert.equal(result, false);
     }));
-    await check('synthetic cross-origin-like inaccessible iframe: safe block', () => using([], async page => {
-        await page.evaluate(() => { const f = document.createElement('iframe'); document.body.append(f); Object.defineProperty(f, 'contentDocument', { get() { throw new DOMException('denied', 'SecurityError'); } }); app.play(); });
+    await check('synthetic in-task cross-origin-like inaccessible iframe: safe block', () => using([], async page => {
+        await page.evaluate(() => { const f = document.createElement('iframe'); document.querySelector('iframe[info="card"]').contentDocument.body.append(f); Object.defineProperty(f, 'contentDocument', { get() { throw new DOMException('denied', 'SecurityError'); } }); app.play(); });
         assert.equal(await state(page), 'BLOCKED');
     }));
     await check('synthetic audio mixed with video: unsupported safe block', () => using([], async page => {
@@ -318,6 +336,71 @@ try {
             await Promise.resolve(); await Promise.resolve();
         });
         assert.equal(await page.evaluate(() => window.__lateFallbacks), 0);
+    }));
+    for (const variant of ['normal-aux', 'unsupported-aux', 'inaccessible-aux']) {
+        await check(`synthetic scoped discovery with 65 nodes / 7 frames: ${variant}`, () => using([scopeOuter, 1, true, variant], async page => {
+            assert.equal(await state(page), 'PLAYING');
+            assert.deepEqual(await page.evaluate(() => [
+                document.querySelectorAll('#coursetree .posCatalog_select').length,
+                document.querySelectorAll('body > iframe').length,
+                app.cellData.nCells,
+                app.cellData.currentNCellIndex,
+                document.querySelector('.posCatalog_active').id,
+                app._videoEl.ownerDocument.defaultView.frameElement.ownerDocument.defaultView.frameElement.id,
+                app._videoEl.playbackRate,
+                window.__auxReads,
+            ]), [65, 7, 50, 37, 'leaf-37', 'iframe', 1, 0]);
+            const before = await page.evaluate(() => app._videoEl.__plays);
+            await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+            assert.equal(await page.evaluate(() => app._videoEl.__plays), before + 1);
+        }));
+    }
+    for (const kind of ['audio', 'unknown', 'inaccessible']) {
+        await check(`synthetic selected task ${kind} still blocks with auxiliary frames present`, () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
+            assert.equal(await state(page), 'PLAYING');
+            await page.evaluate(kind => {
+                const doc = document.querySelector('iframe[info="card"]').contentDocument;
+                if (kind === 'audio') doc.body.append(doc.createElement('audio'));
+                else {
+                    const frame = doc.createElement('iframe'); doc.body.append(frame);
+                    if (kind === 'unknown') frame.contentDocument.body.textContent = 'Synthetic unsupported task';
+                    else Object.defineProperty(frame, 'contentDocument', { get() { throw new DOMException('denied', 'SecurityError'); } });
+                }
+                app.play();
+            }, kind);
+            assert.equal(await state(page), 'BLOCKED');
+            assert.equal(await page.evaluate(() => app._isPlaying), false);
+        }));
+    }
+    await check('synthetic inaccessible selected cards root blocks', () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
+        assert.equal(await state(page), 'PLAYING');
+        await page.evaluate(() => { Object.defineProperty(document.querySelector('iframe[info="card"]'), 'contentDocument', { get() { throw new DOMException('denied', 'SecurityError'); } }); app.play(); });
+        assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('synthetic ambiguous cards roots block instead of falling back to auxiliary frames', () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
+        await page.evaluate(() => { document.querySelector('#aux-editor').setAttribute('info', 'card'); app.play(); });
+        assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('synthetic missing cards root blocks instead of scanning outer videos', () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
+        await page.evaluate(() => { document.querySelector('iframe[info="card"]').removeAttribute('info'); document.body.append(document.createElement('video')); app.play(); });
+        assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('synthetic large-directory completion advances leaf 37 to leaf 38 only', () => using([scopeOuter, 1, true, 'inaccessible-aux'], async page => {
+        assert.equal(await state(page), 'PLAYING');
+        await page.evaluate(() => {
+            window.__scopeClicks = 0;
+            document.querySelector('#leaf-37 .jobUnfinishCount').value = '0';
+            document.querySelector('#leaf-37').insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>');
+            document.querySelector('#leaf-38 .posCatalog_name').onclick = () => {
+                window.__scopeClicks++;
+                document.querySelector('#leaf-37').classList.remove('posCatalog_active'); document.querySelector('#leaf-38').classList.add('posCatalog_active');
+                const frame = document.createElement('iframe'); frame.id = 'iframe'; frame.setAttribute('info', 'card'); document.querySelector('iframe[info="card"]').replaceWith(frame); window.__addVideos(1, true);
+            };
+            const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); v.dispatchEvent(new Event('ended'));
+        });
+        await flush(page);
+        assert.equal(await state(page), 'PLAYING');
+        assert.deepEqual(await page.evaluate(() => [document.querySelector('.posCatalog_active').id, window.__scopeClicks, app.cellData.currentNCellIndex, window.__auxReads]), ['leaf-38', 1, 38, 0]);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

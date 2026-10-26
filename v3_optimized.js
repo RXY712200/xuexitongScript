@@ -69,10 +69,12 @@
         },
     };
     const videoAdapter = {
-        cardDocument() {
+        cardFrame() {
             const cards = document.querySelectorAll('iframe[info="card"], iframe[src*="/knowledge/cards"]');
-            if (cards.length !== 1) return null;
-            try { return cards[0].contentDocument; } catch (_) { return null; }
+            return cards.length === 1 ? cards[0] : null;
+        },
+        cardDocument() {
+            try { return this.cardFrame()?.contentDocument || null; } catch (_) { return null; }
         },
         discover() {
             const result = { videos: [], inaccessible: false, unsupported: false, documents: [] };
@@ -99,7 +101,15 @@
                     } catch (_) { result.inaccessible = true; }
                 }
             };
-            visit(document, 0);
+            // Only the unique course-content frame defines task scope. Editor, popup,
+            // reporting and other outer-page frames are not learning modules.
+            const frame = this.cardFrame();
+            if (!frame) result.unsupported = true;
+            else {
+                const content = this.cardDocument();
+                if (!content) result.inaccessible = true;
+                else visit(content, 1); // Keep all nested task checks and the depth bound.
+            }
             result.videos = [...new Set(result.videos)].filter(video => video.isConnected);
             return result;
         },
