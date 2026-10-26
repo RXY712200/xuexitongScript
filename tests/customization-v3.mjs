@@ -2,72 +2,42 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
+// Dependency-free safety smoke test. Real DOM navigation is in navigation-v3.mjs.
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
-let title = '章节测验';
 let boot;
-const timers = new Map();
-let timerId = 0;
+let title = '章节测验';
 const context = {
     window: { jQuery: {} },
-    document: { getElementsByClassName: () => [{ title }] },
-    $: () => ({ length: 1 }),
+    document: {
+        getElementsByClassName: () => [{ title }],
+        querySelectorAll: () => [],
+        querySelector: () => null,
+    },
+    $: () => ({ length: 1, off() { return this; }, on() { return this; } }),
     console: { log() {}, warn() {}, error() {}, info() {} },
-    setInterval(fn) { boot = fn; return ++timerId; },
+    setInterval(fn) { boot = fn; return 1; },
     clearInterval() {},
-    setTimeout(fn) { timers.set(++timerId, fn); return timerId; },
-    clearTimeout(id) { timers.delete(id); },
+    setTimeout() { assert.fail('Blocked content must not schedule navigation'); },
+    clearTimeout() {},
 };
 vm.runInNewContext(source, context);
 boot();
 const app = context.window.app;
 assert.ok(app);
-assert.equal(app.configs.playbackRate, 1.0);
-assert.equal(app._isChapterTest(), true);
-
-// Quiz detection must win even over a cached video, pending step switch,
-// and the optional advance-on-no-video setting.
-app._getVideoEl = () => { throw new Error('Quiz must stop before video lookup'); };
-app._stepSwitchPending = true;
-app._stepSwitchAt = Date.now();
-app.configs.autoAdvanceNoVideo = true;
-app._isPlaying = true;
-app._checkInterval = 42;
-app._delayedNextUnitTimer = context.setTimeout(() => assert.fail('retry survived'));
-await app.play();
+assert.equal(app._state, 'BLOCKED');
 assert.equal(app._isPlaying, false);
 assert.equal(app._checkInterval, null);
-assert.equal(app._delayedNextUnitTimer, null);
-assert.equal(timers.size, 0);
-app._getTreeContainer = () => { throw new Error('Quiz must stop before navigation'); };
-app.nextUnit();
-assert.equal(app._nextUnitPending, false);
-
-title = '视频';
-assert.equal(app._isChapterTest(), false);
-const video = { play: async () => {} };
-app._getVideoEl = () => video;
-app._videoEventHandle = () => {};
-app._startVideoMonitoring = () => {};
-await app.play();
-assert.equal(video.playbackRate, 1.0);
+assert.equal(app._isChapterTest(), true);
+assert.equal(app.configs.playbackRate, 1);
 app.configs.playbackRate = 1.25;
+assert.equal(app.configs.playbackRate, 1);
+title = '本章自测';
+assert.equal(app._isChapterTest(), true);
+app.nextUnit();
+assert.equal(app._state, 'BLOCKED');
+title = 'Unknown resource';
+app.run();
 await app.play();
-assert.equal(video.playbackRate, 1.25);
-
-// Exercise the original same-chapter and next-chapter navigation branches.
-const nodes = [{}, {}];
-let target;
-context.$ = () => ({ find: () => ({ length: nodes.length, get: i => nodes[i] }) });
-const cells = { length: 2, get: i => ({ index: i }) };
-app._getTreeContainer = () => ({ children: () => ({ children: () => cells }) });
-app.playCurrentIndex = node => { target = node; };
-app.nextUnit();
-assert.equal(target, nodes[1]);
-app._nextUnitPending = false;
-app._cellData.currentNCellIndex = 1;
-target = 'unset';
-app.nextUnit();
-assert.equal(target, undefined);
-assert.equal(app._cellData.currentCellIndex, 1);
-assert.equal(app._cellData.currentNCellIndex, 0);
-console.log('PASS: quiz stop, pending retry cancellation, configurable rate, and both navigation branches (simulated).');
+assert.equal(app._state, 'BLOCKED');
+assert.equal(app._timers.size, 0);
+console.log('PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).');
