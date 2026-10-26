@@ -1,6 +1,7 @@
 (function () {
     const APP_KEY = '__xuexitongPlayerV3';
     const BOOT_TIMER_KEY = '__xuexitongPlayerV3BootTimer';
+    window.__xuexitongTaskSupport = createTaskSupport(window);
 
     const previousApp = window[APP_KEY];
     if (previousApp && typeof previousApp.destroy === 'function') {
@@ -45,6 +46,8 @@
 
     // Rules are limited to the supplied outer structures and the existing V3 player.
     const assessmentTitle = text => /测验|自测|作业|考试|验证/.test(text);
+    const optionalAssessment = text => ['章节测验', '本章自测'].includes(text.trim());
+    const verificationTitle = text => /验证码|验证|认证|登录|人脸|captcha|authentication/i.test(text);
     const videoTitle = text => /^(?:\d+\s*)?视频$/.test(text.trim());
     const catalog = {
         entries() {
@@ -76,7 +79,7 @@
         cardDocument() {
             try { return this.cardFrame()?.contentDocument || null; } catch (_) { return null; }
         },
-        discover() {
+        discover(knownDocuments = new Set()) {
             const result = { videos: [], inaccessible: false, unsupported: false, documents: [] };
             const seen = new Set();
             const visit = (doc, depth) => {
@@ -85,7 +88,7 @@
                 result.documents.push(doc);
                 result.videos.push(...doc.querySelectorAll('video#video_html5_api, video[id*="video_html5"]'));
                 if (doc.querySelector('audio, video:not([id*="video_html5"])')) result.unsupported = true;
-                if (depth > 0 && !doc.querySelector('video, iframe')) {
+                if (depth > 0 && !knownDocuments.has(doc) && !doc.querySelector('video, iframe')) {
                     const body = doc.body?.cloneNode(true);
                     body?.querySelectorAll('script, style').forEach(node => node.remove());
                     if (body?.textContent.trim() || body?.querySelector('form, input, object, embed, canvas, img')) {
@@ -115,6 +118,168 @@
         },
     };
 
+    // Evidence adapters are opt-in. No live URL, player selector or document viewer is guessed.
+    function createTaskSupport(env) {
+        const protocol = 'xuexitong-live-v1';
+        const types = new Set(['LIVE_OPENED', 'LIVE_READY', 'LIVE_PLAYING', 'LIVE_NEAR_END', 'LIVE_COMPLETED', 'LIVE_ERROR', 'LIVE_CLOSED']);
+        const send = (peer, session, type, extra = {}) => peer.postMessage({
+            protocol, id: session.id, generation: session.generation, seq: ++session.sent,
+            timestamp: Date.now(), type, ...extra,
+        }, env.location.origin);
+        const accept = (event, session, peer) => {
+            const data = event.data;
+            return event.origin === env.location.origin && event.source === peer && data &&
+                data.protocol === protocol && data.id === session.id && data.generation === session.generation &&
+                types.has(data.type) && Number.isSafeInteger(data.seq) && data.seq > session.received &&
+                Number.isFinite(data.timestamp) && data.timestamp >= session.started - 5000 && data.timestamp <= Date.now() + 30000;
+        };
+        function createParent({ entry, generation, threshold, isValid, onResult, onError }) {
+            const url = new URL(entry.href, env.location.href);
+            if (!entry.isConnected || entry.tagName !== 'A' || entry.target !== '_blank' ||
+                entry.relList?.contains('noopener') || entry.relList?.contains('noreferrer') || url.origin !== env.location.origin ||
+                !['http:', 'https:'].includes(url.protocol) || !Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+                throw new Error('Unsupported live entry/origin/threshold');
+            }
+            const session = { id: env.crypto.randomUUID(), generation, sent: 0, received: 0, started: Date.now() };
+            let child, timer, disposed = false, result = null, closeAttempted = false, childDocument = null;
+            const dispose = () => {
+                disposed = true; env.clearInterval(timer);
+                env.removeEventListener('message', receive); env.removeEventListener('pagehide', dispose);
+            };
+            const fail = reason => { if (!disposed) { dispose(); onError(reason); } };
+            const tick = () => {
+                if (disposed) return;
+                if (!isValid()) return fail('Original live task changed');
+                if (child.closed) {
+                    if (!result) return fail('Live window closed before a validated result');
+                    dispose(); onResult(result); return;
+                }
+                try {
+                    if ((child.location.origin !== env.location.origin && !(child.location.href === 'about:blank' && !childDocument)) ||
+                        (childDocument && child.document !== childDocument)) {
+                        return fail('Live window left its supported document/origin');
+                    }
+                    if (closeAttempted) return fail('Live window closure denied or not confirmed; handle manually');
+                    send(child, session, 'LIVE_OPENED', { threshold });
+                } catch (_) { fail('Live window communication unavailable'); }
+            };
+            function receive(event) {
+                if (disposed || !child || !accept(event, session, child) || !isValid()) return;
+                const data = event.data;
+                if (data.type === 'LIVE_OPENED') return;
+                if (data.type === 'LIVE_COMPLETED' && data.ended !== true) return;
+                if (data.type === 'LIVE_NEAR_END' && !(Number.isFinite(data.duration) && data.duration > 0 &&
+                    Number.isFinite(data.position) && data.position >= 0 && data.position <= data.duration + 1 &&
+                    data.position / data.duration >= threshold)) return;
+                session.received = data.seq;
+                if (result) return;
+                if (data.type === 'LIVE_ERROR' || data.type === 'LIVE_CLOSED') return fail('Live child stopped unexpectedly');
+                if (data.type === 'LIVE_READY') {
+                    try { childDocument = child.document; } catch (_) { return fail('Live document inaccessible'); }
+                }
+                const ended = data.type === 'LIVE_COMPLETED' && data.ended === true;
+                const near = data.type === 'LIVE_NEAR_END' && Number.isFinite(data.duration) && data.duration > 0 &&
+                    Number.isFinite(data.position) && data.position >= 0 && data.position / data.duration >= threshold &&
+                    data.position <= data.duration + 1;
+                if (!ended && !near) return;
+                result = { kind: near ? 'near-end' : 'completed', basis: near ? 'local-position' : 'local-ended' };
+                closeAttempted = true;
+                try { child.close(); } catch (_) { return fail('Live window closure denied; handle manually'); }
+                // Closure is confirmed on the next poll, not inferred from close() succeeding.
+            }
+            return {
+                session, get child() { return child; }, tick, dispose,
+                start() {
+                    if (disposed || child || !isValid()) return;
+                    env.addEventListener('message', receive); env.addEventListener('pagehide', dispose);
+                    child = env.open(url.href, '_blank');
+                    if (!child) return fail('Live popup blocked; open it manually');
+                    timer = env.setInterval(tick, 2000);
+                    tick();
+                },
+            };
+        }
+        function installChild(adapter) {
+            if (env.__xuexitongLiveChild && !env.__xuexitongLiveChild.disposed) return env.__xuexitongLiveChild;
+            if (!env.opener || !adapter || typeof adapter.isRecognized !== 'function' || !adapter.isRecognized()) return null;
+            let session = null, video = null, timer, terminal = false, disposed = false;
+            const listeners = [];
+            const listen = (target, type, handler) => { target.addEventListener(type, handler); listeners.push([target, type, handler]); };
+            const dispose = () => {
+                disposed = true; env.clearInterval(timer);
+                for (const [target, type, handler] of listeners) target.removeEventListener(type, handler);
+            };
+            const report = (type, extra) => { if (session && !disposed && env.opener && !env.opener.closed) send(env.opener, session, type, extra); };
+            const check = () => {
+                if (disposed || !session) return;
+                if (!env.opener || env.opener.closed) return dispose();
+                if (!adapter.isRecognized() || !video.isConnected) { report('LIVE_ERROR'); return dispose(); }
+                if (terminal) return;
+                if (video.ended || adapter.sessionFinished?.() === true) {
+                    terminal = true; report('LIVE_COMPLETED', { ended: true });
+                } else if (Number.isFinite(video.duration) && video.duration > 0 &&
+                    Number.isFinite(video.currentTime) && video.currentTime / video.duration >= session.threshold) {
+                    terminal = true; report('LIVE_NEAR_END', { position: video.currentTime, duration: video.duration });
+                } else report(video.paused ? 'LIVE_READY' : 'LIVE_PLAYING');
+            };
+            listen(env, 'message', event => {
+                const data = event.data;
+                if (!data || data.type !== 'LIVE_OPENED') return;
+                if (!session) {
+                    if (event.origin !== env.location.origin || event.source !== env.opener || !data ||
+                        data.protocol !== protocol || data.type !== 'LIVE_OPENED' ||
+                        typeof data.id !== 'string' || !/^[\w-]{16,80}$/.test(data.id) ||
+                        !Number.isSafeInteger(data.generation) || data.generation < 0 || !Number.isFinite(data.threshold) || data.threshold <= 0 || data.threshold > 1) return;
+                    const candidate = { id: data.id, generation: data.generation, started: Date.now(), sent: 0, received: 0, threshold: data.threshold };
+                    if (!accept(event, candidate, env.opener)) return;
+                    session = candidate;
+                    video = adapter.getPlayer();
+                    if (!video?.isConnected || typeof video.play !== 'function' || video.tagName !== 'VIDEO') {
+                        report('LIVE_ERROR'); return dispose();
+                    }
+                    video.playbackRate = 1;
+                    listen(video, 'ratechange', () => { if (video.playbackRate !== 1) video.playbackRate = 1; });
+                    for (const type of ['timeupdate', 'durationchange', 'ended', 'play']) listen(video, type, check);
+                    report('LIVE_READY');
+                    video.play().catch(() => report('LIVE_ERROR'));
+                    timer = env.setInterval(check, 10000);
+                }
+                if (!accept(event, session, env.opener)) return;
+                session.received = data.seq;
+                check();
+            });
+            listen(env, 'pagehide', () => { if (!terminal) report('LIVE_CLOSED'); dispose(); });
+            if (env[BOOT_TIMER_KEY]) { env.clearInterval(env[BOOT_TIMER_KEY]); env[BOOT_TIMER_KEY] = null; }
+            return env.__xuexitongLiveChild = { check, dispose, get active() { return !!session; }, get disposed() { return disposed; } };
+        }
+        function readDocument({ element, isValid, onComplete, onError }) {
+            let timer, cancelled = false, previous = -1, unchanged = 0, bottomHeight = -1;
+            const cancel = () => { cancelled = true; env.clearTimeout(timer); };
+            const fail = reason => { cancel(); onError(reason); };
+            const tick = () => {
+                if (cancelled) return;
+                if (!isValid() || !element.isConnected || element.clientHeight <= 0) return fail('Document viewer unavailable');
+                const bottom = element.scrollHeight - element.clientHeight;
+                if (!Number.isFinite(bottom) || bottom < 0) return fail('Document bottom cannot be verified');
+                if (element.scrollTop >= bottom - 1) {
+                    if (bottomHeight === element.scrollHeight) { cancel(); onComplete(); return; }
+                    bottomHeight = element.scrollHeight;
+                } else {
+                    bottomHeight = -1;
+                    if (element.scrollTop === previous) unchanged++; else unchanged = 0;
+                    if (unchanged >= 10) return fail('Document scrolling made no progress');
+                    previous = element.scrollTop;
+                    element.scrollTop = Math.min(bottom, element.scrollTop + 40 + Math.floor(Math.random() * 81));
+                }
+                timer = env.setTimeout(tick, 400 + Math.floor(Math.random() * 801));
+            };
+            element.scrollTop = 0;
+            timer = env.setTimeout(tick, 400);
+            return { cancel, tick };
+        }
+        return { createParent, installChild, readDocument };
+    }
+
     function initializePlayer() {
         const app = {
             configs: {
@@ -126,6 +291,7 @@
                 guardNoProgressMs: 7000,
                 guardResumeCooldownMs: 1500,
                 autoAdvanceNoVideo: false,
+                liveNearEndThreshold: 0.99,
                 randomCooldownEnabled: true,
                 randomCooldownMinMs: 5000,
                 randomCooldownMaxMs: 12000,
@@ -154,7 +320,11 @@
                 this._cancelTasks();
                 this._destroyed = false;
                 this._state = 'DISCOVERING';
+                this._isPlaying = false;
                 this._completedVideos = new WeakSet();
+                this._processedTasks = new WeakSet();
+                this._externalCompletion = null;
+                this._hadLive = false;
                 this._completionNode = null;
                 this._completionVideo = null;
                 this._tryTimes = 0;
@@ -164,22 +334,22 @@
                 this._getTreeContainer();
                 this._initCellData();
                 this._videoEl = null;
-                this._getVideoEl();
                 this._clearCheckInterval();
                 this._bindStepNavigation();
                 this.play();
             },
             nextUnit() {
+                if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
-                if (['ADVANCING', 'NAVIGATION_COOLDOWN'].includes(this._state) || this._nextUnitPending) return;
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
-                    catalog.status(this._completionNode) !== 'completed') {
+                    (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('平台完成状态尚未确认，停止自动导航');
                 }
                 const entries = catalog.entries();
                 const index = entries.indexOf(this._completionNode);
                 if (index < 0) return this._block('当前目录节点已失效');
-                const next = entries[index + 1];
+                const next = this._targetAfter(this._completionNode);
+                if (next === null) return this._block('章末测验或下一章节无法安全识别');
                 if (!next) {
                     this._state = 'FINISHED';
                     console.log('已到当前可见目录末尾；不代表整个课程已完成。');
@@ -187,7 +357,178 @@
                 }
                 this._queueNavigation(next);
             },
+            taskAdapter: null, // No real viewer/live profile is enabled without evidence.
+            _processedTasks: new WeakSet(),
+            _chapterOf(node) {
+                for (let el = node; el; el = el.parentElement) {
+                    if (el.matches?.('#coursetree > ul > li')) return el;
+                }
+                return null;
+            },
+            _nodeTitle(node) {
+                return node?.querySelector('.posCatalog_name')?.getAttribute('title') || node?.textContent.trim() || '';
+            },
+            _verificationPresent() {
+                const visit = (doc, depth) => {
+                    if (!doc || depth > 4) return true;
+                    const body = doc.body?.cloneNode(true);
+                    body?.querySelectorAll('script, style').forEach(el => el.remove());
+                    if (verificationTitle(body?.textContent || '')) return true;
+                    for (const el of doc.querySelectorAll('[title], [aria-label], [placeholder], [alt]')) {
+                        if (['title', 'aria-label', 'placeholder', 'alt'].some(attr => verificationTitle(el.getAttribute(attr) || ''))) return true;
+                    }
+                    for (const frame of doc.querySelectorAll('iframe')) {
+                        try { if (visit(frame.contentDocument, depth + 1)) return true; } catch (_) { return true; }
+                    }
+                    return false;
+                };
+                return visit(videoAdapter.cardDocument(), 0);
+            },
+            _assessmentTarget(node) {
+                if (this._verificationPresent()) return null;
+                const entries = catalog.entries();
+                const chapter = this._chapterOf(node);
+                if (!chapter) return null;
+                const local = entries.filter(entry => this._chapterOf(entry) === chapter);
+                const index = local.indexOf(node);
+                if (index < 0 || !local.slice(0, index).some(entry => !optionalAssessment(this._nodeTitle(entry))) ||
+                    !local.slice(index).every(entry => optionalAssessment(this._nodeTitle(entry)))) return null;
+                if (!local.slice(0, index).every(entry => optionalAssessment(this._nodeTitle(entry)) || catalog.status(entry) === 'completed' ||
+                    (entry === this._completionNode && this._externalCompletion?.kind === 'document' &&
+                        this._externalCompletion.localDone && !this._hadLive && this._taskContextValid(this._externalCompletion) &&
+                        this._discoverMedia().videos.length === 0))) return null;
+                const nextChapter = chapter.nextElementSibling;
+                const target = entries.find(entry => this._chapterOf(entry) === nextChapter);
+                return target && !assessmentTitle(this._nodeTitle(target)) && !verificationTitle(this._nodeTitle(target)) ? target : null;
+            },
+            _targetAfter(node) {
+                const entries = catalog.entries();
+                const next = entries[entries.indexOf(node) + 1];
+                if (!next) return undefined;
+                if (verificationTitle(this._nodeTitle(next))) return null;
+                if (!assessmentTitle(this._nodeTitle(next))) return next;
+                // Only the two observed optional labels at the end of the same chapter.
+                if (this._chapterOf(next) !== this._chapterOf(node)) return null;
+                return this._assessmentTarget(next);
+            },
+            _taskSet() {
+                try {
+                    if (!this.taskAdapter) return null;
+                    const scope = this.taskAdapter.discover({ node: catalog.current(), document: videoAdapter.cardDocument() });
+                    if (!scope) return null;
+                    if (!Array.isArray(scope.tasks) || typeof scope.validateScope !== 'function' || !scope.validateScope()) return { invalid: true };
+                    const belongs = element => {
+                        if (!element?.isConnected) return false;
+                        let doc = element.ownerDocument;
+                        const content = videoAdapter.cardDocument();
+                        for (let depth = 0; doc && depth <= 4; depth++) {
+                            if (doc === content) return true;
+                            try { doc = doc.defaultView?.frameElement?.ownerDocument; } catch (_) { return false; }
+                        }
+                        return false;
+                    };
+                    if (!scope.tasks.every(task => ['document', 'live'].includes(task.kind) && belongs(task.element))) return { invalid: true };
+                    return scope;
+                } catch (_) { return { invalid: true }; }
+            },
+            _discoverMedia() {
+                const scope = this._taskSet();
+                if (scope?.invalid) return { videos: [], documents: [], unsupported: true, inaccessible: false };
+                return videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []));
+            },
+            _taskContextValid(record) {
+                try {
+                    return !this._destroyed && record.href === window.location.href && record.generation === this._generation &&
+                        record.node === catalog.current() && record.title === this._currentStepTitle() &&
+                        record.document === videoAdapter.cardDocument() && this.taskAdapter === record.adapter &&
+                        record.scope.validateScope() && record.scope.tasks.every(task => task.element.isConnected);
+                } catch (_) { return false; }
+            },
+            _processSupportedTask() {
+                if (this._isPlaying) return false;
+                const scope = this._taskSet();
+                if (!scope) return false;
+                if (scope.invalid || this._verificationPresent()) { this._block('已识别的任务范围已失效或需要验证'); return true; }
+                const pending = scope.tasks.find(task => !this._processedTasks.has(task.element));
+                if (!pending) {
+                    if (!scope.tasks.length) return false;
+                    const media = this._discoverMedia();
+                    if (media.videos.some(video => !this._completedVideos.has(video))) return false;
+                    this._verifyExternal(0); return true;
+                }
+                this._cancelTasks();
+                this._detachVideoEvents();
+                this._videoEl = null;
+                this._isPlaying = false;
+                this._playStepTitle = this._currentStepTitle();
+                const record = { node: catalog.current(), title: this._playStepTitle,
+                    generation: this._generation, href: window.location.href, document: videoAdapter.cardDocument(), adapter: this.taskAdapter, scope,
+                    kind: pending.kind, localDone: false };
+                this._completionNode = record.node;
+                this._completionVideo = null;
+                this._externalCompletion = record;
+                if (!record.node || !record.document) { this._block('无法识别任务上下文'); return true; }
+                const completed = result => {
+                    if (!this._taskContextValid(record)) return this._block('任务完成回调已失效');
+                    this._documentController = null;
+                    this._liveController = null;
+                    this._processedTasks.add(pending.element);
+                    record.localDone = true; record.result = result;
+                    console.log(record.kind === 'document' ? '文档已到可验证底部，仅记为本地操作完成。' : '直播窗口已关闭；本地结束信号不代表平台已计入完成。');
+                    this._verifyExternal(0);
+                };
+                const failed = reason => this._block(reason);
+                if (pending.kind === 'document') {
+                    this._state = 'READING_DOCUMENT';
+                    try {
+                        this._documentController = window.__xuexitongTaskSupport.readDocument({ element: pending.element,
+                            isValid: () => this._taskContextValid(record), onComplete: () => completed('local-bottom'), onError: failed });
+                    } catch (_) { failed('文档视图不支持可验证的滚动'); }
+                } else {
+                    this._hadLive = true;
+                    this._state = 'WAITING_LIVE'; // Set before window.open(), including popup-block failure.
+                    try {
+                        this._liveController = window.__xuexitongTaskSupport.createParent({ entry: pending.element,
+                            generation: record.generation, threshold: this.configs.liveNearEndThreshold,
+                            isValid: () => this._state === 'WAITING_LIVE' && this._taskContextValid(record),
+                            onResult: completed, onError: failed });
+                        this._liveController.start();
+                    } catch (_) { failed('直播入口或通信来源尚不受支持'); }
+                }
+                return true;
+            },
+            _verifyExternal(attempt) {
+                const record = this._externalCompletion;
+                if (!record?.localDone || !this._taskContextValid(record)) return this._block('本地任务完成上下文无效');
+                this._state = 'VERIFYING_COMPLETION';
+                const scope = this._taskSet();
+                if (!scope || scope.invalid) return this._block('任务范围无法验证');
+                const media = this._discoverMedia();
+                if (media.inaccessible || media.unsupported) return this._block('任务包含未知或不可访问的内容');
+                if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
+                    media.videos.some(video => !this._completedVideos.has(video))) {
+                    this._state = 'DISCOVERING'; this.play(); return;
+                }
+                if ((this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') {
+                    if (attempt >= this.configs.maxRetries) return this._block('本地操作已结束，但视频或直播的平台完成状态未确认');
+                    this._schedule(() => this._verifyExternal(attempt + 1), this.configs.retryInterval); return;
+                }
+                this._state = 'READY_TO_ADVANCE';
+                this.nextUnit();
+            },
+            _externalNavigationEligible(target) {
+                const record = this._externalCompletion;
+                if (!record || this._isPlaying || !record.localDone || record.node !== catalog.current() ||
+                    record.title !== this._currentStepTitle() || record.href !== window.location.href || record.generation !== this._generation || this._destroyed) return false;
+                if (record.kind === 'assessment') return this._assessmentTarget(record.node) === target;
+                if (this._isChapterTest() || !this._taskContextValid(record) || this._targetAfter(record.node) !== target) return false;
+                const media = this._discoverMedia();
+                if (media.inaccessible || media.unsupported || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
+                if ((this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') return false;
+                return media.videos.every(video => video.ended && this._completedVideos.has(video));
+            },
             _navigationEligible(target) {
+                if (this._externalCompletion) return this._externalNavigationEligible(target);
                 if (this._destroyed || this._isPlaying || this._isChapterTest() ||
                     catalog.current() !== this._completionNode ||
                     this._currentStepTitle() !== this._playStepTitle ||
@@ -196,10 +537,10 @@
                     document.querySelectorAll('.prev_list .prev_white').length > 1) return false;
                 const entries = catalog.entries();
                 const index = entries.indexOf(this._completionNode);
-                if (index < 0 || entries[index + 1] !== target ||
+                if (index < 0 || this._targetAfter(this._completionNode) !== target ||
                     assessmentTitle(target?.querySelector('.posCatalog_name')?.getAttribute('title') ||
                         target?.textContent || '')) return false;
-                const tasks = videoAdapter.discover();
+                const tasks = this._discoverMedia();
                 return !tasks.inaccessible && !tasks.unsupported &&
                     tasks.videos.includes(this._completionVideo) &&
                     tasks.videos.every(video => video.ended && this._completedVideos.has(video));
@@ -235,14 +576,14 @@
                     listeners.push([element, event]);
                 };
                 // Watch only while waiting. No pauses, focus simulation or activity synthesis.
-                for (const doc of new Set([document, ...videoAdapter.discover().documents])) {
+                for (const doc of new Set([document, ...this._discoverMedia().documents])) {
                     observer.observe(doc, { subtree: true, childList: true, attributes: true, characterData: true });
                     listen(doc, 'click');
                     for (const frame of doc.querySelectorAll('iframe')) {
                         if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');
                     }
                 }
-                listen(video, 'play');
+                if (video) listen(video, 'play');
                 listen(window, 'pagehide');
                 listen(window, 'beforeunload');
                 listen(window, 'popstate');
@@ -279,6 +620,10 @@
                 return timer;
             },
             _cancelTasks() {
+                this._documentController?.cancel();
+                this._documentController = null;
+                this._liveController?.dispose();
+                this._liveController = null;
                 if (this._cooldownCleanup) this._cooldownCleanup();
                 this._generation++;
                 this._playPending = false;
@@ -314,11 +659,12 @@
             _continueCompleted(attempt) {
                 if (this._state !== 'VERIFYING_COMPLETION') return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
+                if (this._processSupportedTask()) return;
                 if (!this._completionNode || catalog.current() !== this._completionNode ||
                     this._currentStepTitle() !== this._playStepTitle) {
                     return this._block('完成事件与当前目录不匹配');
                 }
-                const tasks = videoAdapter.discover();
+                const tasks = this._discoverMedia();
                 if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
                 if (!tasks.videos.includes(this._completionVideo)) return this._block('播放器已替换，完成状态不明确');
                 const next = tasks.videos.find(video => !this._completedVideos.has(video));
@@ -429,14 +775,15 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
                         this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
                         return this._block('当前播放页面或播放器已变化');
                     }
                     if (this._playPending) return;
+                    if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
-                    const tasks = videoAdapter.discover();
+                    const tasks = this._discoverMedia();
                     if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
                     const el = this._getVideoEl();
                     if (el == null) {
@@ -509,7 +856,21 @@
                     assessmentTitle(catalog.current()?.querySelector('.posCatalog_name')?.getAttribute('title') || '');
             },
             _advanceChapterTest() {
-                this._block('检测到测验、作业或验证内容，不会自动提交或跳过');
+                if (['NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'ADVANCING'].includes(this._state)) return;
+                const node = catalog.current();
+                const target = node && this._assessmentTarget(node);
+                if (!target || !optionalAssessment(this._currentStepTitle())) {
+                    return this._block('测验、作业或验证内容无法安全跨章，不会自动提交或跳过');
+                }
+                this._cancelTasks();
+                this._isPlaying = false;
+                this._detachVideoEvents();
+                this._completionNode = node;
+                this._completionVideo = null;
+                this._externalCompletion = { kind: 'assessment', localDone: true, node, generation: this._generation,
+                    title: this._currentStepTitle(), href: window.location.href };
+                this._state = 'READY_TO_ADVANCE';
+                this._queueNavigation(target);
             },
             _bindStepNavigation() {
                 if (this._stepNavigationBound) {
@@ -588,12 +949,14 @@
                 }
                 if (this._nextUnitPending || this._state === 'ADVANCING') return;
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
-                    catalog.status(this._completionNode) !== 'completed') {
+                    (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('当前内容尚未确认完成');
                 }
                 const oldDocument = videoAdapter.cardDocument();
                 if (!oldDocument) return this._block('无法唯一识别 cards 内容 iframe');
                 this._cancelTasks();
+                this._externalCompletion = null;
+                this._hadLive = false;
                 this._detachVideoEvents();
                 this._state = 'ADVANCING';
                 this._nextUnitPending = true;
@@ -643,13 +1006,14 @@
                 return this._treeContainerEl;
             },
             _getVideoEl() {
+                if (['WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
                 if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
                     this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
                     this._block('当前播放页面或播放器已变化');
                     this._videoEl = null;
                     return null;
                 }
-                const tasks = videoAdapter.discover();
+                const tasks = this._discoverMedia();
                 if (tasks.inaccessible || tasks.unsupported) {
                     if (this._state !== 'BLOCKED') this._block('存在不可访问或不支持的媒体组件');
                     return null;

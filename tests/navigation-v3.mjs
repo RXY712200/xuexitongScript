@@ -16,10 +16,12 @@ let passed = 0;
 const failures = [];
 const node = (i, active = false, complete = false) => `<li><div class="posCatalog_select ${active ? 'posCatalog_active' : ''}" id="node${i}"><span class="posCatalog_name" title="Content ${i}">Content ${i}</span>${complete ? '<span class="icon_Completed"></span>' : '<input class="jobUnfinishCount" value="1">'}</div></li>`;
 const outer = (entries = 1, complete = false, title = '视频') => `<div class="prev_title" title="${title}"></div><div id="coursetree"><ul><li><ul>${Array.from({ length: entries }, (_, i) => node(i, i === 0, complete)).join('')}</ul></li></ul></div><iframe info="card"></iframe>`;
-async function setup(html = outer(), count = 1, nested = false, scopeCase = null, enableCooldown = false) {
+async function setup(html = outer(), count = 1, nested = false, scopeCase = null, enableCooldown = false, syntheticOrigin = false) {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
+    if (syntheticOrigin) await context.route('https://course.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body><video id="live-player"></video></body></html>' }));
     const page = await context.newPage();
+    if (syntheticOrigin) await page.goto('https://course.test/course');
     // DOMParser is inert. Strip executable/resource-bearing content before insertion.
     const sanitized = await page.evaluate(html => {
         const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -99,6 +101,7 @@ async function flush(page, rounds = 1) {
     }, rounds);
 }
 async function check(label, fn) {
+    if (process.env.TEST_FILTER && !new RegExp(process.env.TEST_FILTER).test(label)) return;
     try { await fn(); passed++; console.log(`PASS ${label}`); }
     catch (e) { failures.push(label); console.error(`FAIL ${label}: ${e.message}`); }
 }
@@ -541,6 +544,324 @@ try {
         await enterCooldown(page);
         assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [7041]);
         assert.equal(await page.evaluate(() => window.__logs.filter(line => line.startsWith('导航冷却 ')).at(-1)), '导航冷却 7.041s');
+    }));
+    async function installDocuments(page, count = 1, mixed = false) {
+        await page.evaluate(({ count, mixed }) => {
+            const doc = document.querySelector('iframe[info="card"]').contentDocument;
+            if (!mixed) doc.body.innerHTML = '';
+            for (let i = 0; i < count; i++) {
+                const el = doc.createElement('div'); el.className = 'synthetic-document';
+                el.style.cssText = 'height:100px;overflow:auto;width:200px;scroll-behavior:auto';
+                el.innerHTML = '<div style="height:700px">Synthetic document</div>'; doc.body.append(el);
+            }
+            app.taskAdapter = { discover() {
+                if (document.querySelector('.posCatalog_active').id !== 'node0') return null;
+                return { tasks: [...doc.querySelectorAll('.synthetic-document')].map(element => ({ kind: 'document', element })),
+                    validateScope: () => doc === document.querySelector('iframe[info="card"]').contentDocument && !doc.querySelector('.synthetic-unknown') };
+            } };
+            window.__scrollPositions = []; window.__docDelays = [];
+            let draw = 0; const values = [0.1, 0.5, 0.9]; Math.random = () => values[draw++ % values.length];
+            app.run();
+        }, { count, mixed });
+    }
+    await check('synthetic document scrolls incrementally from start to actual bottom without platform polling', () => using([outer(2), 0, false, null, true], async page => {
+        await installDocuments(page);
+        assert.equal(await state(page), 'READING_DOCUMENT');
+        const positions = [], delays = [];
+        for (let i = 0; i < 40 && await state(page) === 'READING_DOCUMENT'; i++) {
+            delays.push(...await page.evaluate(() => [...window.__timeoutDelays.values()]));
+            await flush(page);
+            positions.push(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('.synthetic-document').scrollTop));
+        }
+        assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+        assert.ok(positions.some(pos => pos > 0 && pos < 600));
+        assert.equal(positions.at(-1), 600);
+        assert.ok(new Set(delays.filter(delay => delay <= 1200)).size > 1);
+        assert.ok(new Set(positions.slice(1).map((pos, i) => pos - positions[i]).filter(step => step > 0)).size > 1);
+        assert.equal(await page.evaluate(() => document.querySelector('.jobUnfinishCount').value), '1');
+    }));
+    await check('synthetic multiple documents finish locally then await navigation cooldown', () => using([outer(2), 0, false, null, true], async page => {
+        await installDocuments(page, 3);
+        await flush(page, 60);
+        assert.ok(['ADVANCING', 'BLOCKED'].includes(await state(page))); // No target click handler installed.
+        assert.deepEqual(await page.evaluate(() => [...document.querySelector('iframe').contentDocument.querySelectorAll('.synthetic-document')].map(el => el.scrollTop)), [600, 600, 600]);
+    }));
+    await check('synthetic mixed document/video keeps video confirmation requirement', () => using([outer(2), 1, false, null, true], async page => {
+        await page.evaluate(() => { app._isPlaying = false; });
+        await installDocuments(page, 1, true);
+        for (let i = 0; i < 30 && await state(page) === 'READING_DOCUMENT'; i++) await flush(page);
+        assert.equal(await state(page), 'PLAYING');
+        await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page, 12);
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => app._videoEl.playbackRate), 1);
+    }));
+    await check('synthetic document scope invalidation and destruction cancel scrolling', () => using([outer(), 0], async page => {
+        await installDocuments(page);
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.insertAdjacentHTML('beforeend', '<div class="synthetic-unknown">Unknown</div>'); });
+        await flush(page); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => app._documentController), null);
+    }));
+    await check('synthetic unsupported document viewers stay stopped without an adapter', () => using([outer(), 0], async page => {
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.textContent = 'Unknown viewer'; app.run(); });
+        assert.equal(await state(page), 'BLOCKED');
+    }));
+    const assessmentPage = (assessment = '章节测验', priorComplete = true, includeNextChapter = true) =>
+        `<div class="prev_title" title="${assessment}"></div><div id="coursetree"><ul><li><ul>${node(0, false, priorComplete)}<li><div id="assessment" class="posCatalog_select posCatalog_active"><span class="posCatalog_name" title="${assessment}">${assessment}</span><input class="jobUnfinishCount" value="1"></div></li></ul></li>${includeNextChapter ? `<li><ul>${node(1, false)}</ul></li>` : ''}</ul></div><iframe info="card"></iframe>`;
+    for (const label of ['章节测验', '本章自测']) {
+        await check(`synthetic optional chapter-end ${label} stays unfinished and targets next chapter`, () => using([assessmentPage(label), 0, false, null, true], async page => {
+            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
+            await page.evaluate(() => { window.__assessmentClicks = 0; document.querySelector('#node1 .posCatalog_name').onclick = () => window.__assessmentClicks++; });
+            await flush(page);
+            assert.equal(await page.evaluate(() => window.__assessmentClicks), 1);
+            assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
+        }));
+    }
+    for (const [label, prior, next] of [['身份验证', true, true], ['考试', true, true], ['章节测验', false, true], ['章节测验', true, false]]) {
+        await check(`synthetic ambiguous/mandatory assessment stops: ${label}/${prior}/${next}`, () => using([assessmentPage(label, prior, next), 0], async page => {
+            assert.equal(await state(page), 'BLOCKED');
+        }));
+    }
+    async function startLive(page, { duration = 100, deniedClose = false } = {}) {
+        const popupPromise = page.context().waitForEvent('page');
+        await page.evaluate(() => {
+            const doc = document.querySelector('iframe[info="card"]').contentDocument;
+            doc.body.innerHTML = '<a id="synthetic-live" target="_blank" href="https://course.test/live">Synthetic lecture</a>';
+            const entry = doc.querySelector('a');
+            app.taskAdapter = { discover() {
+                if (document.querySelector('.posCatalog_active').id !== 'node0') return null;
+                return { tasks: [{ kind: 'live', element: entry }], validateScope: () => entry.isConnected && doc === document.querySelector('iframe[info="card"]').contentDocument };
+            } };
+            window.__openCalls = 0; window.__stateAtOpen = null; window.__liveTypes = [];
+            window.addEventListener('message', event => { if (event.data?.protocol === 'xuexitong-live-v1') window.__liveTypes.push(event.data.type); });
+            const open = window.open.bind(window);
+            window.open = (...args) => { window.__openCalls++; window.__stateAtOpen = app._state; return open(...args); };
+            Math.random = () => 0;
+            document.querySelector('#node1 .posCatalog_name').onclick = () => {
+                document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active');
+                const f = document.createElement('iframe'); f.setAttribute('info', 'card'); document.querySelector('iframe[info="card"]').replaceWith(f); window.__addVideos(1);
+            };
+            app.run();
+        });
+        const child = await popupPromise;
+        await child.waitForLoadState();
+        await child.addScriptTag({ content: jquery });
+        await child.evaluate(duration => {
+            window.__clock = 100000; Date.now = () => window.__clock;
+            window.__duration = duration === 'infinite' ? Infinity : duration;
+            window.__position = 0; window.__ended = false; window.__plays = 0;
+            const video = document.querySelector('video');
+            Object.defineProperties(video, { duration: { get: () => window.__duration }, currentTime: { get: () => window.__position }, ended: { get: () => window.__ended }, paused: { get: () => false } });
+            video.play = () => { window.__plays++; return Promise.resolve(); };
+        }, duration);
+        await child.addScriptTag({ content: source });
+        await child.evaluate(() => {
+            window.__child = window.__xuexitongTaskSupport.installChild({ isRecognized: () => !!document.querySelector('video'), getPlayer: () => document.querySelector('video'), sessionFinished: () => window.__sessionFinished === true });
+        });
+        if (deniedClose) await page.evaluate(() => { window.__closeAttempts = 0; app._liveController.child.close = () => { window.__closeAttempts++; }; });
+        await page.evaluate(() => app._liveController.tick());
+        await page.waitForFunction(() => window.__liveTypes.includes('LIVE_READY'));
+        return child;
+    }
+    async function confirmParentMarker(page) {
+        await page.evaluate(() => { document.querySelector('#node0 input').value = '0'; document.querySelector('#node0').insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>'); });
+    }
+    const liveOptions = [outer(2), 0, false, null, true, true];
+    await check('synthetic real popup: parent waits first, duplicates cannot open another window', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        assert.deepEqual(await page.evaluate(() => [window.__stateAtOpen, app._state, window.__openCalls, app._isPlaying]), ['WAITING_LIVE', 'WAITING_LIVE', 1, false]);
+        await page.evaluate(() => { app.play(); app.nextUnit(); window.dispatchEvent(new Event('blur')); document.dispatchEvent(new Event('visibilitychange')); });
+        assert.equal(await state(page), 'WAITING_LIVE');
+        assert.equal(await page.evaluate(() => window.__openCalls), 1);
+        assert.equal(await child.evaluate(() => document.querySelector('video').playbackRate), 1);
+    }));
+    await check('synthetic two-hour true live stream remains waiting with unknown duration', () => using(liveOptions, async page => {
+        const child = await startLive(page, { duration: 'infinite' });
+        await page.evaluate(() => { window.__clock += 7200000; app._liveController.tick(); });
+        await child.evaluate(() => { window.__clock += 7200000; window.__position = 7200; window.__child.check(); });
+        assert.equal(await state(page), 'WAITING_LIVE');
+        assert.equal(await page.evaluate(() => app._timers.size), 0);
+        assert.equal(await child.evaluate(() => window.__child.disposed), false);
+    }));
+    for (const completion of ['ended', 'near-end']) {
+        await check(`synthetic live ${completion}: associated child closes, marker then cooldown, normal video resumes`, () => using(liveOptions, async page => {
+            const child = await startLive(page);
+            await confirmParentMarker(page);
+            const closed = child.waitForEvent('close');
+            await child.evaluate(completion => { if (completion === 'ended') window.__ended = true; else window.__position = 99; window.__child.check(); }, completion);
+            await closed;
+            await page.evaluate(() => app._liveController.tick());
+            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            assert.deepEqual(await page.evaluate(() => [...window.__timeoutDelays.values()]), [5000]);
+            await flush(page);
+            assert.equal(await state(page), 'PLAYING');
+            assert.equal(await page.evaluate(() => document.querySelector('.posCatalog_active').id), 'node1');
+        }));
+    }
+    await check('synthetic local near-end never fabricates platform completion', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        const closed = child.waitForEvent('close');
+        await child.evaluate(() => { window.__position = 99; window.__child.check(); }); await closed;
+        await page.evaluate(() => app._liveController.tick());
+        assert.equal(await state(page), 'VERIFYING_COMPLETION');
+        assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
+        await flush(page, 12); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__logs.some(line => line.startsWith('导航冷却 '))), false);
+    }));
+    await check('synthetic unexpected child closure safely blocks without navigation', () => using(liveOptions, async page => {
+        const child = await startLive(page); await child.close();
+        await page.evaluate(() => app._liveController?.tick());
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__openCalls), 1);
+    }));
+    await check('synthetic denied child close is attempted once and requires manual handling', () => using(liveOptions, async page => {
+        const child = await startLive(page, { deniedClose: true });
+        await confirmParentMarker(page);
+        await child.evaluate(() => { window.__ended = true; window.__child.check(); });
+        await page.waitForFunction(() => window.__closeAttempts === 1);
+        await page.evaluate(() => app._liveController.tick());
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__closeAttempts), 1);
+        assert.equal(child.isClosed(), false);
+    }));
+    await check('synthetic parent closure disposes child coordination without navigation', () => using(liveOptions, async page => {
+        const child = await startLive(page); await page.close();
+        await child.evaluate(() => window.__child.check());
+        assert.equal(await child.evaluate(() => window.__child.disposed), true);
+    }));
+    await check('synthetic strict message origin/source/generation and duplicate sequence validation', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        await page.evaluate(() => {
+            const controller = app._liveController; const s = controller.session;
+            const data = { protocol: 'xuexitong-live-v1', id: s.id, generation: s.generation, seq: 1000, timestamp: Date.now(), type: 'LIVE_COMPLETED', ended: true };
+            window.dispatchEvent(new MessageEvent('message', { data, origin: 'https://untrusted.test', source: controller.child }));
+            window.dispatchEvent(new MessageEvent('message', { data, origin: location.origin, source: window }));
+            window.dispatchEvent(new MessageEvent('message', { data: { ...data, generation: s.generation - 1 }, origin: location.origin, source: controller.child }));
+            window.dispatchEvent(new MessageEvent('message', { data: { ...data, seq: s.received }, origin: location.origin, source: controller.child }));
+        });
+        assert.equal(await state(page), 'WAITING_LIVE'); assert.equal(child.isClosed(), false);
+    }));
+    await check('synthetic blocked popup and cross-origin live entry never retry or advance', () => using(liveOptions, async page => {
+        await page.evaluate(() => {
+            const doc = document.querySelector('iframe').contentDocument; doc.body.innerHTML = '<a target="_blank" href="https://course.test/live">Synthetic live</a>';
+            app.taskAdapter = { discover: () => ({ tasks: [{ kind: 'live', element: doc.querySelector('a') }], validateScope: () => true }) };
+            window.__popupCalls = 0; window.open = () => { window.__popupCalls++; return null; }; app.run();
+        });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => window.__popupCalls), 1);
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.querySelector('a').href = 'https://other.test/live'; app.run(); });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => window.__popupCalls), 1);
+    }));
+    await check('synthetic document destruction cancels even an already queued tick', () => using([outer(), 0], async page => {
+        await installDocuments(page);
+        const positions = await page.evaluate(() => { const el = document.querySelector('iframe').contentDocument.querySelector('.synthetic-document'); const tick = app._documentController.tick; const before = el.scrollTop; app.destroy(); tick(); return [before, el.scrollTop, app._timers.size]; });
+        assert.deepEqual(positions, [0, 0, 0]);
+    }));
+    await check('synthetic unverifiable document bottom safely stops', () => using([outer(), 0], async page => {
+        await installDocuments(page);
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.querySelector('.synthetic-document').style.display = 'none'; });
+        await flush(page); assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('synthetic task invalidation disposes live parent; stale child result cannot advance', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        await page.evaluate(() => { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); app._liveController.tick(); });
+        assert.equal(await state(page), 'BLOCKED');
+        await child.evaluate(() => { window.__ended = true; window.__child.check(); });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(child.isClosed(), false);
+    }));
+    await check('synthetic lost/reloaded live communication blocks without reopening', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        await child.goto('https://course.test/reloaded');
+        await page.evaluate(() => app._liveController.tick());
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => window.__openCalls), 1);
+    }));
+    await check('synthetic duplicate terminal child messages request closure only once', () => using(liveOptions, async page => {
+        const child = await startLive(page, { deniedClose: true });
+        await page.evaluate(() => {
+            const c = app._liveController, s = c.session;
+            const data = { protocol: 'xuexitong-live-v1', id: s.id, generation: s.generation, seq: s.received + 1, timestamp: Date.now(), type: 'LIVE_COMPLETED', ended: true };
+            for (const seq of [data.seq, data.seq, data.seq + 1]) window.dispatchEvent(new MessageEvent('message', { data: { ...data, seq }, origin: location.origin, source: c.child }));
+        });
+        assert.equal(await page.evaluate(() => window.__closeAttempts), 1);
+        await page.evaluate(() => app._liveController.tick()); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(child.isClosed(), false);
+    }));
+    await check('synthetic true live session-finished evidence hands off without invented duration', () => using(liveOptions, async page => {
+        const child = await startLive(page, { duration: 'infinite' }); await confirmParentMarker(page);
+        const closed = child.waitForEvent('close');
+        await child.evaluate(() => { window.__sessionFinished = true; window.__child.check(); }); await closed;
+        await page.evaluate(() => app._liveController.tick()); assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+    }));
+    await check('synthetic malformed or unrelated live completion cannot close the child', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        await page.evaluate(() => {
+            const c = app._liveController, s = c.session;
+            const base = { protocol: 'xuexitong-live-v1', id: s.id, generation: s.generation, seq: 100, timestamp: Date.now(), type: 'LIVE_NEAR_END', duration: Infinity, position: 99 };
+            window.dispatchEvent(new MessageEvent('message', { data: base, origin: location.origin, source: c.child }));
+            window.dispatchEvent(new MessageEvent('message', { data: { ...base, id: 'unrelated-session-id', seq: 101, duration: 100 }, origin: location.origin, source: c.child }));
+        });
+        assert.equal(await state(page), 'WAITING_LIVE'); assert.equal(child.isClosed(), false);
+        const closed = child.waitForEvent('close');
+        await child.evaluate(() => { window.__ended = true; window.__child.check(); }); await closed;
+    }));
+    for (const kind of ['video', 'document']) {
+        await check(`synthetic finished ${kind} bypasses only trailing optional assessment into next chapter`, () => using([
+            `<div class="prev_title" title="视频"></div><div id="coursetree"><ul><li><ul>${node(0, true, kind === 'video')}<li><div id="optional" class="posCatalog_select"><span class="posCatalog_name" title="章节测验">章节测验</span><input value="1"></div></li></ul></li><li><ul>${node(1)}</ul></li></ul></div><iframe info="card"></iframe>`,
+            kind === 'video' ? 1 : 0, false, null, true,
+        ], async page => {
+            await page.evaluate(() => { window.__nextChapter = 0; document.querySelector('#node1 .posCatalog_name').onclick = () => window.__nextChapter++; });
+            if (kind === 'document') {
+                await installDocuments(page);
+                for (let i = 0; i < 40 && await state(page) === 'READING_DOCUMENT'; i++) await flush(page);
+            } else {
+                await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); }); await flush(page);
+            }
+            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            await flush(page); assert.equal(await page.evaluate(() => window.__nextChapter), 1);
+            assert.equal(await page.evaluate(() => document.querySelector('#optional input').value), '1');
+            if (kind === 'document') assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
+        }));
+    }
+    await check('synthetic live closure never closes an unrelated tab', () => using(liveOptions, async page => {
+        const child = await startLive(page); const unrelated = await page.context().newPage(); await unrelated.goto('https://course.test/unrelated');
+        await confirmParentMarker(page); const closed = child.waitForEvent('close');
+        await child.evaluate(() => { window.__ended = true; window.__child.check(); }); await closed;
+        await page.evaluate(() => app._liveController.tick());
+        assert.equal(await state(page), 'NAVIGATION_COOLDOWN'); assert.equal(unrelated.isClosed(), false);
+    }));
+    await check('synthetic same-document parent URL change invalidates live waiting', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        await page.evaluate(() => { history.pushState({}, '', '/elsewhere'); app._liveController.tick(); });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(child.isClosed(), false);
+    }));
+    await check('synthetic optional-assessment-only chapter has insufficient learning evidence', () => using([
+        '<div class="prev_title" title="章节测验"></div><div id="coursetree"><ul><li><ul><li><div class="posCatalog_select posCatalog_active"><span class="posCatalog_name" title="章节测验">章节测验</span></div></li></ul></li><li><ul>' + node(1) + '</ul></li></ul></div><iframe info="card"></iframe>', 0,
+    ], async page => { assert.equal(await state(page), 'BLOCKED'); }));
+    await check('synthetic verification inside an optional assessment prevents handoff', () => using([assessmentPage(), 0, false, null, true], async page => {
+        await page.evaluate(() => { app._cancelTasks(); document.querySelector('iframe').contentDocument.body.innerHTML = '<input placeholder="请输入验证码">'; app.run(); });
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
+    }));
+    await check('synthetic noopener live link is unsupported without changing browser security policy', () => using(liveOptions, async page => {
+        await page.evaluate(() => {
+            const doc = document.querySelector('iframe').contentDocument; doc.body.innerHTML = '<a target="_blank" rel="noopener" href="https://course.test/live">Synthetic live</a>';
+            app.taskAdapter = { discover: () => ({ tasks: [{ kind: 'live', element: doc.querySelector('a') }], validateScope: () => true }) };
+            window.__popupCalls = 0; window.open = () => { window.__popupCalls++; return null; }; app.run();
+        });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => window.__popupCalls), 0);
+    }));
+    await check('synthetic live-like page without an evidence adapter never opens a window', () => using(liveOptions, async page => {
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.innerHTML = '<a target="_blank" href="https://course.test/live">Synthetic lecture</a>'; window.open = () => { throw new Error('Unrecognized task opened a window'); }; app.run(); });
+        assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => app.taskAdapter), null);
+    }));
+    await check('synthetic duplicate child installation keeps one player and one session listener', () => using(liveOptions, async page => {
+        const child = await startLive(page);
+        assert.deepEqual(await child.evaluate(() => {
+            const first = window.__child;
+            const second = window.__xuexitongTaskSupport.installChild({ isRecognized: () => true, getPlayer: () => document.querySelector('video') });
+            return [first === second, window.__plays];
+        }), [true, 1]);
+        assert.equal(await state(page), 'WAITING_LIVE');
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

@@ -305,3 +305,112 @@ RESULT: 91 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no 
 ```
 
 Remaining limitations: all random values, media states and timers are controlled in these tests; no statistical independence claim or authenticated platform compatibility is established. Real browser throttling can delay callbacks, so 1ms is the sampling resolution, not a promise of wall-clock timer accuracy. Actual application/tab switching and uninterrupted live media remain manual acceptance requirements. The existing unsupported audio/lecture/tab mappings and DOM-only completion limitations still apply. Private reference HTML remains excluded; no private data, runtime AI, activity simulation or fingerprint spoofing is added. Publication is restricted to the existing fork review branch; no merge into master is authorized.
+
+## Document, chapter-assessment and cross-window infrastructure
+
+**STATUS: PARTIAL.** Parent baseline is `8d7ab1510b5371094ca77e6ffad96fdc08dd0219`. Executable infrastructure and synthetic integration are implemented; no real document/live adapter is enabled, and authenticated platform acceptance remains outstanding. This section supersedes earlier blanket statements that assessments always stop and that only video completion can authorize navigation.
+
+### Adapter boundary and supported functionality
+
+`app.taskAdapter` defaults to **null**. No document-viewer selector, live entry URL, destination domain or live-player selector has been invented. An evidence profile may supply `discover({node, document})`, returning null for unrelated pages or `{tasks, validateScope}` for an entirely recognized cards scope. Each task has `kind: 'document' | 'live'` and a connected `element` in that cards document or its accessible descendants. `validateScope()` must remain true only while the entire task set is known, with no unknown/verification components. Exceptions fail closed. A registered profile's known document scopes may contain approved document text; ordinary unknown text remains unsupported without a profile. Unsupported audio/media and inaccessible frames remain blockers. This interface is an integration seam, not a claim that any real viewer was recognized.
+
+Documents use actual scroll dimensions, reset to the beginning, and scroll in 40–120px increments at variable 400–1200ms intervals. Completion requires reaching the actual bottom and observing the same bottom height again. No-progress, disappearance, invalid scope or unavailable dimensions stop safely. The result is **local processing completion only**; document-only navigation does not add a server-completion poll. Mixed videos and live tasks retain their existing observable completion requirement. Multiple documents and mixed document/video flows are covered by executable tests. Virtualized/PDF/canvas viewers without verified dimensions remain unsupported.
+
+Chapter-end navigation uses the two observed exact labels, `章节测验` and `本章自测`. It requires an identifiable top-level chapter, at least one preceding learning leaf, satisfied preceding learning conditions, only optional assessment leaves remaining in that chapter, and a non-assessment/non-verification first content leaf in the next chapter. A locally processed document-only current task may satisfy its own preceding condition without changing its platform marker. Verification-like titles/content/labels, inaccessible task frames, generic exams, missing next chapters and incomplete prior learning stop. The script never clicks answer/submit controls or modifies assessment completion state. Any new destination still goes through normal discovery and safely stops if unsupported.
+
+### Cross-window architecture and protocol
+
+`WAITING_LIVE` is entered **before** opening a child. Existing parent timers and media event bindings are cancelled; parent video recovery cannot restart an obsolete player in this state. Duplicate play/nextUnit calls cannot open another child. The entry must be an evidence-supplied, connected normal `_blank` anchor on the current exact origin, without noopener/noreferrer. Unsupported links/origins fail closed; the code does not remove browser isolation directives or widen metadata matches.
+
+`window.__xuexitongTaskSupport.installChild(adapter)` installs one child coordinator, requiring explicit `isRecognized()`, `getPlayer()` and optional evidence-backed `sessionFinished()`. Repeated installation returns the active coordinator. An actual rendered HTML video element is kept at 1.0x and observed through events/position/duration. `liveNearEndThreshold` defaults to **0.99**. Finite positive duration permits a local near-end signal; ended/session-finished evidence takes priority. Unknown, zero, NaN or infinite duration is never converted to a made-up elapsed-time completion.
+
+The postMessage protocol is `xuexitong-live-v1`, with LIVE_OPENED, LIVE_READY, LIVE_PLAYING, LIVE_NEAR_END, LIVE_COMPLETED, LIVE_ERROR and LIVE_CLOSED. Every packet includes a crypto-generated ephemeral ID, coordinator generation, monotonic sender sequence and timestamp. Both sides enforce the exact current origin and related WindowProxy source; stale IDs/generations/sequences, invalid timestamps, malformed terminal payloads and wrong-direction messages are ignored. No wildcard origin, localStorage, manager storage or AI service is used. Task URL/DOM identity remains parent-local; no credentials or course records are transmitted. The existing @grant none and @match metadata remain unchanged.
+
+The parent checks child existence/document/origin every 2 seconds; the child checks media/session state every 10 seconds plus events. These checks and repeated handshakes are liveness information, **not completion**. There is no one-hour limit or other elapsed-time completion rule. Throttling delays checks without creating completion. Silent communication loss with no observable closure/error leaves the parent waiting for manual intervention; reload/navigation/explicit errors cause a safe block. Initial about:blank is tolerated only until a supported child document is established.
+
+### Closure and resumption
+
+A validated local near-end/ended message permits one close attempt on the associated child handle only. The next poll must observe actual closure; a denied/unconfirmed close requires manual handling and is not repeatedly attempted. Unexpected closure before a result blocks. Parent destruction, task/URL change or document invalidation disposes its coordinator; the child disposes reporting when its opener disappears. No unrelated tab is closed.
+
+After closure, the parent may process other recognized local tasks. Leaving a node containing video/live still requires its observable platform completion marker; local 99% is never treated as platform credit. Only after all relevant conditions pass does the existing randomized 5000–12000ms cooldown start, followed by task/generation/target revalidation. Optional chapter-end assessment transitions also use that cooldown and leave assessments unfinished.
+
+### Tests executed and evidence level
+
+The complete suites were executed:
+
+```text
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs
+node tests/customization-v3.mjs
+node tests/preserved-v3.mjs
+node tests/navigation-v3.mjs
+node --check (all 12 JS/MJS files)
+git diff --cached --check
+```
+
+The Playwright/jQuery paths remain local test inputs as documented above. The additional cross-window tests route reserved `https://course.test` pages locally, inside disposable browser contexts. They open actual Chrome popup pages and deliver native postMessage events; media states, two-hour clock advancement and denied-close behavior are simulated. No real network course page is accessed. Origin-denial cases use reserved `.test` domains only in tests, not runtime allowlists.
+
+The original 91 scenarios pass, with 37 additional document/assessment/live cases: **128 passed, 0 failed** (eight private-reference DOM cases and 120 synthetic cases). During implementation, popup initialization exposed the transient about:blank origin and opener becoming null after parent closure; both were corrected and have passing browser regressions. The tests cover incremental/local document completion, multiple/mixed tasks, document cancellation and unknown viewers; both optional assessment labels, unchanged unfinished markers, mandatory verification, missing chapters and incomplete learning; parent WAITING_LIVE before open, no duplicate windows, two simulated hours, finite 99%, true-live session-finished evidence, closure/return/cooldown, wrong-origin/source/stale/duplicate/malformed messages, popup blocking, denied close, unexpected closure, parent closure, changed URLs, communication reload, unrelated tabs and duplicate child installation.
+
+Preservation output:
+
+```text
+V3 source and userscript payload are synchronized and syntactically valid.
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.
+PASS: ordinary video guards, recovery, completion and cooldown scheduling preserved; explicit document/live waiting hooks and media-scope adapter routing verified against 8d7ab15.
+```
+
+Additional executed case output:
+
+```text
+PASS synthetic document scrolls incrementally from start to actual bottom without platform polling
+PASS synthetic multiple documents finish locally then await navigation cooldown
+PASS synthetic mixed document/video keeps video confirmation requirement
+PASS synthetic document scope invalidation and destruction cancel scrolling
+PASS synthetic unsupported document viewers stay stopped without an adapter
+PASS synthetic optional chapter-end 章节测验 stays unfinished and targets next chapter
+PASS synthetic optional chapter-end 本章自测 stays unfinished and targets next chapter
+PASS synthetic ambiguous/mandatory assessment stops: 身份验证/true/true
+PASS synthetic ambiguous/mandatory assessment stops: 考试/true/true
+PASS synthetic ambiguous/mandatory assessment stops: 章节测验/false/true
+PASS synthetic ambiguous/mandatory assessment stops: 章节测验/true/false
+PASS synthetic real popup: parent waits first, duplicates cannot open another window
+PASS synthetic two-hour true live stream remains waiting with unknown duration
+PASS synthetic live ended: associated child closes, marker then cooldown, normal video resumes
+PASS synthetic live near-end: associated child closes, marker then cooldown, normal video resumes
+PASS synthetic local near-end never fabricates platform completion
+PASS synthetic unexpected child closure safely blocks without navigation
+PASS synthetic denied child close is attempted once and requires manual handling
+PASS synthetic parent closure disposes child coordination without navigation
+PASS synthetic strict message origin/source/generation and duplicate sequence validation
+PASS synthetic blocked popup and cross-origin live entry never retry or advance
+PASS synthetic document destruction cancels even an already queued tick
+PASS synthetic unverifiable document bottom safely stops
+PASS synthetic task invalidation disposes live parent; stale child result cannot advance
+PASS synthetic lost/reloaded live communication blocks without reopening
+PASS synthetic duplicate terminal child messages request closure only once
+PASS synthetic true live session-finished evidence hands off without invented duration
+PASS synthetic malformed or unrelated live completion cannot close the child
+PASS synthetic finished video bypasses only trailing optional assessment into next chapter
+PASS synthetic finished document bypasses only trailing optional assessment into next chapter
+PASS synthetic live closure never closes an unrelated tab
+PASS synthetic same-document parent URL change invalidates live waiting
+PASS synthetic optional-assessment-only chapter has insufficient learning evidence
+PASS synthetic verification inside an optional assessment prevents handoff
+PASS synthetic noopener live link is unsupported without changing browser security policy
+PASS synthetic live-like page without an evidence adapter never opens a window
+PASS synthetic duplicate child installation keeps one player and one session listener
+RESULT: 128 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+```
+
+### Missing evidence / limitations for independent review
+
+- Real scroll-container/viewer DOM and reliable bottom behavior, especially virtualization or PDF/canvas rendering.
+- Actual live entry href, target/rel or platform JavaScript opening mechanism; exact child origin/URL and userscript matching; COOP/opener behavior.
+- Rendered child player DOM, supported media events, unknown-duration/session-finished evidence, platform completion updates and close policy.
+- Authenticated long-session/background tab/application-switch testing. No such live end-to-end run has been executed.
+- Cross-origin/noopener/COOP-separated children are unsupported. No grant or execution-context change is hidden in this patch. The unchanged metadata does not promise userscript execution on any as-yet-unknown live URL.
+- No real profile is registered. Synthetic tests explicitly inject adapters into a known test scope; users must not infer real Chaoxing compatibility or universal CAPTCHA recognition.
+
+Only source, generated userscript, tests and sanitized documentation are published to the fork review branch. No private HTML, platform-progress write, fabricated attendance, mouse simulation, fingerprint spoofing, runtime AI dependency, master merge, tag or release is included. Independent acceptance remains pending.

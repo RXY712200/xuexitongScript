@@ -26,15 +26,21 @@ for (const path of ['deepseek-console/xuexitong-console.js', 'deepseek-console/d
 }
 console.log('PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.');
 
-const reviewed = execFileSync('git', ['show', '6a44a2a4ca303f0f6102a73eeb4ed2261dd3ff99:v3_optimized.js'], { encoding: 'utf8' });
-assert.equal(current.slice(0, current.indexOf('    function initializePlayer()')),
-    reviewed.slice(0, reviewed.indexOf('    function initializePlayer()')));
-for (const name of ['run', '_bindPageGuards', '_startVideoMonitoring', '_tryResumePlayback',
-    '_checkVideoStatus', '_completeVideo', '_continueCompleted', 'playCurrentIndex',
-    '_getVideoEl', '_handlePlayError', '_bindStepNavigation']) {
-    assert.equal(method(current, name), method(reviewed, name), `${name} must match 6a44a2a`);
+const reviewed = execFileSync('git', ['show', '8d7ab1510b5371094ca77e6ffad96fdc08dd0219:v3_optimized.js'], { encoding: 'utf8' });
+for (const name of ['_bindPageGuards', '_startVideoMonitoring', '_tryResumePlayback', '_checkVideoStatus',
+    '_completeVideo', '_handlePlayError', '_bindStepNavigation', '_initCellData', '_schedule']) {
+    assert.equal(method(current, name), method(reviewed, name), `${name} must match 8d7ab15`);
 }
-console.log('PASS: catalog/media scope, playback/recovery and completion checks match 6a44a2a; cooldown changes are confined to navigation and cancellation.');
-assert.equal(method(current, 'play'), method(reviewed, 'play').replace(
-    "['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'FINISHED']",
-    "['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'FINISHED']"));
+assert.equal(method(current, '_continueCompleted'), method(reviewed, '_continueCompleted')
+    .replace("                if (!this._completionNode", "                if (this._processSupportedTask()) return;\n                if (!this._completionNode")
+    .replaceAll('videoAdapter.discover()', 'this._discoverMedia()'));
+assert.equal(method(current, 'play'), method(reviewed, 'play')
+    .replace("'NAVIGATION_COOLDOWN', 'FINISHED'", "'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'FINISHED'")
+    .replace('                    if (this._playPending) return;', '                    if (this._playPending) return;\n                    if (this._processSupportedTask()) return;')
+    .replaceAll('videoAdapter.discover()', 'this._discoverMedia()'));
+assert.equal(method(current, '_getVideoEl'), method(reviewed, '_getVideoEl')
+    .replace('            _getVideoEl() {', "            _getVideoEl() {\n                if (['WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;")
+    .replaceAll('videoAdapter.discover()', 'this._discoverMedia()'));
+const catalogBlock = source => source.slice(source.indexOf('    const catalog = {'), source.indexOf('    const videoAdapter = {'));
+assert.equal(catalogBlock(current), catalogBlock(reviewed));
+console.log('PASS: ordinary video guards, recovery, completion and cooldown scheduling preserved; explicit document/live waiting hooks and media-scope adapter routing verified against 8d7ab15.');
