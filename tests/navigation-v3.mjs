@@ -12,6 +12,7 @@ const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxil
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
 const auditionTask = readFileSync(new URL('../fixtures/synthetic/audition-audio-task.html', import.meta.url), 'utf8');
+const rerenderCatalog = readFileSync(new URL('../fixtures/synthetic/catalog-rerender.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
@@ -151,6 +152,196 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    async function prepareRerender(page) {
+        await page.evaluate(() => {
+            window.__originalVideo = app._videoEl; window.__navigationClicks = 0;
+            window.__markCurrent = (confirmed = true) => {
+                const node = document.querySelector('.posCatalog_active');
+                node.querySelector('input').value = '0';
+                if (confirmed && !node.querySelector('.icon_Completed')) node.insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>');
+            };
+            window.__replaceCurrent = (scope = 'node') => {
+                const node = document.querySelector('.posCatalog_active');
+                const old = scope === 'tree' ? document.querySelector('#coursetree') : scope === 'chapter' ? app._chapterOf(node) : node;
+                old.replaceWith(old.cloneNode(true));
+            };
+            window.__endOriginal = (native = true) => {
+                window.__originalVideo.__ended = true; window.__originalVideo.__paused = true;
+                if (native) window.__originalVideo.dispatchEvent(new Event('ended'));
+            };
+            document.addEventListener('click', event => {
+                if (event.target.closest?.('.posCatalog_name')?.parentElement.id !== 'node1') return;
+                window.__navigationClicks++;
+                document.querySelector('.posCatalog_active').classList.remove('posCatalog_active');
+                document.querySelector('#node1').classList.add('posCatalog_active');
+                const frame = document.createElement('iframe'); frame.setAttribute('info', 'card');
+                document.querySelector('iframe[info="card"]').replaceWith(frame); window.__addVideos(1);
+            });
+        });
+    }
+    for (const phase of ['playing', 'before-ended', 'monitor-first', 'after-ended', 'late-marker', 'cooldown', 'cooldown-tree', 'chapter', 'tree', 'chapter-no-ids', 'tree-no-ids', 'cooldown-tree-no-ids']) {
+        const html = phase.endsWith('no-ids') ? rerenderCatalog.replaceAll(/id="synthetic-chapter-[ab]"/g, '') : rerenderCatalog;
+        await check(`catalog rerender ${phase}: actual next-task click and normal playback`, () => using([html, 1, false, null, true], async page => {
+            await prepareRerender(page);
+            if (['after-ended', 'late-marker'].includes(phase)) {
+                await page.evaluate(() => window.__endOriginal());
+                if (phase === 'late-marker') await flush(page);
+                await page.evaluate(() => { window.__replaceCurrent(); window.__markCurrent(); });
+            } else if (phase.startsWith('cooldown')) {
+                await page.evaluate(() => { window.__markCurrent(); window.__endOriginal(); }); await flush(page);
+                assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+                await page.evaluate(phase => window.__replaceCurrent(phase.startsWith('cooldown-tree') ? 'tree' : 'node'), phase);
+                assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+            } else {
+                await page.evaluate(phase => {
+                    window.__replaceCurrent(phase.startsWith('chapter') ? 'chapter' : phase.startsWith('tree') ? 'tree' : 'node');
+                    if (phase === 'playing') app._checkVideoStatus();
+                    window.__markCurrent(); window.__endOriginal(phase !== 'monitor-first');
+                    if (phase === 'monitor-first') { app._checkVideoStatus(); app._tryResumePlayback('ended-focus'); window.__originalVideo.dispatchEvent(new Event('ended')); }
+                }, phase);
+            }
+            await flush(page, 3);
+            assert.deepEqual(await page.evaluate(() => [window.__navigationClicks, app._state, app._videoEl !== window.__originalVideo, app._videoEl.playbackRate,
+                window.__originalVideo.__plays]), [1, 'PLAYING', true, 1, 1]);
+        }));
+    }
+    await check('catalog rerender nested audition video survives leaf replacement without a chapter ID', () => using([
+        rerenderCatalog.replace('id="synthetic-chapter-a"', ''), 1, false, 'audition-match', true,
+    ], async page => {
+        await prepareRerender(page);
+        await page.evaluate(() => { window.__replaceCurrent(); window.__markCurrent(); window.__endOriginal(); });
+        await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks, window.__originalVideo.__plays, app._videoEl.playbackRate]), ['PLAYING', 1, 1, 1]);
+    }));
+    for (const failure of ['different-task', 'same-title-wrong-id', 'duplicate-id', 'ambiguous-active', 'wrong-chapter', 'player', 'document', 'url', 'no-node-key', 'no-chapter-key', 'mutated-node-key', 'mutated-chapter-key', 'topology-missing-key', 'topology-order', 'topology-group', 'topology-duplicate-key']) {
+        let html = rerenderCatalog;
+        if (failure === 'no-node-key') html = html.replace('id="node0"', '');
+        if (failure === 'no-chapter-key') html = html.replace('id="synthetic-chapter-a"', '');
+        if (failure.startsWith('topology-')) html = html.replaceAll(/id="synthetic-chapter-[ab]"/g, '');
+        await check(`catalog rerender refuses unproven continuity: ${failure}`, () => using([html, 1], async page => {
+            await prepareRerender(page);
+            await page.evaluate(failure => {
+                if (failure === 'different-task') { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); }
+                else if (failure === 'player') { window.__originalVideo.remove(); window.__addVideos(1); }
+                else if (failure === 'document') { const frame = document.createElement('iframe'); frame.setAttribute('info', 'card'); document.querySelector('iframe').replaceWith(frame); window.__addVideos(1); }
+                else if (failure === 'url') location.hash = 'different-task';
+                else if (failure === 'mutated-node-key') document.querySelector('#node0').id = 'other-task';
+                else if (failure === 'mutated-chapter-key') document.querySelector('#synthetic-chapter-a').id = 'other-chapter';
+                else if (failure.startsWith('topology-')) {
+                    window.__replaceCurrent('tree');
+                    const current = document.querySelector('#node0'), target = document.querySelector('#node1');
+                    if (failure === 'topology-missing-key') target.removeAttribute('id');
+                    if (failure === 'topology-order') document.querySelector('#coursetree > ul').prepend(target.closest('#coursetree > ul > li'));
+                    if (failure === 'topology-group') current.closest('ul').append(target.closest('li'));
+                    if (failure === 'topology-duplicate-key') target.closest('ul').append(target.closest('li').cloneNode(true));
+                }
+                else if (failure === 'no-chapter-key') {
+                    window.__replaceCurrent('chapter');
+                    const li = document.createElement('li'); li.innerHTML = '<div id="new-learning-item" class="posCatalog_select"><span class="posCatalog_name" title="New content">New content</span></div>';
+                    document.querySelector('.posCatalog_active').closest('ul').append(li);
+                }
+                else {
+                    window.__replaceCurrent(); const node = document.querySelector('.posCatalog_active');
+                    if (failure === 'same-title-wrong-id') node.id = 'other-task';
+                    if (failure === 'duplicate-id' || failure === 'ambiguous-active') {
+                        const duplicate = node.cloneNode(true);
+                        if (failure === 'duplicate-id') duplicate.classList.remove('posCatalog_active'); else duplicate.id = 'same-title-other-key';
+                        const li = document.createElement('li'); li.append(duplicate); node.closest('ul').append(li);
+                    }
+                    if (failure === 'wrong-chapter') document.querySelector('#synthetic-chapter-b ul').append(node);
+                }
+                app._checkVideoStatus(); window.__endOriginal();
+            }, failure);
+            await flush(page, 3);
+            assert.equal(await state(page), 'BLOCKED');
+            assert.equal(await page.evaluate(() => window.__navigationClicks), 0);
+        }));
+    }
+    for (const marker of ['absent', 'zero-only']) {
+        await check(`catalog rerender cannot replace completion evidence: ${marker}`, () => using([rerenderCatalog, 1], async page => {
+            await prepareRerender(page);
+            await page.evaluate(marker => { window.__replaceCurrent(); if (marker === 'zero-only') window.__markCurrent(false); window.__endOriginal(); }, marker);
+            await flush(page, 12);
+            assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => window.__navigationClicks), 0);
+        }));
+    }
+    await check('catalog rerender duplicates/stale completion callbacks never navigate or replay twice', () => using([rerenderCatalog, 1], async page => {
+        await prepareRerender(page);
+        await page.evaluate(() => {
+            window.__replaceCurrent(); window.__markCurrent(); window.__endOriginal(false);
+            app._guardLastResumeTs = -Infinity; app._tryResumePlayback('ended-focus');
+            window.__endOriginal(); app._checkVideoStatus(); window.__endOriginal();
+            window.__staleCompletionTimers = [...window.__timeouts.values()];
+        });
+        assert.equal(await page.evaluate(() => app._timers.size), 1);
+        await flush(page, 3);
+        await page.evaluate(() => { for (const fn of window.__staleCompletionTimers) fn(); app._handleVideoEnded({ target: window.__originalVideo }); });
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks, app._videoEl.__plays, window.__originalVideo.__plays]), ['PLAYING', 1, 1, 1]);
+    }));
+    await check('catalog rerender while play promise resolves still starts monitoring and eventually navigates once', () => using([rerenderCatalog, 1], async page => {
+        await prepareRerender(page);
+        await page.evaluate(async () => {
+            app._cancelTasks(); app._state = 'READY'; app._isPlaying = false;
+            const v = window.__originalVideo; v.__plays = 0;
+            v.play = () => { v.__plays++; return new Promise(resolve => { window.__resolvePlay = resolve; }); };
+            const pending = app.play(true); window.__replaceCurrent(); window.__resolvePlay(); await pending;
+        });
+        assert.equal(await page.evaluate(() => app._checkInterval !== null), true);
+        await page.evaluate(() => { window.__markCurrent(); window.__endOriginal(); }); await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks, window.__originalVideo.__plays]), ['PLAYING', 1, 1]);
+    }));
+    for (const pending of ['recovery', 'initial-play', 'muted-error']) {
+        await check(`catalog rerender ended before ${pending} rejection cannot trigger another play`, () => using([rerenderCatalog, 1], async page => {
+            await prepareRerender(page);
+            await page.evaluate(async pending => {
+                const video = window.__originalVideo; video.__plays = 0; video.__paused = true;
+                video.play = () => { video.__plays++; return new Promise((_, reject) => { window.__rejectPlay = reject; }); };
+                let playing;
+                if (pending === 'initial-play') { app._cancelTasks(); app._state = 'READY'; app._isPlaying = false; playing = app.play(true); }
+                else if (pending === 'recovery') { app._guardLastResumeTs = -Infinity; app._tryResumePlayback('synthetic-recovery'); }
+                else app._handlePlayError(new Error('Synthetic initial failure'));
+                window.__replaceCurrent(); window.__markCurrent(); window.__endOriginal(false);
+                window.__rejectPlay(new Error('Synthetic pending rejection'));
+                if (playing) await playing; else { await Promise.resolve(); await Promise.resolve(); }
+            }, pending);
+            assert.equal(await state(page), 'VERIFYING_COMPLETION');
+            await flush(page, 3);
+            assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks, window.__originalVideo.__plays]), ['PLAYING', 1, 1]);
+        }));
+    }
+    await check('catalog rerender rejects a changed media source even when the same video element is reused', () => using([rerenderCatalog, 1], async page => {
+        await prepareRerender(page);
+        await page.evaluate(async () => {
+            app._cancelTasks(); app._state = 'READY'; app._isPlaying = false;
+            window.__mediaSource = 'https://media.test/synthetic-original.mp4';
+            Object.defineProperty(window.__originalVideo, 'currentSrc', { get: () => window.__mediaSource });
+            await app.play(true);
+            window.__replaceCurrent(); window.__mediaSource = 'https://media.test/synthetic-different.mp4'; app._checkVideoStatus();
+        });
+        await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks]), ['BLOCKED', 0]);
+    }));
+    for (const invalid of ['duplicate-target', 'changed-target', 'duplicate-current-key']) {
+        await check(`catalog rerender cancels ambiguous cooldown destination: ${invalid}`, () => using([rerenderCatalog, 1, false, null, true], async page => {
+            await prepareRerender(page);
+            await page.evaluate(() => { window.__markCurrent(); window.__endOriginal(); }); await flush(page);
+            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            await page.evaluate(invalid => {
+                window.__replaceCurrent('tree');
+                const target = document.querySelector(invalid === 'duplicate-current-key' ? '#node0' : '#node1');
+                if (invalid === 'changed-target') target.id = 'other-target';
+                else { const duplicate = target.cloneNode(true); duplicate.classList.remove('posCatalog_active'); const li = document.createElement('li'); li.append(duplicate); target.closest('ul').append(li); }
+            }, invalid);
+            await flush(page, 3);
+            assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks]), ['BLOCKED', 0]);
+        }));
+    }
+    await check('catalog rerender defers the approved assessment without completing or submitting it', () => using([rerenderCatalog.replace('</ul></li>\n<li id="synthetic-chapter-b"', '<li><div id="deferred-assessment" class="posCatalog_select"><span class="posCatalog_name" title="章节测试">章节测试</span><input value="1"></div></li></ul></li>\n<li id="synthetic-chapter-b"'), 1], async page => {
+        await prepareRerender(page);
+        await page.evaluate(() => { window.__submits = 0; document.addEventListener('submit', () => window.__submits++); window.__replaceCurrent(); window.__markCurrent(); window.__endOriginal(); });
+        await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__navigationClicks, document.querySelector('#deferred-assessment input').value, window.__submits]), ['PLAYING', 1, '1', 0]);
+    }));
     for (const variant of ['match', 'id', 'visible', 'playing', 'duplicate', 'no-video', 'nested', 'class', 'controls', 'parent', 'progress', 'autoplay', 'seeking', 'extra-video', 'extra-frame', 'unknown-leaf', 'other-audio', 'inaccessible']) {
         await check(`audition audio structural classification: ${variant}`, () => using([outer(2), 1, false, `audition-${variant}`], async page => {
             assert.equal(await state(page), variant === 'match' ? 'PLAYING' : 'BLOCKED');

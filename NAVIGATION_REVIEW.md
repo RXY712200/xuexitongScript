@@ -695,3 +695,65 @@ The navigation suite adds 21 focused cases to the previous 188. Its eight privat
 Six files: V3 source and generated userscript, navigation/preservation tests, new `fixtures/synthetic/audition-audio-task.html` and this report. No grants, metadata, repository settings, legacy/DeepSeek code or private fixtures change. The exception intentionally fails if the document chain, media counts, hidden/paused state or leaf content differs; further real evidence is required before widening it. The actual role of auditionAudio remains unknown, and authenticated autoplay/background behavior/completion credit must be retested by the user. Existing native-live automatic popup ownership remains unsupported as documented above. Publication is only to the fork review branch; no master merge, tag, release or upstream PR.
 
 Final static/privacy gates: all 14 JavaScript syntax checks and git diff --check passed. Six candidate files were inspected and checked for credential literals, signed identity URLs and private keys; none found. All eight private fixtures remain excluded and untracked. Pattern checks supplement manual diff review, not an exhaustive privacy guarantee.
+
+## 2026-10-26: Catalog replacement continuity and ended-event ordering
+
+STATUS: PARTIAL. Implementation and local browser gates pass; authenticated revalidation remains required. Base: `87c3086245c1078fa13ad7df0391b99e656ebefb`.
+
+### Root cause analysis
+
+The user reported successful authenticated nested playback, strict auxiliary-audio recognition, 1.0x/background progress, natural end and a platform completion display, followed by a detached saved catalog node and a still-matching step title. The source compared DOM objects directly in _getVideoEl and other lifecycle paths; a detached node could therefore cause BLOCKED/cleanup before _completeVideo persisted the end signal. This is consistent with a catalog re-render race, not proof of the exact event timing, a player replacement or a broken marker selector. Independently, the monitor checked paused/recovery before ended, allowing recovery to compete with an already ended video. Both ordering/context paths are now covered synthetically.
+
+### Logical identity and exact changes
+
+Ordinary playback captures an in-memory context: the catalog node's initially unique DOM id (if any), exact node and step titles, chapter container and its initially unique id (if any), original connected video and its owner document, course-content document, current URL and coordinator generation. A complete ordered snapshot of unique leaf ids and their chapter grouping is retained when all keys are available. A nonempty media source is also retained only in memory and must not change; an initially empty source may be populated on the first valid observation. These values are neither logged nor persisted nor sent to another window.
+
+_refreshVideoContext validates the original video/document association and media safety, generation, URL, unique active catalog leaf and exact titles. It can rebind a detached node only to its currently unique matching DOM id, inside the original chapter object, or a uniquely keyed replacement chapter after the original chapter detached. For unkeyed replaced chapter containers, an unchanged complete ordered leaf-id/chapter-grouping snapshot provides an additional proof; missing, duplicate, added, reordered or regrouped keys reject that fallback. It does not accept a different connected task merely because titles match. Missing identity keys, duplicated keys, changed ids, ambiguous active leaves, other chapters, changed media sources, replaced players or changed content documents stop safely. DOM ids are continuity evidence combined with the original player/task context, not asserted server-side task identifiers. Whole-chapter/tree replacement needs a stable unique chapter id or the complete unchanged unique-key/grouping snapshot; leaf-only replacement can retain the original chapter object without either additional proof.
+
+The context tracks accepted node references in a WeakSet lineage. _getVideoEl, play and completion processing refresh references through that proof. _completeVideo stores the actual ended video once; _continueCompleted still performs the existing platform-marker verification. _schedule and the action-context wrapper accept detached references only from that validated lineage, while retaining their generation/URL/document checks. The sampler, delay ranges, cancellation mechanism and timer count are unchanged.
+
+_queueNavigation can also resolve a replaced destination during its existing cooldown using the destination's initially unique id, exact title and preserved/uniquely keyed chapter, with the same complete-topology fallback for unkeyed rebuilt containers. Eligibility then rechecks that this remains the intended next learning item under the existing directory/assessment rules, the original video has ended and the platform confirms completion. Ambiguous/moved/changed destinations cancel rather than guessing. Rebinding does not create another timer or click.
+
+The monitor and focus/pause recovery give ended precedence over play/recovery. Initial-play, recovery and muted-play rejection handlers also check ended before issuing fallback play/retry, after stale-context checks. Recovery cooldowns, stall thresholds, focus guards, legitimate muted fallback and the fixed 1.0x policy remain. No playback position, progress or platform record is assigned.
+
+### Completion evidence and assessment boundary
+
+catalog.status is unchanged: zero unfinished count alone is not completed; .icon_Completed remains required, and a positive unfinished count still blocks. That class exists in the previously supplied sanitized outer examples sample-04 and sample-08. The latest authenticated report supplied a green checkmark and completion text, not its actual DOM class; it does not independently prove .icon_Completed on that current page. No alternate selector, screenshot interpretation or text-based completion shortcut was invented. If the live page uses different markup, the script still stops pending real DOM evidence.
+
+The approved known-label assessment deferral is unchanged and still leaves assessment state untouched. The new combination test navigates past a synthetic supported chapter assessment to the next learning item with no submission. Real native recorded-live entries still require manual handling when popup ownership is unavailable; this change does not solve or weaken that boundary.
+
+### Actual verification
+
+Node v24.18.1; Chrome 156.0.8078.48 headless; Playwright and local jQuery selected by PLAYWRIGHT_MODULE/JQUERY_PATH. Browser network intercepted/blocked; media properties/events and navigation timers simulated. No authenticated browser session was accessed during implementation.
+
+```text
+node scripts/build-userscript.mjs
+[exit 0; no output]
+node tests/verify-v3.mjs
+V3 source and userscript payload are synchronized and syntactically valid.
+node tests/customization-v3.mjs
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+node tests/preserved-v3.mjs
+PASS: background guards/stall thresholds preserved; recovery rejects stale sessions and ended video; DeepSeek and legacy source unchanged.
+PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.
+PASS: 58a252a owned-popup protocol/child recovery and assessment/settings rules preserved; scheduler timing unchanged.
+PASS: audition discovery unchanged; all code outside the reviewed lifecycle methods matches 87c3086; pause/stall thresholds and scheduler timing unchanged.
+node tests/navigation-v3.mjs
+RESULT: 250 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+node tests/recorded-live-v3.mjs
+RESULT: 21 passed; 0 failed. Synthetic browser evidence only.
+node tests/native-entry-v3.mjs
+RESULT: 19 passed; 0 failed. Synthetic entry/manual-fallback evidence only.
+```
+
+The navigation suite adds 41 focused cases to the previous 209: replacement while playing, immediately before ended, monitor-before-native-event ordering, after ended/before verification, late marker, cooldown (including whole-tree replacement), keyed and unkeyed chapter/tree replacement, rejection of missing/duplicate/reordered/regrouped topology keys, nested audition structure without chapter id, true task/id/chapter/URL changes, missing keys, duplicated keys/active nodes, disconnected/replaced video or document, missing marker/zero-only status, duplicate events, stale callbacks, a pending play promise, three pending-rejection ordering cases, changed media source, ambiguous cooldown destinations and approved assessment deferral. Success cases assert one actual target click followed by the new video's PLAYING state and 1.0x, not just absence of an exception. Completion evidence absence must block. Eight existing private outer-example checks remain inert local tests; none of these tests proves authenticated compatibility.
+
+Preservation assertions compare unchanged runtime outside the narrowly listed lifecycle methods against 87c3086 and the full audition discovery block against that baseline. Additional normalized comparisons constrain completion/navigation verification, scheduler context, monitor recovery and muted fallback changes to the intended identity/end-priority substitutions. The historical DeepSeek/legacy files, recorded popup protocol, native manual fallback, document adapters, assessment rules, settings and random-delay sampler remain unchanged.
+
+### Files, privacy and remaining authenticated tests
+
+Six files: v3_optimized.js, generated v3_optimized.user.js, tests/navigation-v3.mjs, tests/preserved-v3.mjs, new fixtures/synthetic/catalog-rerender.html and this report. Fixtures use synthetic keys/titles and no authenticated URLs, course/user identifiers, signed media URLs or session data. Private outer fixtures remain locally excluded and untracked. No grants, external services, stable master, tag or release changes.
+
+The user must retest actual completion -> catalog replacement -> assessment deferral/next eligible task. Verify that the real catalog id remains unique/stable, that the chapter identity can be retained or uniquely re-established (including unchanged complete ordered unique keys/grouping for unkeyed wrappers), the original video/content document stays connected, and the actual completion element supports the retained selector. A temporarily absent/ambiguous active node, missing/duplicated/unverifiable keys, changed source, or lost original player still stops safely. No grace-period guessing or recovery across unverified player replacement is added. The private snapshots supplied earlier do not establish these latest runtime details. Background/application switching, authenticated completion credit and end-to-end navigation of this patch remain unverified by the agent. Publication is only for independent review on the existing fork branch; no master merge, tag, release or upstream PR.
+
+Final gates: all 14 JavaScript syntax checks and git diff --check passed. Six publication candidates were manually reviewed and checked for credential literals, signed identity URLs and private keys; none found. All eight private fixtures remain locally excluded and untracked. Pattern checks supplement review, not an exhaustive privacy guarantee.

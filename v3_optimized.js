@@ -599,6 +599,7 @@
                 this._nextVideoRequested = false;
                 this._completionNode = null;
                 this._completionVideo = null;
+                this._videoContext = null;
                 this._tryTimes = 0;
                 this._stepSwitchPending = false;
                 this._nextUnitPending = false;
@@ -613,6 +614,7 @@
             nextUnit() {
                 if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
+                if (!this._externalCompletion && this._state === 'READY_TO_ADVANCE' && !this._refreshVideoContext()) return this._block('视频任务身份无法确认');
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('平台完成状态尚未确认，停止自动导航');
@@ -668,7 +670,7 @@
             _runAction(category, key, callback, options = {}) {
                 const generation = this._generation, node = catalog.current(), title = this._currentStepTitle();
                 const href = window.location.href, content = videoAdapter.cardDocument();
-                const valid = () => !this._destroyed && generation === this._generation && node === catalog.current() &&
+                const valid = () => !this._destroyed && generation === this._generation && this._sameVideoTaskNode(node) &&
                     title === this._currentStepTitle() && href === window.location.href && content === videoAdapter.cardDocument() &&
                     this._actionEnabled(category) && (!options.isValid || options.isValid());
                 return this._actions.run(category, key, callback, { ...options, isValid: valid,
@@ -950,6 +952,7 @@
             },
             _navigationEligible(target) {
                 if (this._externalCompletion) return this._externalNavigationEligible(target);
+                if (!this._refreshVideoContext()) return false;
                 if (this._destroyed || this._isPlaying || this._isChapterTest() ||
                     catalog.current() !== this._completionNode ||
                     this._currentStepTitle() !== this._playStepTitle ||
@@ -977,11 +980,29 @@
                     this._state = 'PAUSED_AUTOMATION'; return;
                 }
                 if (this._liveReturnPendingNavigation) { this._liveReturnPendingNavigation = false; this.playCurrentIndex(target); return; }
+                const uniqueId = element => element?.id && Array.from(document.querySelectorAll('[id]')).filter(other => other.id === element.id).length === 1 ? element.id : '';
+                const targetId = uniqueId(target), targetTitle = this._nodeTitle(target), targetChapter = this._chapterOf(target);
+                const chapterId = uniqueId(targetChapter);
+                const topology = this._catalogTopology();
+                const resolveTarget = () => {
+                    if (!target.isConnected) {
+                        if (!targetId) return false;
+                        const matches = Array.from(document.querySelectorAll('[id]')).filter(el => el.id === targetId);
+                        if (matches.length !== 1 || !catalog.entries().includes(matches[0])) return false;
+                        target = matches[0];
+                    }
+                    const chapter = this._chapterOf(target);
+                    return this._nodeTitle(target) === targetTitle && (!targetId || (target.id === targetId &&
+                        Array.from(document.querySelectorAll('[id]')).filter(el => el.id === targetId).length === 1)) &&
+                        (chapter === targetChapter || (!targetChapter?.isConnected && chapterId && chapter?.id === chapterId &&
+                            Array.from(document.querySelectorAll('[id]')).filter(el => el.id === chapterId).length === 1) ||
+                            (!targetChapter?.isConnected && !chapterId && topology && this._catalogTopology() === topology));
+                };
                 this._state = 'NAVIGATION_COOLDOWN';
                 this._runAction(category, 'navigation', () => {
-                    if (this._state !== 'NAVIGATION_COOLDOWN' || !this._navigationEligible(target)) return this._block('冷却后导航条件失效');
+                    if (this._state !== 'NAVIGATION_COOLDOWN' || !resolveTarget() || !this._navigationEligible(target)) return this._block('冷却后导航条件失效');
                     this._state = 'READY_TO_ADVANCE'; this.playCurrentIndex(target);
-                }, { isValid: () => this._navigationEligible(target) });
+                }, { isValid: () => resolveTarget() && this._navigationEligible(target) });
             },
             _cooldownCleanup: null,
             _state: 'DISCOVERING',
@@ -990,13 +1011,54 @@
             _completedVideos: new WeakSet(),
             _completionNode: null,
             _completionVideo: null,
+            _catalogTopology() {
+                const entries = catalog.entries(), chapters = Array.from(document.querySelectorAll('#coursetree > ul > li'));
+                const keyedElements = Array.from(document.querySelectorAll('[id]'));
+                const keys = entries.map(node => [chapters.indexOf(this._chapterOf(node)), node.id]);
+                if (!keys.length || keys.some(([chapter, id]) => chapter < 0 || !id || keyedElements.filter(el => el.id === id).length !== 1)) return null;
+                return JSON.stringify(keys); // In-memory ordered keys/grouping, never persisted or logged.
+            },
+            _refreshVideoContext() {
+                const context = this._videoContext, node = catalog.current();
+                if (!context || this._destroyed || context.generation !== this._generation ||
+                    context.href !== window.location.href || context.document !== videoAdapter.cardDocument() ||
+                    context.video !== this._videoEl || !context.video.isConnected || !node ||
+                    context.video.ownerDocument !== context.playerDocument ||
+                    context.stepTitle !== this._currentStepTitle() || this._nodeTitle(node) !== context.nodeTitle) return false;
+                const keyedElements = Array.from(document.querySelectorAll('[id]'));
+                if (context.id && (node.id !== context.id || keyedElements.filter(el => el.id === context.id).length !== 1)) return false;
+                const chapter = this._chapterOf(node);
+                const sameChapter = chapter && (!context.chapterId || (chapter.id === context.chapterId &&
+                    keyedElements.filter(el => el.id === context.chapterId).length === 1)) && (chapter === context.chapter ||
+                    (!context.chapter?.isConnected && context.chapterId && chapter.id === context.chapterId &&
+                        keyedElements.filter(el => el.id === context.chapterId).length === 1) ||
+                    (!context.chapter?.isConnected && !context.chapterId && context.topology && this._catalogTopology() === context.topology));
+                if (!sameChapter) return false;
+                const media = this._discoverMedia();
+                if (media.inaccessible || media.unsupported || !media.videos.includes(context.video)) return false;
+                const source = context.video.currentSrc || context.video.getAttribute('src') || '';
+                if (context.source && source !== context.source) return false;
+                if (!context.source && source) context.source = source;
+                if (node === this._playNode) return true;
+                // Only replace a detached member of this task's proven lineage. A title
+                // match never authorizes rebinding a connected or different task node.
+                if (this._playNode?.isConnected || !context.nodes.has(this._playNode) || !context.id) return false;
+                const previous = this._playNode;
+                context.nodes.add(node); this._playNode = node;
+                if (this._completionNode === previous) this._completionNode = node;
+                return true;
+            },
+            _sameVideoTaskNode(node) {
+                return node === catalog.current() || (!!node && !node.isConnected &&
+                    this._videoContext?.nodes.has(node) && this._refreshVideoContext());
+            },
             _schedule(callback, delay) {
                 const generation = this._generation;
                 const node = catalog.current();
                 const timer = setTimeout(() => {
                     this._timers.delete(timer);
                     if (generation !== this._generation || this._destroyed) return;
-                    if (node !== catalog.current()) return this._block('页面目录已变化，请执行 app.run() 重新识别');
+                    if (!this._sameVideoTaskNode(node)) return this._block('页面目录已变化，请执行 app.run() 重新识别');
                     callback();
                 }, delay);
                 this._timers.add(timer);
@@ -1027,7 +1089,7 @@
             _completeVideo(video) {
                 if (!video || !video.isConnected || !video.ended || video !== this._videoEl ||
                     this._completedVideos.has(video) || this._state !== 'PLAYING') return;
-                if (catalog.current() !== this._playNode || this._currentStepTitle() !== this._playStepTitle) {
+                if (!this._refreshVideoContext()) {
                     return this._block('播放器完成事件属于已离开的页面');
                 }
                 console.log('视频自然播放结束，等待内容发现及平台完成确认。');
@@ -1041,6 +1103,7 @@
             },
             _continueCompleted(attempt) {
                 if (this._state !== 'VERIFYING_COMPLETION') return;
+                if (!this._refreshVideoContext()) return this._block('完成事件的任务或播放器身份无法确认');
                 if (this._isChapterTest()) return this._advanceChapterTest();
                 if (this._processSupportedTask()) return;
                 if (!this._completionNode || catalog.current() !== this._completionNode ||
@@ -1096,12 +1159,14 @@
 
                 const video = this._getVideoEl();
                 if (!video || !this._isPlaying) return;
+                if (video.ended) { this._completeVideo(video); return; }
                 const generation = this._generation;
 
                 console.log(`%c触发视频保活恢复(${reason})`, "color:#607D8B");
                 video.play().catch((e) => {
                     if (generation !== this._generation || !this._isPlaying || !video.isConnected ||
-                        video !== this._videoEl || catalog.current() !== this._playNode) return;
+                        video !== this._videoEl || !this._refreshVideoContext()) return;
+                    if (video.ended) { this._completeVideo(video); return; }
                     console.warn("直接恢复播放失败，尝试静音恢复:", e);
                     video.muted = true;
                     video.play().catch((err) => {
@@ -1113,6 +1178,7 @@
                 try {
                     const video = this._getVideoEl();
                     if (!video) return;
+                    if (video.ended) { this._completeVideo(video); return; }
 
                     if (video.paused && this._isPlaying) {
                         console.log("%c检测到视频暂停，尝试恢复播放...", "color:#FF5722");
@@ -1137,11 +1203,6 @@
                         }
                     }
 
-                    if (video.ended && this._isPlaying) {
-                        console.log("%c检测到视频结束，准备切换下一个...", "color:#9C27B0");
-                        this._isPlaying = false;
-                        this._completeVideo(video);
-                    }
                 } catch (e) {
                     console.error("视频状态检查失败:", e);
                 }
@@ -1161,8 +1222,7 @@
                         return;
                     }
                     if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
-                    if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
-                        this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
+                    if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
                     if (this._playPending || this._actions.pending.has('video-start') || this._actions.pending.has('video-tab')) return;
@@ -1201,6 +1261,13 @@
                     const node = catalog.current();
                     this._playNode = node;
                     this._playStepTitle = this._currentStepTitle();
+                    const chapter = this._chapterOf(node);
+                    const uniqueId = element => element?.id && Array.from(document.querySelectorAll('[id]')).filter(other => other.id === element.id).length === 1 ? element.id : '';
+                    this._videoContext = { id: uniqueId(node), nodeTitle: this._nodeTitle(node), stepTitle: this._playStepTitle,
+                        chapter, chapterId: uniqueId(chapter), video: el, playerDocument: el.ownerDocument, document: videoAdapter.cardDocument(),
+                        source: el.currentSrc || el.getAttribute('src') || '',
+                        topology: this._catalogTopology(),
+                        href: window.location.href, generation, nodes: new WeakSet([node]) };
                     this._state = 'PLAYING';
                     this._isPlaying = true;
                     this._videoEventHandle();
@@ -1210,7 +1277,7 @@
                         this._playPending = true;
                         await el.play();
                         if (generation === this._generation) this._playPending = false;
-                        if (generation !== this._generation || node !== catalog.current() ||
+                        if (generation !== this._generation || !this._sameVideoTaskNode(node) ||
                             !el.isConnected || this._state !== 'PLAYING') return;
                         this._tryTimes = 0;
                         console.log(`%c视频开始播放，倍速: ${el.playbackRate}x`, "color:#4CAF50");
@@ -1218,7 +1285,9 @@
                     } catch (playError) {
                         if (generation === this._generation) this._playPending = false;
                         console.error("视频播放失败:", playError);
-                        if (generation === this._generation && node === catalog.current() && this._state === 'PLAYING') this._handlePlayError(playError);
+                        if (generation === this._generation && this._sameVideoTaskNode(node) && this._state === 'PLAYING') {
+                            if (el.ended) this._completeVideo(el); else this._handlePlayError(playError);
+                        }
                     }
                 } catch (e) {
                     if (this._tryTimes >= this.configs.maxRetries) {
@@ -1303,12 +1372,13 @@
             _handlePlayError(error) {
                 console.error("播放错误详情:", error);
                 const video = this._getVideoEl();
+                if (video?.ended) { this._completeVideo(video); return; }
                 const generation = this._generation;
                 const node = catalog.current();
                 if (video) {
                     video.muted = true;
                     video.play().then(() => {
-                        if (generation !== this._generation || node !== catalog.current() ||
+                        if (generation !== this._generation || !this._sameVideoTaskNode(node) ||
                             !video.isConnected || this._state !== 'PLAYING') return;
                         console.log("%c静音播放成功", "color:#4CAF50");
                         this._tryTimes = 0;
@@ -1318,7 +1388,8 @@
                             this._delayedNextUnitTimer = null;
                         }
                     }).catch(e => {
-                        if (generation !== this._generation || node !== catalog.current()) return;
+                        if (generation !== this._generation || !this._sameVideoTaskNode(node)) return;
+                        if (video.ended) { this._completeVideo(video); return; }
                         console.error("静音播放也失败:", e);
                         if (this._delayedNextUnitTimer) {
                             clearTimeout(this._delayedNextUnitTimer);
@@ -1405,8 +1476,7 @@
             },
             _getVideoEl() {
                 if (['WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
-                if (this._state === 'PLAYING' && (catalog.current() !== this._playNode ||
-                    this._currentStepTitle() !== this._playStepTitle || !this._videoEl?.isConnected)) {
+                if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                     this._block('当前播放页面或播放器已变化');
                     this._videoEl = null;
                     return null;
