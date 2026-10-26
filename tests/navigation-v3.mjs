@@ -10,6 +10,7 @@ const jquery = readFileSync(process.env.JQUERY_PATH, 'utf8');
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
+const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
@@ -20,8 +21,12 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
     if (syntheticOrigin) await context.route('https://course.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body><video id="live-player"></video></body></html>' }));
+    if (syntheticOrigin === 'recorded') {
+        await context.route('https://mooc1.chaoxing.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic course</title>' }));
+        await context.route('https://zhibo.chaoxing.com/**', route => route.fulfill({ contentType: 'text/html', body: replayPopup }));
+    }
     const page = await context.newPage();
-    if (syntheticOrigin) await page.goto('https://course.test/course');
+    if (syntheticOrigin) await page.goto(syntheticOrigin === 'recorded' ? 'https://mooc1.chaoxing.com/synthetic-course' : 'https://course.test/course');
     // DOMParser is inert. Strip executable/resource-bearing content before insertion.
     const sanitized = await page.evaluate(html => {
         const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -619,7 +624,7 @@ try {
     }));
     const assessmentPage = (assessment = '章节测验', priorComplete = true, includeNextChapter = true) =>
         `<div class="prev_title" title="${assessment}"></div><div id="coursetree"><ul><li><ul>${node(0, false, priorComplete)}<li><div id="assessment" class="posCatalog_select posCatalog_active"><span class="posCatalog_name" title="${assessment}">${assessment}</span><input class="jobUnfinishCount" value="1"></div></li></ul></li>${includeNextChapter ? `<li><ul>${node(1, false)}</ul></li>` : ''}</ul></div><iframe info="card"></iframe>`;
-    for (const label of ['章节测验', '本章自测']) {
+    for (const label of ['章节测验', '章节测试', '本章自测']) {
         await check(`synthetic optional chapter-end ${label} stays unfinished and targets next chapter`, () => using([assessmentPage(label), 0, false, null, true], async page => {
             assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
             assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
@@ -629,16 +634,48 @@ try {
             assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
         }));
     }
-    for (const [label, prior, next] of [['身份验证', true, true], ['考试', true, true], ['章节测验', false, true], ['章节测验', true, false]]) {
+    for (const [label, prior, next] of [['身份验证', true, true], ['考试', true, true], ['章节测验', true, false]]) {
         await check(`synthetic ambiguous/mandatory assessment stops: ${label}/${prior}/${next}`, () => using([assessmentPage(label, prior, next), 0], async page => {
             assert.equal(await state(page), 'BLOCKED');
         }));
     }
-    async function startLive(page, { duration = 100, deniedClose = false, beforeOpen = null } = {}) {
+    await check('deferred current assessment does not require previous unfinished lessons to be marked completed', () => using([assessmentPage('章节测试', false), 0, false, null, true], async page => {
+        assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+        assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
+        assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
+    }));
+    for (const nextChapter of [false, true]) {
+        await check(`deferred consecutive assessments preserve next learning order; next chapter=${nextChapter}`, () => using([
+            `<div class="prev_title" title="视频"></div><div id="coursetree"><ul><li><ul>${node(0, true, true)}${['章节测验', '章节测试', '本章自测'].map((label, i) => `<li><div id="defer-${i}" class="posCatalog_select"><span class="posCatalog_name" title="${label}">${label}</span><input value="1"></div></li>`).join('')}${nextChapter ? '</ul></li><li><ul>' : ''}${node(1)}${node(2)}</ul></li></ul></div><iframe info="card"></iframe>`, 1, false, null, true,
+        ], async page => {
+            await page.evaluate(() => { window.__destinations = []; for (const i of [1, 2]) document.querySelector(`#node${i} .posCatalog_name`).onclick = () => window.__destinations.push(i); const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+            await flush(page);
+            assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+            await flush(page);
+            assert.deepEqual(await page.evaluate(() => window.__destinations), [1]);
+            assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('[id^="defer-"] input')].map(el => el.value)), ['1', '1', '1']);
+        }));
+    }
+    for (const restriction of ['aria-disabled', 'disabled', 'locked-text', 'authentication']) {
+        await check(`deferred assessment stops at restricted destination: ${restriction}`, () => using([assessmentPage(), 0, false, null, true], async page => {
+            await page.evaluate(restriction => {
+                app._cancelTasks(); const node = document.querySelector('#node1');
+                if (restriction === 'locked-text') node.append('未解锁');
+                else if (restriction === 'authentication') node.querySelector('span').title = '身份认证';
+                else node.setAttribute(restriction, restriction === 'disabled' ? '' : 'true');
+                app.run();
+            }, restriction);
+            assert.equal(await state(page), 'BLOCKED');
+            assert.equal(await page.evaluate(() => document.querySelector('#assessment input').value), '1');
+        }));
+    }
+    async function startLive(page, { duration = 100, deniedClose = false, beforeOpen = null, recorded = false } = {}) {
         const popupPromise = page.context().waitForEvent('page');
-        await page.evaluate(() => {
+        await page.evaluate(recorded => {
             const doc = document.querySelector('iframe[info="card"]').contentDocument;
             doc.body.innerHTML = '<a id="synthetic-live" target="_blank" href="https://course.test/live">Synthetic lecture</a>';
+            if (recorded) doc.querySelector('a').href = 'https://zhibo.chaoxing.com/synthetic-replay';
             const entry = doc.querySelector('a');
             app.taskAdapter = { discover() {
                 if (document.querySelector('.posCatalog_active').id !== 'node0') return null;
@@ -654,7 +691,7 @@ try {
                 const f = document.createElement('iframe'); f.setAttribute('info', 'card'); document.querySelector('iframe[info="card"]').replaceWith(f); window.__addVideos(1);
             };
             app.run();
-        });
+        }, recorded);
         if (beforeOpen) await beforeOpen(page);
         const child = await popupPromise;
         await child.waitForLoadState();
@@ -668,9 +705,9 @@ try {
             video.play = () => { window.__plays++; return Promise.resolve(); };
         }, duration);
         await child.addScriptTag({ content: source });
-        await child.evaluate(() => {
-            window.__child = window.__xuexitongTaskSupport.installChild({ isRecognized: () => !!document.querySelector('video'), getPlayer: () => document.querySelector('video'), sessionFinished: () => window.__sessionFinished === true });
-        });
+        await child.evaluate(recorded => {
+            window.__child = recorded ? window.__xuexitongLiveChild : window.__xuexitongTaskSupport.installChild({ isRecognized: () => !!document.querySelector('video'), getPlayer: () => document.querySelector('video'), sessionFinished: () => window.__sessionFinished === true });
+        }, recorded);
         if (deniedClose) await page.evaluate(() => { window.__closeAttempts = 0; app._liveController.child.close = () => { window.__closeAttempts++; }; });
         await page.evaluate(() => app._liveController.tick());
         await page.waitForFunction(() => window.__liveTypes.includes('LIVE_READY'));
@@ -680,6 +717,26 @@ try {
         await page.evaluate(() => { document.querySelector('#node0 input').value = '0'; document.querySelector('#node0').insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>'); });
     }
     const liveOptions = [outer(2), 0, false, null, true, true];
+    for (const confirmation of ['late', 'missing']) {
+        await check(`recorded cross-origin popup ${confirmation} platform marker controls parent continuation`, () => using([outer(2), 0, false, null, true, 'recorded'], async page => {
+            await page.evaluate(() => { const s = structuredClone(app.settings); s.delays.liveReturn.enabled = true; app.updateSettings(s); });
+            const child = await startLive(page, { recorded: true });
+            assert.equal(await state(page), 'WAITING_LIVE');
+            const closed = child.waitForEvent('close');
+            await child.evaluate(() => { window.__ended = true; window.__child.check(); });
+            await page.waitForFunction(() => app._actions.pending.has('live-return'));
+            await flush(page); await closed;
+            await page.evaluate(() => app._liveController.tick());
+            assert.equal(await state(page), 'VERIFYING_COMPLETION');
+            assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
+            if (confirmation === 'late') {
+                await confirmParentMarker(page); await flush(page);
+                assert.equal(await state(page), 'PLAYING');
+            } else {
+                await flush(page, 12); assert.equal(await state(page), 'BLOCKED');
+            }
+        }));
+    }
     await check('synthetic real popup: parent waits first, duplicates cannot open another window', () => using(liveOptions, async page => {
         const child = await startLive(page);
         assert.deepEqual(await page.evaluate(() => [window.__stateAtOpen, app._state, window.__openCalls, app._isPlaying]), ['WAITING_LIVE', 'WAITING_LIVE', 1, false]);
@@ -843,9 +900,9 @@ try {
         await page.evaluate(() => { history.pushState({}, '', '/elsewhere'); app._liveController.tick(); });
         assert.equal(await state(page), 'BLOCKED'); assert.equal(child.isClosed(), false);
     }));
-    await check('synthetic optional-assessment-only chapter has insufficient learning evidence', () => using([
+    await check('synthetic assessment-only chapter defers without changing unfinished status', () => using([
         '<div class="prev_title" title="章节测验"></div><div id="coursetree"><ul><li><ul><li><div class="posCatalog_select posCatalog_active"><span class="posCatalog_name" title="章节测验">章节测验</span></div></li></ul></li><li><ul>' + node(1) + '</ul></li></ul></div><iframe info="card"></iframe>', 0,
-    ], async page => { assert.equal(await state(page), 'BLOCKED'); }));
+    ], async page => { assert.notEqual(await state(page), 'BLOCKED'); }));
     await check('synthetic verification inside an optional assessment prevents handoff', () => using([assessmentPage(), 0, false, null, true], async page => {
         await page.evaluate(() => { app._cancelTasks(); document.querySelector('iframe').contentDocument.body.innerHTML = '<input placeholder="请输入验证码">'; app.run(); });
         assert.equal(await state(page), 'BLOCKED');

@@ -540,3 +540,53 @@ RESULT: 179 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no
 Only six files change: v3_optimized.js, its generated userscript, navigation/preservation tests, README and this review report. Private HTML remains locally excluded and untracked. No real document/live adapter, external service, progress write, AI runtime, grant change, fingerprint spoofing or release is added.
 
 These are local Chrome DOM/UI/popup tests. Media, timers, and long-session clocks remain simulated; no authenticated Chaoxing playback, physical application/tab switching or real viewer/live integration has been executed. Browser throttling may delay callbacks beyond the sampled interval. Delayed window.open may be blocked by real popup policy; that remains a safe stop. Native storage can be denied, and settings are scoped by browser origin. A cancelled/disabled action pauses automation and may require explicit manual selection/re-identification; re-enabling a setting never silently replays a completed task. Fixed-corner UI needs live layout acceptance on the user's actual course page. Independent ChatGPT review is pending before any merge into master.
+
+## 2026-10-26: Recorded popup and deferred assessments (supersedes earlier limitations above)
+
+STATUS: PARTIAL. Implementation and local gates pass. Authenticated platform acceptance remains unverified.
+Review base: `97952cac703f2e27dab3046f1848252cb24325c4` on `review/v3.4.0-modular-navigation`.
+
+### Evidence actually available
+
+The user supplied an independently reviewed sanitized description, not the full private popup HTML. This implementation did not inspect that full snapshot. Confirmed facts used: HTTPS popup origin `zhibo.chaoxing.com`, course origin `mooc1.chaoxing.com`, title `直播`, recorded flags `liveStatus=4` and `lookback=1`, `div#video.video-js` containing `video#video_html5_api.vjs-tech`, actual media ended support, and a non-authoritative `#endViewId`. The displayed 45:37 appears only in the synthetic fixture; runtime uses actual media properties, never a fixed recording length. Eight local outer-page examples remain private and excluded; they do not establish live-player compatibility.
+
+### Implementation
+
+- Dedicated popup bootstrap requires the exact HTTPS origin, top-level opener relationship, title, both recorded flags and the unique confirmed player. It probes delayed DOM loading for at most 30 attempts; this is initialization only, never a completion timer. Flags are read from numeric globals or literal assignments in script text without executing or evaluating captured source. No jQuery download is needed in the popup.
+- Playback stays at 1.0x. The dedicated recorded adapter waits for the media ended state/event; it rejects ratio-only near-end completion. Neither hidden nor visible end banners count. Unknown/infinite duration never implies completion. Ongoing live-status pages are unsupported by this recorded profile. Generic opt-in infrastructure retains its prior near-end capability.
+- Recorded child pause/focus/stall recovery calls play without artificial delay, with a 1500ms recovery cooldown and a 7000ms observed-stall threshold. It never assigns currentTime/duration or writes platform records. Media errors or lost recognition stop coordination. Ordinary course recovery methods are preserved by exact source checks.
+- Cross-origin communication permits only `https://mooc1.chaoxing.com` parent to `https://zhibo.chaoxing.com` child. Existing explicit same-origin adapters remain supported. Messages validate full origin, window source, ephemeral session ID, generation, increasing integer sequence and timestamp. Cross-origin children also pin a fresh document identity and recorded-player kind after READY; a changed instance stops coordination. No cross-origin DOM/location reads are attempted, and every postMessage uses an explicit target origin.
+- Only validated whitelisted feature/delay settings travel across the origin boundary, without persisting session/task metadata. Background settings propagate on parent polls. A validated LIVE_CANCEL disposes child timers/recovery after parent cancellation without closing or pausing the media. No userscript grants or external services were added.
+- Parent remains WAITING_LIVE, closes only its associated window after a validated result and the shared live-return delay, confirms actual closure, then still requires the existing observable course marker. Missing markers block after the existing bounded verification retries. Opener loss, noopener/noreferrer, blocked popup, unexpected close and denied close do not cause retries or blind advancement. Initial unsupported/lost communication can leave the parent waiting for manual intervention; it never proves completion.
+- Exact assessment labels `章节测验`, `章节测试`, `本章自测` can be deferred consecutively to the first subsequent learning leaf, within a chapter or across chapters. The first other learning leaf is never skipped. Starting on an assessment does not require retroactively marking earlier lessons complete. Ordinary video completion and platform-marker checks remain unchanged. Verification/authentication, examinations, unknown assessment labels, missing targets and evidenced generic disabled/locked destinations stop. Assessment markers remain untouched; no answers/submissions are generated. The switch defaults on and is labeled `暂缓章节测验并继续学习`. Existing next-lesson/chapter settings and one-action scheduler still govern handoff.
+
+### Actual commands and results
+
+Environment: Node v24.18.1; Chrome 156.0.8078.48 headless; Playwright selected by PLAYWRIGHT_MODULE and local jQuery by JQUERY_PATH. Browser network was intercepted/blocked. Real browser DOM, WindowProxy, postMessage and popup lifecycles were exercised; media properties/events and navigation timers were simulated. Popup-policy rejection was injected, not an authenticated interactive Chrome observation.
+
+```text
+node scripts/build-userscript.mjs
+[exit 0; no output]
+node tests/verify-v3.mjs
+V3 source and userscript payload are synchronized and syntactically valid.
+node tests/customization-v3.mjs
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+node tests/preserved-v3.mjs
+PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.
+PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.
+node tests/navigation-v3.mjs
+RESULT: 188 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+node tests/recorded-live-v3.mjs
+RESULT: 21 passed; 0 failed. Synthetic browser evidence only.
+```
+
+The navigation suite comprises eight inert private outer-structure checks and 180 synthetic cases. Nine cases expand the previous 179-case suite; obsolete assertions that unfinished/assessment-only chapters must always block were replaced because the user explicitly superseded that behavior. New coverage includes all three labels, consecutive deferred assessments, preserving learning order and one pending navigation, disabled/locked/authentication destinations, and cross-origin recorded completion with late/missing course markers. Existing scheduler/UI/document/generic-live tests still run. The separate 21-case suite covers strict recognition, finite and unknown duration, delayed player, real cross-origin message transport with simulated media, forged origin/source/session/generation/sequence, changed document, duplicate events, cancellation, feature propagation, pause/stall recovery, popup blocking, noopener, missing opener and media errors.
+
+### Files and privacy
+
+Nine files: `v3_optimized.js`, generated `v3_optimized.user.js`, `scripts/build-userscript.mjs`, `tests/navigation-v3.mjs`, `tests/preserved-v3.mjs`, new `tests/recorded-live-v3.mjs`, new `fixtures/synthetic/recorded-live-videojs.html`, `README.md`, and this report. Metadata adds only the confirmed popup host; @grant none and existing course matches remain. Private HTML, signed URLs, account/course identifiers, cookies and credentials are not included. The new fixture is explicitly synthetic with no real media URL. Historical DeepSeek experimental files remain unchanged and are not integrated into the V3 runtime.
+
+### Remaining acceptance requirements
+
+No authenticated course-to-popup-to-course run, actual HLS playback, server credit/attendance verification, physical tab/application-switch test, Chrome user-activation/popup-policy acceptance or real course layout test was performed. The real parent entry DOM/opening mechanism is still missing: taskAdapter remains opt-in, no speculative entry selector was added, and the live feature remains disabled by default. Document adapters also remain opt-in/default-off. Other popup origins, absent opener/COOP separation, unsupported players/statuses and unrecognized locks need additional evidence or manual handling. Generic aria-disabled/disabled/lock-text checks do not establish recognition of every platform-specific access restriction. Long sessions have no completion timeout; background throttling may postpone monitoring. A browser can deny opening/closing. Missing communication remains waiting/safe rather than proving completion. Master remains unchanged; publication is review-only and requires independent ChatGPT acceptance.
+Additional final gates: `node --check` passed for all 13 JavaScript files; `git diff --check` passed. Privacy audit output: `PASS: nine candidate files reviewed; credential literals/signed-identity URLs/private keys absent; zero tracked private fixtures; all eight private files excluded.` The complete source/test diff and generated payload were inspected before explicit staging; publication is limited to these nine files. Pattern checks supplement manual diff review and do not constitute an exhaustive data-loss-prevention guarantee.

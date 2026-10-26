@@ -12,6 +12,7 @@ const metadata = `// ==UserScript==
 // @match        *://mooc1.chaoxing.com/mycourse/studentstudy*
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
 // @match        *://*.chaoxing.com/mooc2-ans/mycourse/studentstudy*
+// @match        https://zhibo.chaoxing.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==

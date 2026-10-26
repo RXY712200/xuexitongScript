@@ -12,19 +12,20 @@
         window[BOOT_TIMER_KEY] = null;
     }
 
-    if (typeof window.jQuery === 'undefined') {
-        const script = document.createElement('script');
-        script.src = 'https://code.jquery.com/jquery-3.6.0.min.js';
-        script.type = 'text/javascript';
-        script.onload = function () {
-            console.log("jQuery loaded.");
+    function bootCourse() {
+        if (typeof window.jQuery === 'undefined') {
+            const script = document.createElement('script');
+            script.src = 'https://code.jquery.com/jquery-3.6.0.min.js';
+            script.type = 'text/javascript';
+            script.onload = function () {
+                console.log("jQuery loaded.");
+                waitForCoursePage();
+            };
+            document.head.appendChild(script);
+        } else {
             waitForCoursePage();
-        };
-        document.head.appendChild(script);
-    } else {
-        waitForCoursePage();
+        }
     }
-
     function waitForCoursePage() {
         let attempts = 0;
         const maxAttempts = 20;
@@ -45,8 +46,8 @@
     }
 
     // Rules are limited to the supplied outer structures and the existing V3 player.
-    const assessmentTitle = text => /测验|自测|作业|考试|验证/.test(text);
-    const optionalAssessment = text => ['章节测验', '本章自测'].includes(text.trim());
+    const assessmentTitle = text => /测验|测试|自测|作业|考试|验证/.test(text);
+    const optionalAssessment = text => ['章节测验', '章节测试', '本章自测'].includes(text.trim());
     const verificationTitle = text => /验证码|验证|认证|登录|人脸|captcha|authentication/i.test(text);
     const videoTitle = text => /^(?:\d+\s*)?视频$/.test(text.trim());
     const catalog = {
@@ -120,7 +121,7 @@
 
     const SETTINGS_KEY = 'xuexitong.v3.action-settings.v1';
     const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', nextLesson: '自动下一课节',
-        nextChapter: '自动下一章节', assessment: '章末测验交接', document: '文档阅读', live: '直播窗口协调', background: '后台播放保护' };
+        nextChapter: '自动下一章节', assessment: '暂缓章节测验并继续学习', document: '文档阅读', live: '直播窗口协调', background: '后台播放保护' };
     const ACTIONS = {
         videoStart: ['视频开始', 300, 900, 'videoPlayback'], nextVideo: ['课内下一视频', 500, 1500, 'nextVideo'],
         documentScroll: ['文档逐步滚动', 400, 1200, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
@@ -200,31 +201,63 @@
             cancelWhere(test, reason = 'settings') { for (const action of [...pending.values()]) if (test(action.category)) action.cancel(reason); } };
     }
 
-    // Evidence adapters are opt-in. No live URL, player selector or document viewer is guessed.
+    // Parent entry/document adapters remain opt-in; the recorded popup uses confirmed evidence only.
+    function bootRecordedPopup() {
+        if (window.top !== window || !window.opener) return;
+        const flag = name => {
+            if (typeof window[name] === 'number') return window[name];
+            const values = Array.from(document.scripts).flatMap(script => Array.from(script.textContent.matchAll(
+                new RegExp('(?:^|[;\\s])(?:var\\s+|let\\s+|const\\s+)?' + name + '\\s*=\\s*(\\d+)\\s*(?=[;,\\r\\n]|$)', 'g')), match => Number(match[1])));
+            return values.length && values.every(value => value === values[0]) ? values[0] : null;
+        };
+        const adapter = {
+            kind: 'chaoxing-recorded-videojs', allowNearEnd: false, recoverPlayback: true,
+            isRecognized: () => window.location.origin === 'https://zhibo.chaoxing.com' &&
+                document.title.trim() === '直播' && flag('liveStatus') === 4 && flag('lookback') === 1 &&
+                document.querySelectorAll('div#video.video-js video#video_html5_api.vjs-tech').length === 1,
+            getPlayer: () => document.querySelector('div#video.video-js video#video_html5_api.vjs-tech'),
+        };
+        let attempts = 0;
+        const stop = () => { clearInterval(window[BOOT_TIMER_KEY]); window[BOOT_TIMER_KEY] = null; window.removeEventListener('pagehide', stop); };
+        const probe = () => {
+            if (adapter.isRecognized()) { stop(); window.__xuexitongTaskSupport.installChild(adapter); }
+            else if (++attempts >= 30) { stop(); console.warn('不支持或未加载的直播回放页面；课程窗口保持等待，请手动处理。'); }
+        };
+        window[BOOT_TIMER_KEY] = setInterval(probe, 1000);
+        window.addEventListener('pagehide', stop);
+        probe();
+    }
     function createTaskSupport(env) {
         const protocol = 'xuexitong-live-v1';
-        const types = new Set(['LIVE_OPENED', 'LIVE_READY', 'LIVE_PLAYING', 'LIVE_NEAR_END', 'LIVE_COMPLETED', 'LIVE_ERROR', 'LIVE_CLOSED']);
+        const courseOrigin = 'https://mooc1.chaoxing.com';
+        const replayOrigin = 'https://zhibo.chaoxing.com';
+        const trustedPair = (parent, child) => parent === courseOrigin && child === replayOrigin;
+        const types = new Set(['LIVE_OPENED', 'LIVE_READY', 'LIVE_PLAYING', 'LIVE_NEAR_END', 'LIVE_COMPLETED', 'LIVE_ERROR', 'LIVE_CLOSED', 'LIVE_CANCEL']);
         const send = (peer, session, type, extra = {}) => peer.postMessage({
             protocol, id: session.id, generation: session.generation, seq: ++session.sent,
-            timestamp: Date.now(), type, ...extra,
-        }, env.location.origin);
+            timestamp: Date.now(), type, ...(session.documentId ? { documentId: session.documentId, playerKind: 'chaoxing-recorded-videojs' } : {}), ...extra,
+        }, session.peerOrigin || env.location.origin);
         const accept = (event, session, peer) => {
             const data = event.data;
-            return event.origin === env.location.origin && event.source === peer && data &&
+            return event.origin === (session.peerOrigin || env.location.origin) && event.source === peer && data &&
                 data.protocol === protocol && data.id === session.id && data.generation === session.generation &&
                 types.has(data.type) && Number.isSafeInteger(data.seq) && data.seq > session.received &&
                 Number.isFinite(data.timestamp) && data.timestamp >= session.started - 5000 && data.timestamp <= Date.now() + 30000;
         };
         function createParent({ entry, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn() }) {
             const url = new URL(entry.href, env.location.href);
+            const crossOrigin = url.origin !== env.location.origin;
             if (!entry.isConnected || entry.tagName !== 'A' || entry.target !== '_blank' ||
-                entry.relList?.contains('noopener') || entry.relList?.contains('noreferrer') || url.origin !== env.location.origin ||
+                entry.relList?.contains('noopener') || entry.relList?.contains('noreferrer') || (crossOrigin && !trustedPair(env.location.origin, url.origin)) ||
                 !['http:', 'https:'].includes(url.protocol) || !Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
                 throw new Error('Unsupported live entry/origin/threshold');
             }
-            const session = { id: env.crypto.randomUUID(), generation, sent: 0, received: 0, started: Date.now() };
+            const session = { id: env.crypto.randomUUID(), generation, sent: 0, received: 0, started: Date.now(), peerOrigin: url.origin };
             let child, timer, disposed = false, result = null, closeAttempted = false, childDocument = null;
             const dispose = () => {
+                if (crossOrigin && !disposed && child && !child.closed && session.documentId) {
+                    try { send(child, session, 'LIVE_CANCEL'); } catch (_) { /* Cancellation never closes a window. */ }
+                }
                 disposed = true; env.clearInterval(timer);
                 env.removeEventListener('message', receive); env.removeEventListener('pagehide', dispose);
             };
@@ -239,19 +272,28 @@
                     dispose(); onResult(result); return;
                 }
                 try {
-                    if ((child.location.origin !== env.location.origin && !(child.location.href === 'about:blank' && !childDocument)) ||
-                        (childDocument && child.document !== childDocument)) {
+                    if (!crossOrigin && ((child.location.origin !== env.location.origin && !(child.location.href === 'about:blank' && !childDocument)) ||
+                        (childDocument && child.document !== childDocument))) {
                         return fail('Live window left its supported document/origin');
                     }
                     if (result && !closeAttempted) return;
                     if (closeAttempted) return fail('Live window closure denied or not confirmed; handle manually');
-                    send(child, session, 'LIVE_OPENED', { threshold });
+                    send(child, session, 'LIVE_OPENED', { threshold, ...(crossOrigin ? { settings: loadSettings(env) } : {}) });
                 } catch (_) { fail('Live window communication unavailable'); }
             };
             function receive(event) {
                 if (disposed || !child || !accept(event, session, child) || !isValid()) return;
                 const data = event.data;
-                if (data.type === 'LIVE_OPENED') return;
+                if (data.type === 'LIVE_OPENED' || data.type === 'LIVE_CANCEL') return;
+                if (crossOrigin) {
+                    if (data.playerKind !== 'chaoxing-recorded-videojs' || typeof data.documentId !== 'string' || !/^[\w-]{16,80}$/.test(data.documentId)) return;
+                    if (!session.documentId) {
+                        if (data.type !== 'LIVE_READY') return;
+                        session.documentId = data.documentId;
+                    } else if (data.documentId !== session.documentId) return fail('Live child document changed');
+                    // Recorded adapter must reach natural ended, never merely a local ratio.
+                    if (data.type === 'LIVE_NEAR_END') return;
+                }
                 if (data.type === 'LIVE_COMPLETED' && data.ended !== true) return;
                 if (data.type === 'LIVE_NEAR_END' && !(Number.isFinite(data.duration) && data.duration > 0 &&
                     Number.isFinite(data.position) && data.position >= 0 && data.position <= data.duration + 1 &&
@@ -260,7 +302,7 @@
                 if (result) return;
                 if (data.type === 'LIVE_ERROR' || data.type === 'LIVE_CLOSED') return fail('Live child stopped unexpectedly');
                 if (data.type === 'LIVE_READY') {
-                    try { childDocument = child.document; } catch (_) { return fail('Live document inaccessible'); }
+                    if (!crossOrigin) try { childDocument = child.document; } catch (_) { return fail('Live document inaccessible'); }
                 }
                 const ended = data.type === 'LIVE_COMPLETED' && data.ended === true;
                 const near = data.type === 'LIVE_NEAR_END' && Number.isFinite(data.duration) && data.duration > 0 &&
@@ -291,6 +333,7 @@
             if (env.__xuexitongLiveChild && !env.__xuexitongLiveChild.disposed) return env.__xuexitongLiveChild;
             if (!env.opener || !adapter || typeof adapter.isRecognized !== 'function' || !adapter.isRecognized()) return null;
             let session = null, video = null, timer, terminal = false, disposed = false;
+            let lastPosition = -1, lastProgress = Date.now(), lastRecovery = -Infinity, playPending = false;
             let settings = loadSettings(env);
             const actions = createActionScheduler(env, {
                 rule: category => ({ ...settings.delays[category], enabled: settings.randomDelaysEnabled && settings.delays[category].enabled }),
@@ -304,28 +347,58 @@
                 for (const [target, type, handler] of listeners) target.removeEventListener(type, handler);
             };
             const report = (type, extra) => { if (session && !disposed && env.opener && !env.opener.closed) send(env.opener, session, type, extra); };
+            const applySettings = next => {
+                const previous = settings; settings = next;
+                if (previous.features.live !== settings.features.live || previous.features.videoPlayback !== settings.features.videoPlayback ||
+                    previous.randomDelaysEnabled !== settings.randomDelaysEnabled || JSON.stringify(previous.delays.videoStart) !== JSON.stringify(settings.delays.videoStart)) actions.cancelAll('settings');
+                if (!settings.features.live) { report('LIVE_ERROR'); dispose(); }
+            };
             const check = () => {
                 if (disposed || !session) return;
                 if (!env.opener || env.opener.closed) return dispose();
-                if (!adapter.isRecognized() || !video.isConnected) { report('LIVE_ERROR'); return dispose(); }
+                if (!adapter.isRecognized() || !video.isConnected || video.error) { report('LIVE_ERROR'); return dispose(); }
                 if (terminal) return;
+                if (video.playbackRate !== 1) video.playbackRate = 1;
                 if (video.ended || adapter.sessionFinished?.() === true) {
                     terminal = true; report('LIVE_COMPLETED', { ended: true });
-                } else if (Number.isFinite(video.duration) && video.duration > 0 &&
+                } else if (adapter.allowNearEnd !== false && Number.isFinite(video.duration) && video.duration > 0 &&
                     Number.isFinite(video.currentTime) && video.currentTime / video.duration >= session.threshold) {
                     terminal = true; report('LIVE_NEAR_END', { position: video.currentTime, duration: video.duration });
-                } else report(video.paused ? 'LIVE_READY' : 'LIVE_PLAYING');
+                } else {
+                    report(video.paused ? 'LIVE_READY' : 'LIVE_PLAYING');
+                    if (adapter.recoverPlayback && settings.features.live && settings.features.videoPlayback && settings.features.background) {
+                        if (video.currentTime !== lastPosition) { lastPosition = video.currentTime; lastProgress = Date.now(); }
+                        if ((video.paused || Date.now() - lastProgress >= 7000) && !actions.pending.size &&
+                            !playPending && Date.now() - lastRecovery >= 1500) {
+                            lastRecovery = Date.now(); playPending = true;
+                            Promise.resolve(video.play()).catch(() => report('LIVE_ERROR')).finally(() => { playPending = false; });
+                        }
+                    }
+                }
             };
             listen(env, 'message', event => {
                 const data = event.data;
-                if (!data || data.type !== 'LIVE_OPENED') return;
+                if (!data) return;
+                if (data.type === 'LIVE_CANCEL') {
+                    if (session && accept(event, session, env.opener) && data.documentId === session.documentId) dispose();
+                    return;
+                }
+                if (data.type !== 'LIVE_OPENED') return;
                 if (!session) {
-                    if (event.origin !== env.location.origin || event.source !== env.opener || !data ||
+                    const crossOrigin = event.origin !== env.location.origin;
+                    if ((crossOrigin && (!trustedPair(event.origin, env.location.origin) || adapter.kind !== 'chaoxing-recorded-videojs')) || event.source !== env.opener || !data ||
                         data.protocol !== protocol || data.type !== 'LIVE_OPENED' ||
                         typeof data.id !== 'string' || !/^[\w-]{16,80}$/.test(data.id) ||
                         !Number.isSafeInteger(data.generation) || data.generation < 0 || !Number.isFinite(data.threshold) || data.threshold <= 0 || data.threshold > 1) return;
-                    const candidate = { id: data.id, generation: data.generation, started: Date.now(), sent: 0, received: 0, threshold: data.threshold };
+                    const candidate = { id: data.id, generation: data.generation, started: Date.now(), sent: 0, received: 0, threshold: data.threshold,
+                        peerOrigin: event.origin, ...(crossOrigin ? { documentId: env.crypto.randomUUID() } : {}) };
                     if (!accept(event, candidate, env.opener)) return;
+                    if (crossOrigin) {
+                        let supplied;
+                        try { supplied = validateSettings(data.settings); } catch (_) { return; }
+                        if (!supplied || !supplied.features.live) return;
+                        settings = supplied;
+                    }
                     session = candidate;
                     video = adapter.getPlayer();
                     if (!video?.isConnected || typeof video.play !== 'function' || video.tagName !== 'VIDEO') {
@@ -333,21 +406,27 @@
                     }
                     video.playbackRate = 1;
                     listen(video, 'ratechange', () => { if (video.playbackRate !== 1) video.playbackRate = 1; });
-                    for (const type of ['timeupdate', 'durationchange', 'ended', 'play']) listen(video, type, check);
+                    for (const type of ['timeupdate', 'durationchange', 'ended', 'play', ...(adapter.recoverPlayback ? ['pause'] : [])]) listen(video, type, check);
                     report('LIVE_READY');
                     actions.run('videoStart', 'child-video-start', () => video.play().catch(() => report('LIVE_ERROR')),
                         { isValid: () => !disposed && !!env.opener && !env.opener.closed && video.isConnected && adapter.isRecognized() });
                     timer = env.setInterval(check, 10000);
+                    if (adapter.recoverPlayback) {
+                        listen(env, 'focus', check);
+                        listen(env.document, 'visibilitychange', check);
+                    }
                 }
                 if (!accept(event, session, env.opener)) return;
+                if (session.peerOrigin !== env.location.origin) {
+                    if (data.documentId && data.documentId !== session.documentId) return;
+                    try { applySettings(validateSettings(data.settings)); } catch (_) { return; }
+                    if (disposed) return;
+                }
                 session.received = data.seq;
                 check();
             });
             listen(env, 'storage', event => { if (event.key === SETTINGS_KEY) {
-                const previous = settings; settings = loadSettings(env);
-                if (previous.features.live !== settings.features.live || previous.features.videoPlayback !== settings.features.videoPlayback ||
-                    previous.randomDelaysEnabled !== settings.randomDelaysEnabled || JSON.stringify(previous.delays.videoStart) !== JSON.stringify(settings.delays.videoStart)) actions.cancelAll('settings');
-                if (!settings.features.live) { report('LIVE_ERROR'); dispose(); }
+                applySettings(loadSettings(env));
             } });
             listen(env, 'pagehide', () => { if (!terminal) report('LIVE_CLOSED'); dispose(); });
             if (env[BOOT_TIMER_KEY]) { env.clearInterval(env[BOOT_TIMER_KEY]); env[BOOT_TIMER_KEY] = null; }
@@ -633,19 +712,18 @@
             _assessmentTarget(node) {
                 if (this._verificationPresent()) return null;
                 const entries = catalog.entries();
-                const chapter = this._chapterOf(node);
-                if (!chapter) return null;
-                const local = entries.filter(entry => this._chapterOf(entry) === chapter);
-                const index = local.indexOf(node);
-                if (index < 0 || !local.slice(0, index).some(entry => !optionalAssessment(this._nodeTitle(entry))) ||
-                    !local.slice(index).every(entry => optionalAssessment(this._nodeTitle(entry)))) return null;
-                if (!local.slice(0, index).every(entry => optionalAssessment(this._nodeTitle(entry)) || catalog.status(entry) === 'completed' ||
-                    (entry === this._completionNode && this._externalCompletion?.kind === 'document' &&
-                        this._externalCompletion.localDone && !this._hadLive && this._taskContextValid(this._externalCompletion) &&
-                        this._discoverMedia().videos.length === 0))) return null;
-                const nextChapter = chapter.nextElementSibling;
-                const target = entries.find(entry => this._chapterOf(entry) === nextChapter);
-                return target && !assessmentTitle(this._nodeTitle(target)) && !verificationTitle(this._nodeTitle(target)) ? target : null;
+                let index = entries.indexOf(node);
+                if (index < 0 || !this._chapterOf(node) || !optionalAssessment(this._nodeTitle(node))) return null;
+                // Defer consecutive known assessments, never skip another learning leaf.
+                while (index < entries.length && optionalAssessment(this._nodeTitle(entries[index]))) {
+                    if (entries[index].closest('[aria-disabled="true"], [disabled]')) return null;
+                    index++;
+                }
+                const target = entries[index], title = target && this._nodeTitle(target);
+                return target && target.isConnected && this._chapterOf(target) && title &&
+                    !assessmentTitle(title) && !verificationTitle(title) &&
+                    !/锁定|未解锁|不可访问/.test(target.textContent) &&
+                    !target.closest('[aria-disabled="true"], [disabled]') ? target : null;
             },
             _targetAfter(node) {
                 const entries = catalog.entries();
@@ -653,8 +731,6 @@
                 if (!next) return undefined;
                 if (verificationTitle(this._nodeTitle(next))) return null;
                 if (!assessmentTitle(this._nodeTitle(next))) return next;
-                // Only the two observed optional labels at the end of the same chapter.
-                if (this._chapterOf(next) !== this._chapterOf(node)) return null;
                 return this._assessmentTarget(next);
             },
             _taskSet() {
@@ -1386,4 +1462,6 @@
             console.log("请检查是否在正确的课程播放页面，或者页面结构是否再次发生改变。");
         }
     }
+    if (window.location?.origin === 'https://zhibo.chaoxing.com') bootRecordedPopup();
+    else bootCourse();
 })();
