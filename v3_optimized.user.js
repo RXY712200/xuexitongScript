@@ -97,12 +97,14 @@
         discover(knownDocuments = new Set()) {
             const result = { videos: [], inaccessible: false, unsupported: false, documents: [] };
             const seen = new Set();
+            const audios = [];
             const visit = (doc, depth) => {
                 if (!doc || seen.has(doc)) return;
                 seen.add(doc);
                 result.documents.push(doc);
                 result.videos.push(...doc.querySelectorAll('video#video_html5_api, video[id*="video_html5"]'));
-                if (doc.querySelector('audio, video:not([id*="video_html5"])')) result.unsupported = true;
+                audios.push(...doc.querySelectorAll('audio'));
+                if (doc.querySelector('video:not([id*="video_html5"])')) result.unsupported = true;
                 if (depth > 0 && !knownDocuments.has(doc) && !doc.querySelector('video, iframe')) {
                     const body = doc.body?.cloneNode(true);
                     body?.querySelectorAll('script, style').forEach(node => node.remove());
@@ -129,6 +131,29 @@
                 else visit(content, 1); // Keep all nested task checks and the depth bound.
             }
             result.videos = [...new Set(result.videos)].filter(video => video.isConnected);
+            if (audios.length) {
+                // This is a structural exception, not proof of auditionAudio's purpose.
+                // Decide only after the full task tree is checked; never clear a blocker.
+                let auxiliary = false;
+                try {
+                    const [root, player, leaf] = result.documents, audio = audios[0];
+                    const leafBody = leaf?.body?.cloneNode(true);
+                    leafBody?.querySelectorAll('script, style').forEach(node => node.remove());
+                    auxiliary = !result.inaccessible && !result.unsupported && result.documents.length === 3 &&
+                        audios.length === 1 && result.videos.length === 1 && audio.ownerDocument === root &&
+                        root.querySelectorAll('video').length === 0 && root.querySelectorAll('iframe').length === 1 &&
+                        root.querySelector('iframe').contentDocument === player &&
+                        player.querySelectorAll('video').length === 1 && result.videos[0].ownerDocument === player &&
+                        player.querySelectorAll('iframe').length === 1 && player.querySelector('iframe').contentDocument === leaf &&
+                        leaf.querySelectorAll('video, iframe').length === 0 &&
+                        leafBody && !leafBody.textContent.trim() && !leafBody.querySelector('form, input, object, embed, canvas, img') &&
+                        root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
+                        audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
+                        audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
+                        audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
+                } catch (_) { /* Unverifiable context keeps audio unsupported. */ }
+                if (!auxiliary) result.unsupported = true;
+            }
             return result;
         },
     };

@@ -643,3 +643,55 @@ Seven files: source and generated V3 script, `tests/preserved-v3.mjs`, new `test
 Automatic native entry to owned cross-origin replay return remains unsupported. The native card alone does not establish whether the session is recorded or genuinely live; the separately verified popup adapter still requires its recorded flags and player evidence. The actual relationship function effects, authenticated handler behavior, delayed/blocked popup policy, browser opener/COOP/sandbox policies, live HLS/background playback, server credit and end-to-end return remain unverified. A platform-supported, security-preserving way to obtain a verifiable popup/session relationship would be needed before enabling automatic handoff. An already populated approved #openUrl does not authorize bypassing the business handler. Users must open/handle this native flow manually; the script does not resume automatically afterward or claim credit. No merge/tag/release is part of publication.
 
 Final static/privacy gates: all 14 JavaScript syntax checks passed; source/generated payload consistency and git diff --check passed. Manual diff review plus credential-literal/signed-identity-URL/private-key pattern checks covered all seven candidate files. Zero private fixtures are tracked; all eight remain locally excluded. Pattern checks supplement inspection and are not an exhaustive privacy guarantee.
+
+## 2026-10-26: Narrow auditionAudio classification correction
+
+STATUS: PARTIAL. Local implementation and regression checks pass; the user must independently retest the authenticated course. Baseline: `f8caf22013a975f696f704e6ebeceb323bc806ba`.
+
+### Root cause and evidence boundary
+
+The user's authenticated inspection found one recognized video across three accessible task documents, but the old unconditional audio selector set unsupported=true for a hidden root-document `audio#auditionAudio`. Its actual purpose remains unconfirmed. This implementation uses the supplied structural observations; it did not inspect or publish authenticated HTML, course identifiers, replay URLs or session state. The directory count of 54 is not hardcoded or used for classification.
+
+### Exact classification change
+
+Audio candidates are collected during the existing bounded traversal and classified after discovery finishes. The video collection is unchanged. An exception is possible only if no other unsupported/inaccessible condition exists, with exactly three task documents in a root -> player -> leaf chain, one iframe in each of the first two documents and none in the leaf. There must be exactly one recognized video, in the middle document, no other videos and exactly one audio in the entire discovered task scope.
+
+That audio must belong to the root task document, be the unique root element with id auditionAudio, have an empty class, a DIV parent, controls=true, be connected and return zero client rectangles. Additional conservative checks require paused=true, autoplay=false, seeking=false and currentTime exactly zero. These playback-state properties were not supplied in the real inspection and may need checking during retest. The leaf must have no unknown text (scripts/styles excluded) or interactive/task objects, even when an explicit adapter supplies a known-document exemption. The code never clears an existing blocker. Any failed/throwing check keeps audio unsupported. This is a narrowly bounded structural exception, not a universal claim that hidden audio or this ID is harmless.
+
+Discovery is repeated rather than caching the exception: an audio that becomes active loses it. No playback position, completion marker, state-machine rule or navigation eligibility is written by classification. Existing actual-ended plus platform-marker verification remains required for video navigation.
+
+### Negative safety cases
+
+Executable cases reject wrong audio identity; visible or playing audio; duplicate or additional audio; missing video; unexpected nested audio; nonempty class; controls disabled; wrong parent; nonzero audio position; autoplay; seeking; additional videos/frames; unknown leaf content (including an explicit known-document adapter); and inaccessible task frames. A later transition from inactive to playing audio is also rejected. Tests separately establish that missing platform confirmation blocks navigation, while actual simulated ended plus a platform marker can finish normally. No audio ID-only, hidden-element-wide or global audio whitelist was introduced.
+
+### Commands and observed results
+
+Node v24.18.1 / Chrome 156.0.8078.48 headless. Playwright and local jQuery supplied through PLAYWRIGHT_MODULE/JQUERY_PATH. Browser networking blocked/intercepted; media and navigation timers simulated.
+
+```text
+node scripts/build-userscript.mjs
+[exit 0; no output]
+node tests/verify-v3.mjs
+V3 source and userscript payload are synchronized and syntactically valid.
+node tests/customization-v3.mjs
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+node tests/preserved-v3.mjs
+PASS: background guards/stall code preserved; recovery adds only stale-session guard; monitor completion dispatch updated; DeepSeek and legacy source unchanged.
+PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.
+PASS: 58a252a recorded adapter, owned-popup lifecycle/protocol, child recovery, assessment rules, scheduler and settings preserved exactly.
+PASS: all V3 runtime code outside media discovery matches f8caf22 exactly.
+node tests/navigation-v3.mjs
+RESULT: 209 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+node tests/recorded-live-v3.mjs
+RESULT: 21 passed; 0 failed. Synthetic browser evidence only.
+node tests/native-entry-v3.mjs
+RESULT: 19 passed; 0 failed. Synthetic entry/manual-fallback evidence only.
+```
+
+The navigation suite adds 21 focused cases to the previous 188. Its eight private outer-structure cases remain inert local checks; all new media cases use sanitized synthetic data. The new fixture models the root audio/frame document; the executable harness populates its middle video/frame and empty leaf documents. Synthetic success does not establish authenticated platform compatibility. Exact source comparison against f8caf22 confirms all runtime code outside media discovery is unchanged, including completion verification, 1.0x policy, nine delay categories, saved settings, assessment deferral, background recovery and popup ownership.
+
+### Files and remaining limitations
+
+Six files: V3 source and generated userscript, navigation/preservation tests, new `fixtures/synthetic/audition-audio-task.html` and this report. No grants, metadata, repository settings, legacy/DeepSeek code or private fixtures change. The exception intentionally fails if the document chain, media counts, hidden/paused state or leaf content differs; further real evidence is required before widening it. The actual role of auditionAudio remains unknown, and authenticated autoplay/background behavior/completion credit must be retested by the user. Existing native-live automatic popup ownership remains unsupported as documented above. Publication is only to the fork review branch; no master merge, tag, release or upstream PR.
+
+Final static/privacy gates: all 14 JavaScript syntax checks and git diff --check passed. Six candidate files were inspected and checked for credential literals, signed identity URLs and private keys; none found. All eight private fixtures remain excluded and untracked. Pattern checks supplement manual diff review, not an exhaustive privacy guarantee.

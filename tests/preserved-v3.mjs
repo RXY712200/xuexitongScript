@@ -41,9 +41,8 @@ const accept = source => source.slice(source.indexOf('        const accept = (ev
 assert.ok(accept(current).includes('event.source === peer'));
 assert.ok(accept(current).includes('session.peerOrigin || env.location.origin'));
 assert.ok(accept(current).includes('data.seq > session.received'));
-const catalogOnly = source => source.slice(source.indexOf('    const catalog = {'), source.indexOf('    const SETTINGS_KEY'));
-assert.ok(catalogOnly(current).includes("const videoAdapter ="));
-assert.equal(catalogOnly(current).trim(), reviewed.slice(reviewed.indexOf('    const catalog = {'), reviewed.indexOf('    // Evidence adapters are opt-in.')).trim());
+const catalogOnly = source => source.slice(source.indexOf('    const catalog = {'), source.indexOf('    const videoAdapter ='));
+assert.equal(catalogOnly(current), catalogOnly(reviewed));
 console.log('PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.');
 
 const popupBaseline = execFileSync('git', ['show', '58a252a6eb935b1cc249fe7944b5758d2675b7be:v3_optimized.js'], { encoding: 'utf8' });
@@ -62,3 +61,13 @@ for (const [start, end] of [
     ['        function installChild(', '        function readDocument('],
 ]) assert.equal(block(current, start, end), block(popupBaseline, start, end));
 console.log('PASS: 58a252a recorded adapter, owned-popup lifecycle/protocol, child recovery, assessment rules, scheduler and settings preserved exactly.');
+
+const classificationBaseline = execFileSync('git', ['show', 'f8caf22013a975f696f704e6ebeceb323bc806ba:v3_optimized.js'], { encoding: 'utf8' });
+const outsideDiscovery = source => {
+    const start = source.indexOf('        discover(knownDocuments = new Set()) {');
+    const end = source.indexOf('    const SETTINGS_KEY', start);
+    assert.ok(start >= 0 && end > start);
+    return source.slice(0, start) + source.slice(end);
+};
+assert.equal(outsideDiscovery(current), outsideDiscovery(classificationBaseline));
+console.log('PASS: all V3 runtime code outside media discovery matches f8caf22 exactly.');

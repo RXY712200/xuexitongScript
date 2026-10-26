@@ -11,6 +11,7 @@ const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
+const auditionTask = readFileSync(new URL('../fixtures/synthetic/audition-audio-task.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
@@ -40,7 +41,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
     }, html);
     await page.setContent(sanitized);
     await page.addScriptTag({ content: jquery });
-    await page.evaluate(({ count, nested, scopeCase, scopeMedia }) => {
+    await page.evaluate(({ count, nested, scopeCase, scopeMedia, auditionTask }) => {
         window.__clock = 100000;
         Date.now = () => window.__clock;
         let id = 0;
@@ -70,6 +71,31 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
             }
         };
         window.__addVideos(count, nested);
+        if (scopeCase?.startsWith('audition-')) {
+            const root = document.querySelector('iframe[info="card"]').contentDocument;
+            const video = root.querySelector('video'); root.body.innerHTML = auditionTask;
+            const player = root.querySelector('iframe').contentDocument;
+            player.body.append(video, player.createElement('iframe'));
+            const leafFrame = player.querySelector('iframe'), audio = root.querySelector('audio');
+            const leaf = leafFrame.contentDocument;
+            if (scopeCase === 'audition-id') audio.id = 'unrelatedAudio';
+            if (scopeCase === 'audition-visible') audio.style.display = '';
+            if (scopeCase === 'audition-playing') Object.defineProperty(audio, 'paused', { get: () => false });
+            if (scopeCase === 'audition-duplicate') audio.parentElement.append(audio.cloneNode());
+            if (scopeCase === 'audition-no-video') video.remove();
+            if (scopeCase === 'audition-nested') { const div = player.createElement('div'); player.body.append(div); div.append(audio); }
+            if (scopeCase === 'audition-class') audio.className = 'task';
+            if (scopeCase === 'audition-controls') audio.controls = false;
+            if (scopeCase === 'audition-parent') root.body.append(audio);
+            if (scopeCase === 'audition-progress') Object.defineProperty(audio, 'currentTime', { get: () => 1 });
+            if (scopeCase === 'audition-autoplay') audio.autoplay = true;
+            if (scopeCase === 'audition-seeking') Object.defineProperty(audio, 'seeking', { get: () => true });
+            if (scopeCase === 'audition-extra-video') player.body.append(video.cloneNode());
+            if (scopeCase === 'audition-extra-frame') leaf.body.append(leaf.createElement('iframe'));
+            if (scopeCase === 'audition-unknown-leaf') leaf.body.textContent = 'Unknown task';
+            if (scopeCase === 'audition-other-audio') leaf.body.append(leaf.createElement('audio'));
+            if (scopeCase === 'audition-inaccessible') Object.defineProperty(leafFrame, 'contentDocument', { get() { throw new DOMException('Synthetic denial', 'SecurityError'); } });
+        }
         if (scopeCase) {
             window.__auxReads = 0;
             for (const aux of document.querySelectorAll('iframe[id^="aux-"]')) {
@@ -85,7 +111,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
                 } });
             }
         }
-    }, { count, nested, scopeCase, scopeMedia });
+    }, { count, nested, scopeCase, scopeMedia, auditionTask });
     await page.addScriptTag({ content: source });
     await page.evaluate(async enableCooldown => {
         for (const fn of [...window.__intervals.values()]) fn();
@@ -125,6 +151,42 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    for (const variant of ['match', 'id', 'visible', 'playing', 'duplicate', 'no-video', 'nested', 'class', 'controls', 'parent', 'progress', 'autoplay', 'seeking', 'extra-video', 'extra-frame', 'unknown-leaf', 'other-audio', 'inaccessible']) {
+        await check(`audition audio structural classification: ${variant}`, () => using([outer(2), 1, false, `audition-${variant}`], async page => {
+            assert.equal(await state(page), variant === 'match' ? 'PLAYING' : 'BLOCKED');
+            if (variant === 'unknown-leaf') await page.evaluate(() => {
+                const root = document.querySelector('iframe').contentDocument;
+                const leaf = root.querySelector('iframe').contentDocument.querySelector('iframe').contentDocument;
+                app.taskAdapter = { discover: () => ({ tasks: [{ kind: 'document', element: leaf.body }], validateScope: () => true }) };
+            }); // An explicit adapter's known-document set must not widen this exception.
+            const media = await page.evaluate(() => { const m = app._discoverMedia(); return { videos: m.videos.length, documents: m.documents.length, unsupported: m.unsupported, inaccessible: m.inaccessible }; });
+            if (variant === 'match') {
+                assert.deepEqual(media, { videos: 1, documents: 3, unsupported: false, inaccessible: false });
+                assert.equal(await page.evaluate(() => app._videoEl.playbackRate), 1);
+            } else assert.equal(media.unsupported || media.inaccessible, true);
+            assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
+        }));
+    }
+    await check('audition exception never replaces platform completion verification', () => using([outer(2), 1, false, 'audition-match'], async page => {
+        await page.evaluate(() => { window.__clicks = 0; document.querySelector('#node1 span').onclick = () => window.__clicks++; const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page, 12);
+        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__clicks), 0);
+    }));
+    await check('audition exception permits legitimate ended plus platform marker only', () => using([outer(1, true), 1, false, 'audition-match'], async page => {
+        assert.equal(await state(page), 'PLAYING');
+        await page.evaluate(() => { const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
+        await flush(page); assert.equal(await state(page), 'FINISHED');
+    }));
+    await check('audition classification is rechecked when previously inactive audio starts playing', () => using([outer(2, true), 1, false, 'audition-match'], async page => {
+        await page.evaluate(() => {
+            const audio = document.querySelector('iframe').contentDocument.querySelector('audio');
+            Object.defineProperty(audio, 'paused', { get: () => false });
+            const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended'));
+        });
+        assert.equal(await page.evaluate(() => app._discoverMedia().unsupported), true);
+        await flush(page); assert.equal(await state(page), 'BLOCKED');
+    }));
     for (let i = 1; i <= 8; i++) {
         await check(`private sample-${String(i).padStart(2, '0')}: inert outer structure and safe fallback`, async () => {
             const html = readFileSync(new URL(`../fixtures/private/sample-${String(i).padStart(2, '0')}.html`, import.meta.url), 'utf8');
