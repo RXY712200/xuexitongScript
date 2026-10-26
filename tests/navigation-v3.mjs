@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
@@ -8,18 +9,20 @@ const { chromium } = process.env.PLAYWRIGHT_MODULE
     : require('playwright');
 const jquery = readFileSync(process.env.JQUERY_PATH, 'utf8');
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
+const reviewedStartup = execFileSync('git', ['show', 'd7ea26ac373522b250f4bf573fada7c75687c909:v3_optimized.js'], { encoding: 'utf8' });
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
 const auditionTask = readFileSync(new URL('../fixtures/synthetic/audition-audio-task.html', import.meta.url), 'utf8');
 const rerenderCatalog = readFileSync(new URL('../fixtures/synthetic/catalog-rerender.html', import.meta.url), 'utf8');
+const complexMedia = readFileSync(new URL('../fixtures/synthetic/complex-media-task.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
 const failures = [];
 const node = (i, active = false, complete = false) => `<li><div class="posCatalog_select ${active ? 'posCatalog_active' : ''}" id="node${i}"><span class="posCatalog_name" title="Content ${i}">Content ${i}</span>${complete ? '<span class="icon_Completed"></span>' : '<input class="jobUnfinishCount" value="1">'}</div></li>`;
 const outer = (entries = 1, complete = false, title = '视频') => `<div class="prev_title" title="${title}"></div><div id="coursetree"><ul><li><ul>${Array.from({ length: entries }, (_, i) => node(i, i === 0, complete)).join('')}</ul></li></ul></div><iframe info="card"></iframe>`;
-async function setup(html = outer(), count = 1, nested = false, scopeCase = null, enableCooldown = false, syntheticOrigin = false) {
+async function setup(html = outer(), count = 1, nested = false, scopeCase = null, enableCooldown = false, syntheticOrigin = false, automatic = false, scriptSource = source) {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
     if (syntheticOrigin) await context.route('https://course.test/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body><video id="live-player"></video></body></html>' }));
@@ -42,7 +45,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
     }, html);
     await page.setContent(sanitized);
     await page.addScriptTag({ content: jquery });
-    await page.evaluate(({ count, nested, scopeCase, scopeMedia, auditionTask }) => {
+    await page.evaluate(({ count, nested, scopeCase, scopeMedia, auditionTask, complexMedia }) => {
         window.__clock = 100000;
         Date.now = () => window.__clock;
         let id = 0;
@@ -72,6 +75,44 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
             }
         };
         window.__addVideos(count, nested);
+        if (scopeCase === 'auto-missing-card') document.querySelector('iframe[info="card"]').remove();
+        if (scopeCase === 'auto-document-loading') {
+            window.__documentReady = 'loading'; Object.defineProperty(document, 'readyState', { get: () => window.__documentReady });
+        }
+        if (scopeCase === 'auto-blank-leaf') {
+            const player = document.querySelector('iframe').contentDocument.querySelector('iframe').contentDocument;
+            const leaf = player.createElement('iframe'); player.body.append(leaf);
+            const attribute = leaf.getAttribute.bind(leaf);
+            leaf.getAttribute = name => name === 'src' ? 'javascript:void(0);' : attribute(name); // Metadata only; never execute a captured URL.
+        }
+        if (scopeCase?.startsWith('complex-')) {
+            const root = document.querySelector('iframe[info="card"]').contentDocument;
+            const videos = [...root.querySelectorAll('video')]; root.body.innerHTML = complexMedia;
+            const roots = [...root.querySelectorAll('iframe')];
+            roots.forEach((branch, index) => {
+                const doc = branch.contentDocument;
+                if (!index) doc.body.append(videos[0]);
+                for (let i = 0; i < (index === 4 ? 2 : 3); i++) {
+                    const child = doc.createElement('iframe'); doc.body.append(child);
+                    if (index === 1 && i === 2) child.contentDocument.body.append(videos[1]);
+                }
+            });
+            videos[1].__paused = true;
+            window.__complexRoot = root; window.__complexFrames = roots; window.__complexVideos = videos;
+            window.__ownershipVerified = true;
+            window.__audioApproved = scopeCase !== 'complex-unclassified-audio';
+            window.__ownershipAdapter = { discover: () => document.querySelector('.posCatalog_active')?.id === 'node0' ? ({ tasks: [], validateScope: () => root === document.querySelector('iframe[info="card"]').contentDocument,
+                mediaOwnership: { activeFrame: roots[0], inactiveFrames: roots.slice(1), auxiliaryAudio: window.__audioApproved ? root.querySelector('audio') : null,
+                    validateScope: () => window.__ownershipVerified } }) : null };
+            if (scopeCase === 'complex-visible-inactive') { roots[1].hidden = false; roots[1].inert = false; roots[1].removeAttribute('aria-hidden'); }
+            if (scopeCase === 'complex-playing-inactive') videos[1].__paused = false;
+            if (scopeCase === 'complex-no-active-player') videos[0].remove();
+            if (scopeCase === 'complex-unknown-audio') root.body.append(root.createElement('audio'));
+            if (scopeCase === 'complex-unknown-leaf') roots[2].contentDocument.querySelector('iframe').contentDocument.body.textContent = 'Unrecognized synthetic task';
+            if (scopeCase === 'complex-wrapper-form') root.body.append(root.createElement('form'));
+            if (scopeCase === 'complex-inaccessible') Object.defineProperty(roots[2], 'contentDocument', { get() { throw new DOMException('Synthetic denial', 'SecurityError'); } });
+            if (scopeCase === 'complex-unverified') window.__ownershipVerified = false;
+        }
         if (scopeCase?.startsWith('audition-')) {
             const root = document.querySelector('iframe[info="card"]').contentDocument;
             const video = root.querySelector('video'); root.body.innerHTML = auditionTask;
@@ -112,13 +153,15 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
                 } });
             }
         }
-    }, { count, nested, scopeCase, scopeMedia, auditionTask });
-    await page.addScriptTag({ content: source });
-    await page.evaluate(async enableCooldown => {
+    }, { count, nested, scopeCase, scopeMedia, auditionTask, complexMedia });
+    await page.addScriptTag({ content: scriptSource });
+    await page.evaluate(async ({ enableCooldown, automatic }) => {
+        window.__bootFunction = [...window.__intervals.values()][0];
         for (const fn of [...window.__intervals.values()]) fn();
         await Promise.resolve();
         window.__settingsDefaults = JSON.parse(JSON.stringify(app.settings));
         window.__cooldownDefaults = [app.configs.randomCooldownEnabled, app.configs.randomCooldownMinMs, app.configs.randomCooldownMaxMs];
+        if (automatic) return; // Deliberately never call app.run() in automatic-start tests.
         // Historical scenarios explicitly choose legacy navigation timing and immediate other actions.
         const settings = JSON.parse(JSON.stringify(app.settings));
         settings.preset = 'legacy'; settings.randomDelaysEnabled = enableCooldown;
@@ -129,7 +172,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
         }
         app.updateSettings(settings);
         app.run(); await Promise.resolve();
-    }, enableCooldown);
+    }, { enableCooldown, automatic });
     return { page, close: () => context.close() };
 }
 async function flush(page, rounds = 1) {
@@ -152,6 +195,156 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    const autoOptions = [outer(2), 1, false, null, false, false, true];
+    const bootRuns = page => page.evaluate(() => window.__logs.filter(line => line.includes('优化版启动')).length);
+    await check('automatic startup reviewed baseline reproduces premature missing-frame failure', () => using([outer(2), 0, false, 'auto-missing-card', false, false, true, reviewedStartup], async page => {
+        assert.equal(await state(page), 'BLOCKED');
+        await page.evaluate(() => { const frame = document.createElement('iframe'); frame.setAttribute('info', 'card'); document.body.append(frame); window.__addVideos(1); });
+        await flush(page, 4); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup starts one ordinary video without manual app.run', () => using(autoOptions, async page => {
+        assert.equal(await state(page), 'WAITING_STARTUP');
+        await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, app._videoEl.__plays, app._videoEl.playbackRate]), ['PLAYING', 1, 1]);
+        assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup waits for a delayed course iframe without repeated runs', () => using([outer(2), 0, false, 'auto-missing-card', false, false, true], async page => {
+        await flush(page, 4); assert.equal(await state(page), 'WAITING_STARTUP');
+        await page.evaluate(() => { const frame = document.createElement('iframe'); frame.setAttribute('info', 'card'); document.body.append(frame); window.__addVideos(1); });
+        await flush(page, 4);
+        assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup waits for document readiness', () => using([outer(2), 1, false, 'auto-document-loading', false, false, true], async page => {
+        await flush(page, 3); assert.equal(await state(page), 'WAITING_STARTUP');
+        await page.evaluate(() => { window.__documentReady = 'complete'; }); await flush(page, 3);
+        assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup accepts an already loaded empty placeholder leaf without executing its URL', () => using([outer(2), 1, true, 'auto-blank-leaf', false, false, true], async page => {
+        await flush(page, 4); assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup waits for delayed catalog activation', () => using([outer(0), 1, false, null, false, false, true], async page => {
+        await flush(page, 3); assert.equal(await state(page), 'WAITING_STARTUP');
+        await page.evaluate(markup => { document.querySelector('#coursetree ul li ul').innerHTML = markup; }, node(0, true));
+        await flush(page, 4); assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup waits for task/step titles before capturing action context', () => using([outer(2, false, '').replace('title="Content 0">Content 0', 'title="">'), 1, false, null, false, false, true], async page => {
+        await flush(page, 3); assert.equal(await state(page), 'WAITING_STARTUP');
+        await page.evaluate(() => { document.querySelector('.prev_title').title = '视频'; const label = document.querySelector('#node0 .posCatalog_name'); label.title = 'Content 0'; label.textContent = 'Content 0'; });
+        await flush(page, 4); assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup preserves ordinary video pages without a step-title widget', () => using([outer(2).replace('<div class="prev_title" title="视频"></div>', ''), 1, false, null, false, false, true], async page => {
+        await flush(page, 4); assert.equal(await state(page), 'PLAYING'); assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup manual takeover cancels the pending boot rather than doubling playback', () => using(autoOptions, async page => {
+        await page.evaluate(() => { const pending = [...window.__timeouts.values()]; app.run(); for (const fn of pending) fn(); });
+        await flush(page, 4);
+        assert.deepEqual(await page.evaluate(() => [app._state, app._videoEl.__plays, app._startupCancel]), ['PLAYING', 1, null]);
+        assert.equal(await bootRuns(page), 2);
+    }));
+    await check('automatic startup waits for nested audition player initialization and preserves background playback', () => using([outer(2), 1, false, 'audition-match', false, false, true], async page => {
+        await page.evaluate(() => { window.__lateVideo = document.querySelector('iframe').contentDocument.querySelector('iframe').contentDocument.querySelector('video'); window.__lateVideo.remove(); });
+        await flush(page, 3); assert.equal(await state(page), 'WAITING_STARTUP');
+        await page.evaluate(() => window.__lateVideo.ownerDocument.body.append(window.__lateVideo)); await flush(page, 4);
+        assert.equal(await state(page), 'PLAYING');
+        await page.evaluate(() => { app._guardLastResumeTs = -Infinity; app._videoEl.__paused = true; window.dispatchEvent(new Event('blur')); });
+        assert.deepEqual(await page.evaluate(() => [app._state, app._videoEl.__paused, app._videoEl.playbackRate]), ['PLAYING', false, 1]);
+        assert.equal(await bootRuns(page), 1);
+    }));
+    await check('automatic startup tolerates only same-document initial frame load signals', () => using(autoOptions, async page => {
+        await flush(page); assert.equal(await state(page), 'ACTION_PENDING');
+        await page.evaluate(() => document.querySelector('iframe').dispatchEvent(new Event('load')));
+        assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
+        await flush(page); assert.equal(await state(page), 'PLAYING');
+    }));
+    await check('automatic startup rejects a changed document during the start delay', () => using(autoOptions, async page => {
+        await flush(page); assert.equal(await state(page), 'ACTION_PENDING');
+        await page.evaluate(() => { const frame = document.createElement('iframe'); frame.setAttribute('info', 'card'); document.querySelector('iframe').replaceWith(frame); window.__addVideos(1); });
+        await flush(page, 3); assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('automatic startup has bounded failure and a safe manual retry without stale boot actions', () => using([outer(2), 0, false, 'auto-missing-card', false, false, true], async page => {
+        await page.evaluate(() => { window.__oldBootCallbacks = [...window.__timeouts.values()]; });
+        await flush(page, 45); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await bootRuns(page), 1);
+        await page.evaluate(async () => {
+            const frame = document.createElement('iframe'); frame.setAttribute('info', 'card');
+            const loaded = new Promise(resolve => frame.addEventListener('load', resolve, { once: true }));
+            document.body.append(frame); await loaded; window.__addVideos(1);
+        });
+        await page.evaluate(() => { app.run(); for (const fn of window.__oldBootCallbacks) fn(); }); await flush(page, 3);
+        assert.deepEqual(await page.evaluate(() => [app._state, app._videoEl.__plays]), ['PLAYING', 1]);
+        assert.equal(await bootRuns(page), 2);
+    }));
+    await check('automatic startup duplicate boot callbacks never create another controller or play action', () => using(autoOptions, async page => {
+        await page.evaluate(() => { window.__originalApp = app; window.__bootFunction(); window.__bootFunction(); });
+        await flush(page, 6);
+        assert.deepEqual(await page.evaluate(() => [app === window.__originalApp, app._videoEl.__plays, document.querySelectorAll('#xuexitong-v3-settings').length]), [true, 1, 1]);
+        assert.equal(await bootRuns(page), 1);
+    }));
+    for (const cancel of ['destroy', 'pagehide', 'disable', 'click', 'task-change']) {
+        await check(`automatic startup cancels before playback: ${cancel}`, () => using(autoOptions, async page => {
+            if (cancel === 'click') await page.locator('#node0 .posCatalog_name').click();
+            else await page.evaluate(cancel => {
+                if (cancel === 'destroy') app.destroy();
+                if (cancel === 'pagehide') window.dispatchEvent(new Event('pagehide'));
+                if (cancel === 'disable') { const settings = structuredClone(app.settings); settings.features.videoPlayback = false; app.updateSettings(settings); }
+                if (cancel === 'task-change') { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); }
+            }, cancel);
+            await flush(page, 5);
+            assert.notEqual(await state(page), 'PLAYING');
+            assert.equal(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('video').__plays), 0);
+        }));
+    }
+    await check('complex 20-document topology without ownership remains blocked and exposes redacted reasons', () => using([outer(2), 2, false, 'complex-normal'], async page => {
+        const result = await page.evaluate(() => { const m = app._discoverMedia(); return [m.documents.length, m.videos.length, m.inaccessible, m.unsupported, m.reasons]; });
+        assert.deepEqual(result.slice(0, 4), [20, 2, false, true]);
+        assert.ok(result[4].includes('ambiguous-player-branches'));
+        assert.equal(await state(page), 'BLOCKED');
+    }));
+    await check('complex explicit synthetic ownership selects active player and never wakes inactive player', () => using([outer(2), 2, false, 'complex-normal'], async page => {
+        await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; app.run(); });
+        assert.deepEqual(await page.evaluate(() => [app._state, app._discoverMedia().documents.length, app._discoverMedia().videos.length, ...window.__complexVideos.map(v => v.__plays)]), ['PLAYING', 20, 1, 1, 0]);
+        const indices = await page.evaluate(() => { const docs = app._discoverMedia().documents; return window.__complexVideos.map(v => docs.indexOf(v.ownerDocument)); });
+        assert.deepEqual(indices, [1, 8]);
+    }));
+    await check('complex explicit synthetic ownership can start automatically without app.run', () => using([outer(2), 2, false, 'complex-normal', false, false, true], async page => {
+        await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; }); await flush(page, 5);
+        assert.deepEqual(await page.evaluate(() => [app._state, ...window.__complexVideos.map(v => v.__plays)]), ['PLAYING', 1, 0]);
+        assert.equal(await bootRuns(page), 1);
+    }));
+    for (const variant of ['visible-inactive', 'playing-inactive', 'no-active-player', 'unknown-audio', 'unknown-leaf', 'wrapper-form', 'inaccessible', 'unverified', 'unclassified-audio']) {
+        await check(`complex ownership never discards unsafe content: ${variant}`, () => using([outer(2), 2, false, `complex-${variant}`], async page => {
+            await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; app.run(); });
+            assert.equal(await state(page), 'BLOCKED');
+            assert.deepEqual(await page.evaluate(() => window.__complexVideos.map(v => v.__plays)), [0, 0]);
+        }));
+    }
+    await check('complex ownership loss stops old callbacks rather than switching players', () => using([outer(2), 2, false, 'complex-normal'], async page => {
+        await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; app.run(); window.__ownershipVerified = false; app._checkVideoStatus(); });
+        assert.equal(await state(page), 'BLOCKED');
+        assert.deepEqual(await page.evaluate(() => window.__complexVideos.map(v => v.__plays)), [1, 0]);
+    }));
+    for (const complex of [false, true]) {
+        await check(`automatic startup completion and catalog replacement navigate once; complex profile=${complex}`, () => using([
+            outer(2), complex ? 2 : 1, false, complex ? 'complex-normal' : null, false, false, true,
+        ], async page => {
+            if (complex) await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; });
+            await flush(page, 5); assert.equal(await state(page), 'PLAYING');
+            await page.evaluate(() => {
+                window.__autoOld = app._videoEl; window.__autoClicks = 0;
+                document.querySelector('#node1 span').onclick = () => {
+                    window.__autoClicks++; document.querySelector('.posCatalog_active').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active');
+                    const frame = document.createElement('iframe'); frame.setAttribute('info', 'card'); document.querySelector('iframe[info="card"]').replaceWith(frame); window.__addVideos(1);
+                };
+                const node = document.querySelector('#node0'), replacement = node.cloneNode(true); replacement.querySelector('input').value = '0'; replacement.insertAdjacentHTML('beforeend', '<span class="icon_Completed"></span>'); node.replaceWith(replacement);
+                window.__autoOld.__ended = true; window.__autoOld.__paused = true; window.__autoOld.dispatchEvent(new Event('ended')); window.__autoOld.dispatchEvent(new Event('ended'));
+            });
+            await flush(page); assert.equal(await state(page), 'NAVIGATION_COOLDOWN');
+            await flush(page); await page.waitForTimeout(20); await flush(page, 3);
+            assert.deepEqual(await page.evaluate(() => [app._state, window.__autoClicks, window.__autoOld.__plays, app._videoEl?.playbackRate]), ['PLAYING', 1, 1, 1]);
+            if (complex) assert.equal(await page.evaluate(() => window.__complexVideos[1].__plays), 0);
+        }));
+    }
     async function prepareRerender(page) {
         await page.evaluate(() => {
             window.__originalVideo = app._videoEl; window.__navigationClicks = 0;

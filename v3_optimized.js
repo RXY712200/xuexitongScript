@@ -27,9 +27,11 @@
         }
     }
     function waitForCoursePage() {
+        if (window[BOOT_TIMER_KEY] || (window[APP_KEY] && !window[APP_KEY]._destroyed)) return;
         let attempts = 0;
         const maxAttempts = 20;
         window[BOOT_TIMER_KEY] = setInterval(() => {
+            if (window[APP_KEY] && !window[APP_KEY]._destroyed) { clearInterval(window[BOOT_TIMER_KEY]); window[BOOT_TIMER_KEY] = null; return; }
             if ($('#coursetree').length > 0) {
                 clearInterval(window[BOOT_TIMER_KEY]);
                 window[BOOT_TIMER_KEY] = null;
@@ -80,43 +82,84 @@
         cardDocument() {
             try { return this.cardFrame()?.contentDocument || null; } catch (_) { return null; }
         },
-        discover(knownDocuments = new Set()) {
-            const result = { videos: [], inaccessible: false, unsupported: false, documents: [] };
+        discover(knownDocuments = new Set(), selection = null) {
+            const result = { videos: [], inaccessible: false, unsupported: false, documents: [], reasons: [] };
             const seen = new Set();
             const audios = [];
-            const visit = (doc, depth) => {
+            const branches = new Map();
+            const block = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
+            const visit = (doc, depth, branch = null) => {
                 if (!doc || seen.has(doc)) return;
                 seen.add(doc);
+                branches.set(doc, branch);
                 result.documents.push(doc);
                 result.videos.push(...doc.querySelectorAll('video#video_html5_api, video[id*="video_html5"]'));
                 audios.push(...doc.querySelectorAll('audio'));
-                if (doc.querySelector('video:not([id*="video_html5"])')) result.unsupported = true;
+                if (doc.querySelector('video:not([id*="video_html5"])')) block('unknown-video');
                 if (depth > 0 && !knownDocuments.has(doc) && !doc.querySelector('video, iframe')) {
                     const body = doc.body?.cloneNode(true);
                     body?.querySelectorAll('script, style').forEach(node => node.remove());
                     if (body?.textContent.trim() || body?.querySelector('form, input, object, embed, canvas, img')) {
-                        result.unsupported = true;
+                        block('unknown-leaf-content');
                     }
                 }
                 for (const frame of doc.querySelectorAll('iframe')) {
                     try {
-                        if (depth >= 4) { result.unsupported = true; continue; }
+                        if (depth >= 4) { block('task-depth-limit'); continue; }
                         const inner = frame.contentDocument;
                         if (!inner) { result.inaccessible = true; continue; }
-                        visit(inner, depth + 1);
+                        visit(inner, depth + 1, branch || frame);
                     } catch (_) { result.inaccessible = true; }
                 }
             };
             // Only the unique course-content frame defines task scope. Editor, popup,
             // reporting and other outer-page frames are not learning modules.
             const frame = this.cardFrame();
-            if (!frame) result.unsupported = true;
+            if (!frame) block('nonunique-course-frame');
             else {
                 const content = this.cardDocument();
                 if (!content) result.inaccessible = true;
                 else visit(content, 1); // Keep all nested task checks and the depth bound.
             }
             result.videos = [...new Set(result.videos)].filter(video => video.isConnected);
+            let ownership = false;
+            if (selection) {
+                try {
+                    const root = result.documents[0], roots = Array.from(root.querySelectorAll('iframe'));
+                    const active = selection.activeFrame, inactive = selection.inactiveFrames;
+                    const partition = Array.isArray(inactive) ? [active, ...inactive] : [];
+                    const activePath = video => {
+                        let doc = video.ownerDocument;
+                        while (doc !== root) {
+                            const owner = doc.defaultView?.frameElement;
+                            if (!owner || owner.hidden || owner.inert || owner.getAttribute('aria-hidden') === 'true' || !owner.getClientRects().length) return false;
+                            doc = owner.ownerDocument;
+                        }
+                        return video.getClientRects().length > 0;
+                    };
+                    const classified = result.documents.every(doc => {
+                        if (doc.querySelector('form, input, object, embed, canvas')) return false;
+                        if (doc.querySelector('video')) return true;
+                        const body = doc.body?.cloneNode(true);
+                        body?.querySelectorAll('script, style, iframe, audio').forEach(el => el.remove());
+                        return body && !body.textContent.trim() && !body.querySelector('img, button, a');
+                    });
+                    ownership = typeof selection.validateScope === 'function' && selection.validateScope() === true &&
+                        !result.inaccessible && classified && roots.length > 0 && new Set(partition).size === roots.length &&
+                        partition.length === roots.length && partition.every(owner => roots.includes(owner) && owner.isConnected) &&
+                        roots.includes(active) && !root.querySelector('video') && !active.hidden && !active.inert && active.getAttribute('aria-hidden') !== 'true' &&
+                        inactive.every(owner => owner.hidden && owner.inert && owner.getAttribute('aria-hidden') === 'true');
+                    const selected = result.videos.filter(video => branches.get(video.ownerDocument) === active);
+                    const omitted = result.videos.filter(video => branches.get(video.ownerDocument) !== active);
+                    ownership = ownership && selected.length > 0 && selected.every(activePath) &&
+                        omitted.every(video => inactive.includes(branches.get(video.ownerDocument)) && video.paused &&
+                            !video.autoplay && !video.seeking && video.currentTime === 0 && !video.error);
+                    if (ownership) result.videos = selected;
+                    else block('unverified-media-ownership');
+                } catch (_) { block('unverified-media-ownership'); }
+            } else if (new Set(result.videos.map(video => branches.get(video.ownerDocument))).size > 1) {
+                block('ambiguous-player-branches');
+            }
             if (audios.length) {
                 // This is a structural exception, not proof of auditionAudio's purpose.
                 // Decide only after the full task tree is checked; never clear a blocker.
@@ -137,9 +180,18 @@
                         audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
                         audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
                         audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
+                    // Broader topologies require an explicit, continuously validated
+                    // ownership profile. No platform-specific profile is guessed here.
+                    if (!auxiliary && ownership) auxiliary = !result.inaccessible && !result.unsupported &&
+                        selection.auxiliaryAudio === audio &&
+                        audios.length === 1 && audio.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
+                        audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
+                        audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
+                        audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
                 } catch (_) { /* Unverifiable context keeps audio unsupported. */ }
-                if (!auxiliary) result.unsupported = true;
+                if (!auxiliary) block('unclassified-audio');
             }
+            if (result.inaccessible) result.reasons.push('inaccessible-task-frame');
             return result;
         },
     };
@@ -583,10 +635,11 @@
             get cellData() {
                 return this._cellData;
             },
-            run() {
+            run({ startup = false } = {}) {
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 this._cancelTasks();
                 this._destroyed = false;
+                this._automaticStartup = startup;
                 this._state = 'DISCOVERING';
                 this._isPlaying = false;
                 this._completedVideos = new WeakSet();
@@ -609,10 +662,64 @@
                 this._videoEl = null;
                 this._clearCheckInterval();
                 this._bindStepNavigation();
-                this.play();
+                const scope = startup && this._taskSet();
+                if (startup && !this._isChapterTest() && this._currentStepTitle() !== '学习目标' && !scope?.invalid && !scope?.tasks.length) this._waitForStartup(); else this.play();
+            },
+            _waitForStartup() {
+                const generation = this._generation, href = window.location.href;
+                const original = catalog.current(), id = original?.id, chapter = original && this._chapterOf(original);
+                const topology = this._catalogTopology();
+                let timer, attempts = 0, previous = null;
+                const cleanup = () => {
+                    clearTimeout(timer); this._timers.delete(timer);
+                    timer = null;
+                    document.removeEventListener('click', interaction, true);
+                    for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) window.removeEventListener(type, cancel);
+                    if (this._startupCancel === cleanup) this._startupCancel = null;
+                };
+                const cancel = () => { cleanup(); this._block('首次自动启动已取消，请手动重新识别'); };
+                const interaction = event => { if (event.isTrusted && !event.composedPath().includes(this._settingsPanel)) cancel(); };
+                this._startupCancel = cleanup;
+                document.addEventListener('click', interaction, true);
+                for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) window.addEventListener(type, cancel);
+                const tick = () => {
+                    this._timers.delete(timer);
+                    if (this._destroyed || generation !== this._generation) return cleanup();
+                    if (href !== window.location.href) { cleanup(); return this._block('首次启动时页面已改变，请手动重新识别'); }
+                    const node = catalog.current();
+                    if (original && node && node !== original && (original.isConnected || !id || node.id !== id ||
+                        Array.from(document.querySelectorAll('[id]')).filter(el => el.id === id).length !== 1 ||
+                        (this._chapterOf(node) !== chapter && (!topology || this._catalogTopology() !== topology)))) {
+                        cleanup(); return this._block('首次启动时课程任务已改变');
+                    }
+                    const frame = videoAdapter.cardFrame(), doc = videoAdapter.cardDocument(), media = this._discoverMedia();
+                    const title = this._currentStepTitle(), label = node?.querySelector('.posCatalog_name');
+                    const nodeTitle = (label?.getAttribute('title') || label?.textContent || '').trim();
+                    const stepReady = !document.getElementsByClassName('prev_title').length || !!title;
+                    const ready = node && stepReady && nodeTitle && frame && doc && document.readyState !== 'loading' && media.videos.length > 0 &&
+                        !media.inaccessible && media.documents.every(inner => inner.readyState !== 'loading' &&
+                            Array.from(inner.querySelectorAll('iframe')).every(child => {
+                                try {
+                                    const nested = child.contentDocument;
+                                    const src = child.getAttribute('src')?.trim();
+                                    const destination = src ? new URL(src, inner.baseURI) : null;
+                                    return nested && nested.readyState !== 'loading' &&
+                                        (!destination || !['http:', 'https:'].includes(destination.protocol) || nested.URL !== 'about:blank') &&
+                                        (!child.hasAttribute('srcdoc') || nested.URL === 'about:srcdoc');
+                                } catch (_) { return false; }
+                            }));
+                    const snapshot = [node, title, nodeTitle, doc, ...media.documents, ...media.videos];
+                    if (ready && previous && previous.length === snapshot.length && previous.every((value, index) => value === snapshot[index])) {
+                        cleanup(); this._state = 'DISCOVERING'; this._initCellData(); this.play(); return;
+                    }
+                    if (++attempts >= 40) { cleanup(); return this._block('首次启动等待目录或媒体就绪超时；请手动处理后执行 app.run()'); }
+                    previous = ready ? snapshot : null;
+                    timer = setTimeout(tick, 250); this._timers.add(timer);
+                };
+                this._state = 'WAITING_STARTUP'; tick();
             },
             nextUnit() {
-                if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
+                if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
                 if (!this._externalCompletion && this._state === 'READY_TO_ADVANCE' && !this._refreshVideoContext()) return this._block('视频任务身份无法确认');
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
@@ -636,6 +743,7 @@
                 try { next = validateSettings(input); } catch (error) { this._settingsMessage = error.message; return false; }
                 const previous = this.settings;
                 this.settings = next;
+                if (!next.features.videoPlayback && this._startupCancel) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }
                 if (previous.preset !== next.preset && next.preset === 'legacy') {
                     this.configs.randomCooldownMinMs = 5000; this.configs.randomCooldownMaxMs = 12000;
                 }
@@ -693,7 +801,9 @@
                         for (const doc of new Set([document, ...this._discoverMedia().documents])) {
                             observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
-                            for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');
+                            for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {
+                                listen(frame, 'load', () => { if (!this._automaticStartup || category !== 'videoStart' || !valid()) cancel(); });
+                            }
                         }
                         if (this._completionVideo) listen(this._completionVideo, 'play');
                         for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) listen(window, type);
@@ -837,7 +947,7 @@
             _discoverMedia() {
                 const scope = this._taskSet();
                 if (scope?.invalid) return { videos: [], documents: [], unsupported: true, inaccessible: false };
-                return videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []));
+                return videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []), scope?.mediaOwnership);
             },
             _taskContextValid(record) {
                 try {
@@ -1065,6 +1175,7 @@
                 return timer;
             },
             _cancelTasks() {
+                this._startupCancel?.(); this._automaticStartup = false;
                 this._actions?.cancelAll();
                 this._documentController?.cancel();
                 this._documentController = null;
@@ -1221,7 +1332,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_STARTUP', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
@@ -1280,6 +1391,7 @@
                         if (generation !== this._generation || !this._sameVideoTaskNode(node) ||
                             !el.isConnected || this._state !== 'PLAYING') return;
                         this._tryTimes = 0;
+                        this._automaticStartup = false;
                         console.log(`%c视频开始播放，倍速: ${el.playbackRate}x`, "color:#4CAF50");
                         this._startVideoMonitoring();
                     } catch (playError) {
@@ -1475,7 +1587,7 @@
                 return this._treeContainerEl;
             },
             _getVideoEl() {
-                if (['WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
+                if (['WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
                 if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                     this._block('当前播放页面或播放器已变化');
                     this._videoEl = null;
@@ -1613,7 +1725,7 @@
         window[APP_KEY] = app;
 
         try {
-            app.run();
+            app.run({ startup: true });
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);

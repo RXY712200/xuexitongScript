@@ -757,3 +757,73 @@ Six files: v3_optimized.js, generated v3_optimized.user.js, tests/navigation-v3.
 The user must retest actual completion -> catalog replacement -> assessment deferral/next eligible task. Verify that the real catalog id remains unique/stable, that the chapter identity can be retained or uniquely re-established (including unchanged complete ordered unique keys/grouping for unkeyed wrappers), the original video/content document stays connected, and the actual completion element supports the retained selector. A temporarily absent/ambiguous active node, missing/duplicated/unverifiable keys, changed source, or lost original player still stops safely. No grace-period guessing or recovery across unverified player replacement is added. The private snapshots supplied earlier do not establish these latest runtime details. Background/application switching, authenticated completion credit and end-to-end navigation of this patch remain unverified by the agent. Publication is only for independent review on the existing fork branch; no master merge, tag, release or upstream PR.
 
 Final gates: all 14 JavaScript syntax checks and git diff --check passed. Six publication candidates were manually reviewed and checked for credential literals, signed identity URLs and private keys; none found. All eight private fixtures remain locally excluded and untracked. Pattern checks supplement review, not an exhaustive privacy guarantee.
+
+## Startup readiness and explicit complex-media ownership review
+
+STATUS: PARTIAL. Base: `d7ea26ac373522b250f4bf573fada7c75687c909`. Startup defects are reproduced and corrected in synthetic Chrome tests; exact authenticated startup timing and real complex-task ownership remain unverified. In particular, the real 20-document lesson is NOT automatically enabled by this patch.
+
+### Root cause of automatic-start failure
+
+The old bootstrap initialized as soon as #coursetree existed, even if its active leaf, course-content iframe or nested player had not arrived. Missing/partial task media could enter BLOCKED and later frame arrival did not restart it. A new test executes the actual d7ea26a source and reproduces the missing-frame -> BLOCKED -> late frame still BLOCKED sequence without manually calling app.run. The same scenario now waits and starts once. This establishes a code-level defect consistent with the user's observation, not proof that this exact timing occurred in their authenticated session. Browser autoplay-policy rejection or other unrecorded initialization timing is not ruled out.
+
+A second reproduced defect was unconditional cancellation on an iframe load signal during the first randomized video-start wait, even when the documents/player/context had not changed. The first automatic videoStart now tolerates that signal only while its complete existing validity check succeeds. A real document/player change still cancels; navigation cooldown and unrelated action cancellation behavior remain unchanged.
+
+### Exact startup fix
+
+Initialization calls run({startup:true}) exactly once. Ordinary-video startup enters WAITING_STARTUP and samples current DOM/media every 250ms, at most 40 times (roughly ten seconds of scheduled intervals, not a wall-clock guarantee under throttling). It waits for a unique active leaf, accessible ready course/task documents, a recognized player, a nonempty catalog label, filled step-title placeholders when a step widget exists, and two consecutive matching identity/title/document/player snapshots. Ordinary pages without a step-title widget remain supported. HTTP iframe destinations still at an initial about:blank document and pending srcdoc documents remain pending. A loaded empty non-HTTP placeholder is not executed or confused with a network request. Known assessment, learning-objective and explicit document/live task paths retain their existing behavior.
+
+The readiness controller calls play once after readiness; it never loops app.run. A task/URL change, trusted user interaction outside the settings panel, page exit, playback disable, manual run or destruction cancels its timer/listeners. Manual run resets generation and performs normal discovery/safety checks; stale startup callbacks cannot resurrect the prior attempt. Duplicate queued boot callbacks cannot create another controller/panel. Background guards and public play/nextUnit cannot start playback ahead of the readiness gate. Existing random ranges/settings/UI/grants/metadata are unchanged.
+
+### Root cause of complex media-discovery failure
+
+The legacy auxiliary-audio exception deliberately requires exactly three documents and one player. The reported 20 documents/two players cannot satisfy it, so audio alone suffices to set unsupported. Other unknown-content/depth/ownership conditions may also contribute; the aggregate data does not establish those details or tell which player belongs to the active task. Document indices 1 and 8 are not task identities and do not prove their iframe ancestry.
+
+### Principled media ownership infrastructure and its boundary
+
+Traversal now retains direct-course-branch ancestry and fixed, redacted blocker codes in result.reasons. Multiple player-owning branches without an explicit ownership profile are ambiguous and block; discovery never chooses the first player by index. The original depth bound, inaccessible-frame handling, unknown-video/content checks and exact legacy audition predicate remain. Existing same-document multi-video behavior is preserved.
+
+A source-verified explicit taskAdapter may return mediaOwnership containing activeFrame, inactiveFrames, auxiliaryAudio and validateScope. There is NO built-in Chaoxing profile for the new complex lesson and no automatic selection merely from hidden attributes. The profile must completely partition the root task iframe branches without duplicates, reference current connected elements and continuously validate its scope. The current narrow inactive-pane contract requires pre-existing hidden + inert + aria-hidden=true semantics; the selected player's whole iframe ancestry must be accessible and visibly active. Inactive recognized players must already be paused, not autoplaying/seeking, at zero local position and free of media errors. The code does not set those attributes/states to force acceptance, pause unrelated players or wake an inactive player.
+
+All documents remain traversed, including inactive branches. Unknown forms/inputs/objects/canvas, unsupported media, unknown leaf/task text or inaccessible branches still block; wrappers must be structurally empty or recognized media UI under this narrow profile. No general audio/hidden-frame exemption is added. The broader auxiliary exception additionally requires that exact audio reference to be explicitly declared auxiliary, with the original strict root location, unique identity, empty class, DIV parent, controls, zero client rectangles, paused/no autoplay/no seeking/zero position checks. No previous blocker is cleared. Declaring only an active frame is insufficient to exempt audio. More complex document/live/other site-specific inactive structures remain unsupported until separately evidenced.
+
+The new synthetic fixture matches the reported five root branches, 20 accessible documents, players at DFS indices 1 and 8, and one hidden root auditionAudio. Its branch allocation, hidden/inert semantics and adapter validation are deliberately synthetic, NOT recovered authenticated markup. It proves the infrastructure can select a verified active context while preserving all other branch checks; it does not prove either real player may be discarded or that the real audio is auxiliary in that lesson.
+
+### Completion and regression protection
+
+The d7ea26a catalog-topology snapshot, guarded node rebinding, generation checks, ended-event precedence, completion deduplication, marker verification, navigation eligibility and cooldown-destination resolution methods are compared exactly against that baseline and remain unchanged. The audio exception's legacy predicate is compared literally. Other runtime outside the narrowly listed startup/media changes is also compared against d7ea26a. Pause/stall thresholds, fixed 1.0x, saved settings schema, nine-category sampler, assessment deferral, document adapters, owned-popup protocol and native-entry manual fallback remain intact.
+
+Integration tests start automatically, simulate legitimate ended plus catalog replacement/platform marker, and assert exactly one next-task click and resumed 1.0x playback. The synthetic complex profile also proves the inactive player never plays. Zero count alone remains insufficient; no marker/progress/attendance record is written by runtime code. No answering/submission, seeking, acceleration, AI service or runtime token cost is introduced.
+
+### Actual commands and results
+
+Node v24.18.1; Chrome 156.0.8078.48 headless. Playwright and local jQuery selected by PLAYWRIGHT_MODULE/JQUERY_PATH. Network blocked/intercepted; media and navigation timers simulated. No authenticated platform session was tested by the agent.
+
+```text
+node scripts/build-userscript.mjs
+[exit 0; no output]
+node tests/verify-v3.mjs
+V3 source and userscript payload are synchronized and syntactically valid.
+node tests/customization-v3.mjs
+PASS: fixed 1.0x configuration, assessment detection, and unknown-content safety (VM smoke).
+node tests/preserved-v3.mjs
+PASS: background guards/stall thresholds preserved; recovery rejects stale sessions and ended video; DeepSeek and legacy source unchanged.
+PASS: immediate recovery/monitoring, legitimate completion and scoped discovery preserved; assessment deferral and exact-origin protocol intentionally extended.
+PASS: 58a252a owned-popup protocol/child recovery and assessment/settings rules preserved; scheduler timing unchanged.
+PASS: legacy audition predicate/depth bound preserved; d7ea26a completion/rebinding methods unchanged; startup/media changes isolated from all other runtime code.
+node tests/navigation-v3.mjs
+RESULT: 284 passed, 0 failed; local Chrome DOM tests, simulated media/timers, no live platform.
+node tests/recorded-live-v3.mjs
+RESULT: 21 passed; 0 failed. Synthetic browser evidence only.
+node tests/native-entry-v3.mjs
+RESULT: 19 passed; 0 failed. Synthetic entry/manual-fallback evidence only.
+```
+
+All previous 250 navigation cases remain, plus 34 new startup/ownership/integration cases. Coverage includes the reviewed-source failure reproduction, no-manual-run automatic start, delayed catalog activation/title metadata/document/iframe/player loading, absent step widget, loaded empty placeholder, bounded failure/manual recovery, manual takeover, duplicate boot callbacks, cancellation on task/user/settings/destruction events, unchanged audition structure/background recovery, exact 20-document counts/indices, explicit active versus inactive players, visible/playing inactive branches, missing active media, unknown or undeclared audio, unsupported content, inaccessible media, failed/lost ownership and completion/navigation after re-render. The eight private outer-example cases remain inert local checks; no existing test was deleted or weakened.
+
+### Publication scope and remaining authenticated tests
+
+Seven files: V3 source, generated userscript, navigation/preservation tests, new fixtures/synthetic/complex-media-task.html, README and this report. No private HTML, actual course/user identifiers, authenticated/signed URLs, cookies or session data are added. All eight private examples remain locally excluded/untracked. Historical stable/DeepSeek files and userscript metadata remain unchanged. Publication is only to the fork review branch, with no master merge, tag, release or upstream PR.
+
+Required authenticated follow-up: capture the initial state/frame-load/play-rejection sequence if startup still fails; retest ordinary automatic startup, native browser autoplay policy, 1.0x/background behavior, actual ended/marker/catalog replacement and eligible navigation. For the complex lesson, source-derived branch ancestry/task ownership, active/inactive pane evidence, the audio's actual role/state and remaining blocker contents are indispensable before a real adapter can be enabled. Existing hidden/inert flags are not assumed to exist on Chaoxing; do not fabricate them or a validator merely to obtain PASS. Unknown or unproven structures continue to stop. Actual completion-credit and navigation PASS cannot be inferred from these synthetic results. The retained .icon_Completed selector still needs validation on the current authenticated page when relevant; native recorded-live popup ownership remains unsupported as documented previously.
+
+Final static/privacy gates: all 14 JavaScript syntax checks and git diff --check passed. Seven publication files were inspected and checked for credential literals, signed identity URLs and private keys; none found. All eight private fixtures remain locally excluded and untracked. These pattern checks supplement manual diff review and are not an exhaustive privacy guarantee.
