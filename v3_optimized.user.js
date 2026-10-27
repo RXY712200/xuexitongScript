@@ -89,6 +89,61 @@
         },
     };
     const videoAdapter = {
+        attachmentInventory() {
+            const frame = this.cardFrame(), root = this.cardDocument();
+            if (!root || !root.querySelector('iframe.ans-attach-online')) return null;
+            const result = { videos: [], tasks: [], documents: [root], unsupported: false, inaccessible: false, reasons: [] };
+            const reject = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
+            const node = catalog.current();
+            const lesson = { id: node?.id, node, root, frame };
+            if (!node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1) reject('unverified-attachment-lesson');
+            const attachments = Array.from(root.querySelectorAll('iframe'));
+            const rootAudio = Array.from(root.querySelectorAll('audio'));
+            if (root.querySelector('video, object, embed, form')) reject('unknown-root-task');
+            if (rootAudio.length && !(rootAudio.length === 1 && this.auxiliaryAudio(rootAudio[0], root))) reject('unclassified-audio');
+            const seen = new Set([root]);
+            for (const attachment of attachments) {
+                const video = attachment.classList.contains('ans-insertvideo-online');
+                const pdf = attachment.classList.contains('insertdoc-online-pdf');
+                if (!attachment.classList.contains('ans-attach-online') || video === pdf || !attachment.isConnected ||
+                    attachment.hidden || attachment.inert || !attachment.getClientRects().length) { reject('unknown-attachment'); continue; }
+                const media = [], documents = [], lineages = new Map();
+                const visit = (owner, lineage) => {
+                    let doc;
+                    try { doc = owner.contentDocument; } catch (_) { /* Inaccessible task stays blocked. */ }
+                    if (!doc) { result.inaccessible = true; reject('inaccessible-task-frame'); return; }
+                    if (seen.has(doc)) { reject('duplicate-attachment-document'); return; }
+                    seen.add(doc); documents.push(doc); result.documents.push(doc); lineages.set(doc, lineage);
+                    if (lineage.length >= 4 && doc.querySelector('iframe')) { reject('task-depth-limit'); return; }
+                    const supported = Array.from(doc.querySelectorAll('video[id*="video_html5"]'));
+                    media.push(...supported);
+                    if (doc.querySelector('audio, video:not([id*="video_html5"])')) reject('unknown-attachment-media');
+                    if (doc.querySelector('form, input, object, embed, canvas')) reject('unknown-attachment-content');
+                    if (video && !supported.length) {
+                        const body = doc.body?.cloneNode(true);
+                        body?.querySelectorAll('script, style, iframe').forEach(el => el.remove());
+                        if (!body || body.textContent.trim() || body.querySelector('img, button, a')) reject('unknown-leaf-content');
+                    }
+                    for (const nested of doc.querySelectorAll('iframe')) visit(nested, [...lineage, nested]);
+                };
+                visit(attachment, [frame, attachment]);
+                if (video && (media.length !== 1 || !media[0]?.isConnected)) reject('ambiguous-attachment-player');
+                if (pdf && media.length) reject('media-in-document-attachment');
+                const element = video ? media[0] : null;
+                result.tasks.push({ kind: video ? 'video' : 'document', attachment, element, media: element,
+                    document: element?.ownerDocument || documents[0], documents, lineage: element ? lineages.get(element.ownerDocument) : [frame, attachment],
+                    lesson, position: result.tasks.length, status: 'pending' });
+                if (element) result.videos.push(element);
+            }
+            if (!attachments.length) reject('missing-attachments');
+            return result;
+        },
+        auxiliaryAudio(audio, root) {
+            return audio?.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
+                audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
+                audio.isConnected && audio.controls && audio.getClientRects().length === 0 && audio.paused &&
+                !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !audio.error;
+        },
         cardFrame() {
             const cards = document.querySelectorAll('iframe[info="card"], iframe[src*="/knowledge/cards"]');
             return cards.length === 1 ? cards[0] : null;
@@ -97,6 +152,8 @@
             try { return this.cardFrame()?.contentDocument || null; } catch (_) { return null; }
         },
         discover(knownDocuments = new Set(), selection = null) {
+            const inventory = this.attachmentInventory();
+            if (inventory) return inventory;
             const result = { videos: [], inaccessible: false, unsupported: false, documents: [], reasons: [] };
             const seen = new Set();
             const audios = [];
@@ -657,6 +714,7 @@
                 this._state = 'DISCOVERING';
                 this._isPlaying = false;
                 this._completedVideos = new WeakSet();
+                this._attachmentSnapshot = null;
                 this._processedTasks = new WeakSet();
                 this._externalCompletion = null;
                 this._hadLive = false;
@@ -961,7 +1019,20 @@
             _discoverMedia() {
                 const scope = this._taskSet();
                 if (scope?.invalid) return { videos: [], documents: [], unsupported: true, inaccessible: false };
-                return videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []), scope?.mediaOwnership);
+                const media = videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []), scope?.mediaOwnership);
+                if (media.tasks) {
+                    const snapshot = this._attachmentSnapshot;
+                    if (snapshot && (snapshot.root !== media.tasks[0]?.lesson.root || snapshot.id !== catalog.current()?.id ||
+                        snapshot.tasks.length !== media.tasks.length || snapshot.tasks.some((task, i) => task.attachment !== media.tasks[i].attachment ||
+                            task.element !== media.tasks[i].element || task.documents.some((doc, j) => doc !== media.tasks[i].documents[j]) ||
+                            task.documents.length !== media.tasks[i].documents.length))) {
+                        media.unsupported = true; media.reasons.push('attachment-inventory-changed');
+                    }
+                    if (!snapshot && !media.unsupported && !media.inaccessible) this._attachmentSnapshot = {
+                        root: media.tasks[0]?.lesson.root, id: catalog.current()?.id, tasks: media.tasks };
+                    for (const task of media.tasks) task.status = this._completedVideos.has(task.element) ? 'completed' : 'pending';
+                }
+                return media;
             },
             _taskContextValid(record) {
                 try {
@@ -973,6 +1044,9 @@
             },
             _processSupportedTask() {
                 if (this._isPlaying) return false;
+                const inventory = this._discoverAttachmentTask();
+                if (inventory === true) return true;
+                if (inventory?.kind === 'video') return false;
                 const scope = this._taskSet();
                 if (!scope) return false;
                 if (scope.invalid || this._verificationPresent()) { this._block('已识别的任务范围已失效或需要验证'); return true; }
@@ -1043,6 +1117,23 @@
                 }
                 return true;
             },
+            _discoverAttachmentTask() {
+                const media = this._discoverMedia();
+                if (!media.tasks) return null;
+                if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
+                const pending = media.tasks.find(task => !this._completedVideos.has(task.element));
+                if (pending?.kind === 'document') {
+                    if (!this.settings.features.document) this._state = 'PAUSED_AUTOMATION';
+                    else this._block('PDF 附件已保留，但缺少可验证的滚动视图，需手动处理');
+                    return true;
+                }
+                // A playing, seeking or already-ended unprocessed sibling is not silently adopted.
+                if (media.tasks.some(task => task.kind === 'video' && task !== pending && !this._completedVideos.has(task.element) &&
+                    (!task.element.paused || task.element.seeking || task.element.ended))) {
+                    this._block('其他附件播放器正在活动或完成来源不明确'); return true;
+                }
+                return pending;
+            },
             _verifyExternal(attempt) {
                 const record = this._externalCompletion;
                 if (!record?.localDone || !this._taskContextValid(record)) return this._block('本地任务完成上下文无效');
@@ -1090,6 +1181,7 @@
                         target?.textContent || '')) return false;
                 const tasks = this._discoverMedia();
                 return !tasks.inaccessible && !tasks.unsupported &&
+                    (!tasks.tasks || tasks.tasks.every(task => task.kind === 'video' && this._completedVideos.has(task.element))) &&
                     tasks.videos.includes(this._completionVideo) &&
                     tasks.videos.every(video => video.ended && this._completedVideos.has(video));
             },
@@ -1549,6 +1641,7 @@
                 }
                 const oldDocument = videoAdapter.cardDocument();
                 if (!oldDocument) return this._block('无法唯一识别 cards 内容 iframe');
+                this._attachmentSnapshot = null;
                 this._cancelTasks();
                 this._externalCompletion = null;
                 this._hadLive = false;

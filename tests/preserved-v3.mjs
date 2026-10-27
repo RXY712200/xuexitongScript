@@ -70,11 +70,15 @@ assert.ok(current.includes("if (depth >= 4) { block('task-depth-limit'); continu
 assert.equal(method(current, '_runAction'), method(lifecycleBaseline, '_runAction').replace('node === catalog.current()', 'this._sameVideoTaskNode(node)')
     .replace("for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');",
         "for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {\n                                listen(frame, 'load', () => { if (!this._automaticStartup || category !== 'videoStart' || !valid()) cancel(); });\n                            }"));
-assert.equal(method(current, '_discoverMedia'), method(lifecycleBaseline, '_discoverMedia').replace(' || []));', ' || []), scope?.mediaOwnership);'));
+// Inventory discovery is intentionally extended; keep the legacy scope/ownership delegation,
+// and exercise inventory ordering, invalidation and refusal paths in navigation-v3.mjs.
+assert.ok(method(current, '_discoverMedia').includes('videoAdapter.discover(new Set(scope?.tasks.map(task => task.element.ownerDocument) || []), scope?.mediaOwnership)'));
+assert.ok(method(current, '_discoverMedia').includes("media.reasons.push('attachment-inventory-changed')"));
 assert.equal(method(current, 'updateSettings'), method(popupBaseline, 'updateSettings').replace('                this.settings = next;',
     "                this.settings = next;\n                if (!next.features.videoPlayback && this._startupCancel) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }"));
 assert.equal(method(current, '_schedule'), method(lifecycleBaseline, '_schedule').replace('node !== catalog.current()', '!this._sameVideoTaskNode(node)'));
-assert.equal(method(current, '_navigationEligible'), method(lifecycleBaseline, '_navigationEligible').replace(
+const withoutInventoryGuard = value => value.replace("                    (!tasks.tasks || tasks.tasks.every(task => task.kind === 'video' && this._completedVideos.has(task.element))) &&\n", '');
+assert.equal(withoutInventoryGuard(method(current, '_navigationEligible')), method(lifecycleBaseline, '_navigationEligible').replace(
     '                if (this._externalCompletion) return this._externalNavigationEligible(target);',
     '                if (this._externalCompletion) return this._externalNavigationEligible(target);\n                if (!this._refreshVideoContext()) return false;'));
 assert.equal(method(current, '_completeVideo'), method(lifecycleBaseline, '_completeVideo').replace(
@@ -93,16 +97,19 @@ assert.equal(method(current, '_checkVideoStatus'), method(lifecycleBaseline, '_c
 const startupBaseline = execFileSync('git', ['show', 'd7ea26ac373522b250f4bf573fada7c75687c909:v3_optimized.js'], { encoding: 'utf8' });
 for (const name of ['_catalogTopology', '_refreshVideoContext', '_sameVideoTaskNode', '_schedule', '_completeVideo', '_continueCompleted',
     '_navigationEligible', '_queueNavigation', '_tryResumePlayback', '_handlePlayError', '_checkVideoStatus']) {
-    assert.equal(method(current, name), method(startupBaseline, name), `${name} preserves d7ea26a completion/continuity`);
+    assert.equal(withoutInventoryGuard(method(current, name)), method(startupBaseline, name), `${name} preserves d7ea26a completion/continuity`);
 }
-const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_cancelTasks', 'play', '_getVideoEl'];
+const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_discoverAttachmentTask', '_cancelTasks', 'play', '_getVideoEl'];
 const outsideStartup = source => {
     source = source.slice(source.indexOf('    // Rules are limited'));
+    source = withoutInventoryGuard(source);
+    source = source.replaceAll('                this._attachmentSnapshot = null;\n', '');
+    source = source.replace("                const inventory = this._discoverAttachmentTask();\n                if (inventory === true) return true;\n                if (inventory?.kind === 'video') return false;\n", '');
     source = source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '');
     for (const name of startupChanges) if (source.includes(`            ${name}(`) || source.includes(`            async ${name}(`)) {
         source = source.replace(method(source, name) + '\n            },', '');
     }
-    return source.replace('app.run({ startup: true });', 'app.run();').replace(/\n{3,}/g, '\n\n');
+    return source.replace('app.run({ startup: true });', 'app.run();').replace(/\n{2,}/g, '\n');
 };
 assert.equal(outsideStartup(current), outsideStartup(startupBaseline));
 console.log('PASS: legacy audition predicate/depth bound preserved; d7ea26a completion/rebinding methods unchanged; startup/media changes isolated from all other runtime code.');

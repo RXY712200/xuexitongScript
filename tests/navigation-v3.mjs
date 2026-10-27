@@ -195,6 +195,58 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    async function attachments(page, variant = '') {
+        await page.evaluate(variant => {
+            const root = document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML = '<div><audio id="auditionAudio" controls style="display:none"></audio></div>';
+            window.__attachmentVideos = [];
+            for (let i = 0; i < 5; i++) {
+                const frame = root.createElement('iframe'); frame.className = 'ans-attach-online ' + (i < 4 ? 'ans-insertvideo-online' : 'insertdoc-online-pdf');
+                root.body.append(frame);
+                if (i < 4) {
+                    const v = frame.contentDocument.createElement('video'); v.id = 'video_html5_api';
+                    v.__paused = true; v.__ended = false; v.__plays = 0;
+                    Object.defineProperties(v, { paused: { get: () => v.__paused }, ended: { get: () => v.__ended } });
+                    v.play = () => { v.__paused = false; v.__plays++; return Promise.resolve(); };
+                    frame.contentDocument.body.append(v); window.__attachmentVideos.push(v);
+                }
+            }
+            const frames = root.querySelectorAll('iframe');
+            if (variant === 'unknown') frames[2].className = 'unknown';
+            if (variant === 'inaccessible') Object.defineProperty(frames[2], 'contentDocument', { get: () => null });
+            if (variant === 'extra') frames[1].contentDocument.body.append(frames[1].contentDocument.querySelector('video').cloneNode());
+            if (variant === 'audio') root.querySelector('audio').id = 'unknownAudio';
+            if (variant === 'sibling') window.__attachmentVideos[2].__paused = false;
+            const settings = JSON.parse(JSON.stringify(app.settings)); settings.features.document = false;
+            settings.randomDelaysEnabled = false; app.updateSettings(settings); app.run();
+        }, variant);
+    }
+    await check('multi-attachment inventory preserves ordered four videos and pending PDF', () => using([outer(2), 0], async page => {
+        await attachments(page);
+        assert.deepEqual(await page.evaluate(() => app._discoverMedia().tasks.map(t => [t.kind, t.position])), [['video',0],['video',1],['video',2],['video',3],['document',4]]);
+        for (let i = 0; i < 4; i++) {
+            assert.deepEqual(await page.evaluate(() => window.__attachmentVideos.map(v => v.__plays)), [0,1,2,3].map(j => j <= i ? 1 : 0));
+            await page.evaluate(i => { const v = window.__attachmentVideos[i]; v.__paused = true; v.__ended = true; v.dispatchEvent(new Event('ended')); v.dispatchEvent(new Event('ended')); }, i);
+            await flush(page, 2);
+        }
+        assert.equal(await state(page), 'PAUSED_AUTOMATION');
+        assert.equal(await page.evaluate(() => app._discoverMedia().tasks[4].status), 'pending');
+        assert.equal(await page.evaluate(() => document.querySelector('.posCatalog_active').id), 'node0');
+        assert.equal(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('audio').paused), true);
+    }));
+    for (const variant of ['unknown', 'inaccessible', 'extra', 'audio', 'sibling']) await check(`multi-attachment rejects ${variant}`, () => using([outer(2), 0], async page => {
+        await attachments(page, variant); assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__attachmentVideos.reduce((n, v) => n + v.__plays, 0)), 0);
+    }));
+    await check('multi-attachment replacement invalidates completion and enabled unknown PDF stays unfinished', () => using([outer(2), 0], async page => {
+        await attachments(page);
+        await page.evaluate(() => { const f = document.querySelector('iframe').contentDocument.querySelector('iframe'); f.remove(); app.play(); });
+        assert.equal(await state(page), 'BLOCKED');
+        await attachments(page);
+        await page.evaluate(() => { const s = JSON.parse(JSON.stringify(app.settings)); s.features.document = true; app.updateSettings(s); });
+        for (let i = 0; i < 4; i++) { await page.evaluate(i => { const v=window.__attachmentVideos[i]; v.__paused=true; v.__ended=true; v.dispatchEvent(new Event('ended')); },i); await flush(page,2); }
+        assert.equal(await state(page), 'BLOCKED');
+    }));
     const autoOptions = [outer(2), 1, false, null, false, false, true];
     const bootRuns = page => page.evaluate(() => window.__logs.filter(line => line.includes('优化版启动')).length);
     await check('automatic startup reviewed baseline reproduces premature missing-frame failure', () => using([outer(2), 0, false, 'auto-missing-card', false, false, true, reviewedStartup], async page => {
