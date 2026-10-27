@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 const baseline = execFileSync('git', ['show', 'e907cdda9d50fd80c61721061ed0988dfec621a4:v3_optimized.js'], { encoding: 'utf8' });
-const current = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const actual = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+// Shared native audio/video coordinator additions are behavior-tested below the
+// historical snapshots. Normalize only this explicit integration, not recovery code.
+const current = actual.replaceAll('this._playableMedia()', 'this._discoverMedia()')
+    .replace("                    (category !== 'nextAudio' || this.settings.features.audioPlayback) &&\n", '')
+    .replace("['videoStart', 'nextVideo', 'audioStart', 'nextAudio']", "['videoStart', 'nextVideo']")
+    .replace("!['videoStart', 'audioStart'].includes(category)", "category !== 'videoStart'")
+    .replace("if (this._startupCancel && !next.features[this._discoverMedia().audios?.length ? 'audioPlayback' : 'videoPlayback'])", 'if (!next.features.videoPlayback && this._startupCancel)')
+    .replace("['video', 'audio'].includes(task.kind)", "task.kind === 'video'");
 function method(source, name) {
     const start = Math.max(source.indexOf(`            ${name}(`), source.indexOf(`            async ${name}(`));
     assert.ok(start >= 0, name);
@@ -99,11 +107,15 @@ for (const name of ['_catalogTopology', '_refreshVideoContext', '_sameVideoTaskN
     '_navigationEligible', '_queueNavigation', '_tryResumePlayback', '_handlePlayError', '_checkVideoStatus']) {
     assert.equal(withoutInventoryGuard(method(current, name)), method(startupBaseline, name), `${name} preserves d7ea26a completion/continuity`);
 }
-const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_discoverAttachmentTask', '_cancelTasks', 'play', '_getVideoEl'];
+const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_playableMedia', '_mediaAction', '_discoverAttachmentTask', '_cancelTasks', 'play', '_getVideoEl'];
 const outsideStartup = source => {
     source = source.slice(source.indexOf('    // Rules are limited'));
     source = withoutInventoryGuard(source);
     source = source.replaceAll('                this._attachmentSnapshot = null;\n', '');
+    source = source.replace("audioPlayback: '自动播放音频', nextAudio: '自动下一音频', ", '')
+        .replace("        audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],\n", '')
+        .replace("            if (['audioPlayback', 'nextAudio'].includes(key) && input.features && !Object.hasOwn(input.features, key)) continue;\n", '')
+        .replace("            if (['audioStart', 'nextAudio'].includes(key) && input.delays && !Object.hasOwn(input.delays, key)) {\n                result.delays[key] = defaultSettings(input.preset).delays[key]; continue;\n            }\n", '');
     source = source.replace("                const inventory = this._discoverAttachmentTask();\n                if (inventory === true) return true;\n                if (inventory?.kind === 'video') return false;\n", '');
     source = source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '');
     for (const name of startupChanges) if (source.includes(`            ${name}(`) || source.includes(`            async ${name}(`)) {

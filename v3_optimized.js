@@ -75,6 +75,53 @@
         },
     };
     const videoAdapter = {
+        audioInventory() {
+            const root = this.cardDocument(), frame = this.cardFrame();
+            if (!root) return null;
+            const docs = [], lineage = new Map(); let inaccessible = false;
+            const visit = (doc, path) => {
+                if (!doc || docs.includes(doc)) { inaccessible = true; return; }
+                docs.push(doc); lineage.set(doc, path);
+                for (const child of doc.querySelectorAll('iframe')) {
+                    try { if (path.length >= 4) inaccessible = true; else visit(child.contentDocument, [...path, child]); }
+                    catch (_) { inaccessible = true; }
+                }
+            };
+            visit(root, [frame]);
+            const primary = docs.flatMap(doc => Array.from(doc.querySelectorAll('audio#audio_html5_api.vjs-tech')));
+            if (!primary.length) return null;
+            const result = { videos: [], audios: [], documents: docs, tasks: [], reasons: [], unsupported: false, inaccessible };
+            const block = reason => { result.unsupported = true; result.reasons.push(reason); };
+            const audio = primary[0], doc = audio.ownerDocument, node = catalog.current(), wrapper = audio.closest('.video-js');
+            if (primary.length !== 1 || !node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1 ||
+                !audio.isConnected || !wrapper?.isConnected || !wrapper.getClientRects().length ||
+                !lineage.get(doc)?.every(owner => owner?.isConnected && !owner.hidden && !owner.inert && owner.getClientRects().length) ||
+                wrapper.querySelectorAll('audio').length !== 1 || !wrapper.querySelector('.vjs-control-bar')?.getClientRects().length) block('unverified-audio-player');
+            const allAudio = docs.flatMap(inner => Array.from(inner.querySelectorAll('audio')));
+            const secondary = allAudio.filter(el => el.id === 'audio1_html5_white');
+            for (const el of allAudio) {
+                if (el === audio) continue;
+                if (this.auxiliaryAudio(el, root) && allAudio.filter(other => other.id === 'auditionAudio').length === 1) continue;
+                const container = el.closest('#audio1_html5, .audio1_html5');
+                if (el.id === 'audio1_html5_white' && secondary.length === 1 && el.ownerDocument === doc && container && container !== wrapper &&
+                    container.querySelectorAll('audio, video').length === 1 && !container.getClientRects().length &&
+                    el.paused && !el.autoplay && !el.seeking && el.currentTime === 0 && !el.error) continue;
+                block('unclassified-audio');
+            }
+            for (const inner of docs) {
+                if (inner.querySelector('video, form, input, object, embed, canvas')) block('unknown-audio-task-content');
+                if (inner !== doc) {
+                    const body = inner.body?.cloneNode(true);
+                    body?.querySelectorAll('script, style, iframe, audio').forEach(el => el.remove());
+                    if (!body || body.textContent.trim() || body.querySelector('img, button, a')) block('unknown-leaf-content');
+                }
+            }
+            if (inaccessible) block('inaccessible-task-frame');
+            result.audios.push(audio);
+            result.tasks.push({ kind: 'audio', attachment: lineage.get(doc)?.[1] || wrapper, element: audio, media: audio,
+                document: doc, documents: docs, lineage: lineage.get(doc), lesson: { id: node?.id, node, root, frame }, position: 0, status: 'pending' });
+            return result;
+        },
         attachmentInventory() {
             const frame = this.cardFrame(), root = this.cardDocument();
             if (!root || !root.querySelector('iframe.ans-attach-online')) return null;
@@ -140,6 +187,8 @@
         discover(knownDocuments = new Set(), selection = null) {
             const inventory = this.attachmentInventory();
             if (inventory) return inventory;
+            const audio = this.audioInventory();
+            if (audio) return audio;
             const result = { videos: [], inaccessible: false, unsupported: false, documents: [], reasons: [] };
             const seen = new Set();
             const audios = [];
@@ -254,10 +303,11 @@
     };
 
     const SETTINGS_KEY = 'xuexitong.v3.action-settings.v1';
-    const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', nextLesson: '自动下一课节',
+    const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', audioPlayback: '自动播放音频', nextAudio: '自动下一音频', nextLesson: '自动下一课节',
         nextChapter: '自动下一章节', assessment: '暂缓章节测验并继续学习', document: '文档阅读', live: '直播窗口协调', background: '后台播放保护' };
     const ACTIONS = {
         videoStart: ['视频开始', 300, 900, 'videoPlayback'], nextVideo: ['课内下一视频', 500, 1500, 'nextVideo'],
+        audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],
         documentScroll: ['文档逐步滚动', 400, 1200, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
         nextLesson: ['下一课节', 1000, 2500, 'nextLesson'], nextChapter: ['下一章节', 1500, 3500, 'nextChapter'],
         assessment: ['测验交接', 1000, 2500, 'assessment'], liveOpen: ['打开直播窗口', 500, 1500, 'live'],
@@ -280,10 +330,14 @@
             result[field] = input[field];
         }
         for (const key of Object.keys(FEATURES)) {
+            if (['audioPlayback', 'nextAudio'].includes(key) && input.features && !Object.hasOwn(input.features, key)) continue;
             if (typeof input.features?.[key] !== 'boolean') throw new Error('功能开关无效');
             result.features[key] = input.features[key];
         }
         for (const key of Object.keys(ACTIONS)) {
+            if (['audioStart', 'nextAudio'].includes(key) && input.delays && !Object.hasOwn(input.delays, key)) {
+                result.delays[key] = defaultSettings(input.preset).delays[key]; continue;
+            }
             const rule = input.delays?.[key];
             if (!rule || typeof rule.enabled !== 'boolean' || !Number.isSafeInteger(rule.minMs) ||
                 !Number.isSafeInteger(rule.maxMs) || rule.minMs < 0 || rule.maxMs < rule.minMs || rule.maxMs > 2147483647) {
@@ -750,7 +804,7 @@
                         (this._chapterOf(node) !== chapter && (!topology || this._catalogTopology() !== topology)))) {
                         cleanup(); return this._block('首次启动时课程任务已改变');
                     }
-                    const frame = videoAdapter.cardFrame(), doc = videoAdapter.cardDocument(), media = this._discoverMedia();
+                    const frame = videoAdapter.cardFrame(), doc = videoAdapter.cardDocument(), media = this._playableMedia();
                     const title = this._currentStepTitle(), label = node?.querySelector('.posCatalog_name');
                     const nodeTitle = (label?.getAttribute('title') || label?.textContent || '').trim();
                     const stepReady = !document.getElementsByClassName('prev_title').length || !!title;
@@ -801,7 +855,7 @@
                 try { next = validateSettings(input); } catch (error) { this._settingsMessage = error.message; return false; }
                 const previous = this.settings;
                 this.settings = next;
-                if (!next.features.videoPlayback && this._startupCancel) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }
+                if (this._startupCancel && !next.features[this._playableMedia().audios?.length ? 'audioPlayback' : 'videoPlayback']) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }
                 if (previous.preset !== next.preset && next.preset === 'legacy') {
                     this.configs.randomCooldownMinMs = 5000; this.configs.randomCooldownMaxMs = 12000;
                 }
@@ -821,6 +875,7 @@
             },
             _actionEnabled(category) {
                 return !this._destroyed && this.settings.features[ACTIONS[category][3]] &&
+                    (category !== 'nextAudio' || this.settings.features.audioPlayback) &&
                     (category !== 'nextVideo' || this.settings.features.videoPlayback) &&
                     (category !== 'assessment' || this.settings.features.nextChapter) &&
                     (!['videoStart', 'nextVideo'].includes(category) || this.configs.autoplay);
@@ -856,11 +911,11 @@
                         const listeners = [];
                         const listen = (el, type, handler = cancel) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
                         const click = event => { if (!event.composedPath().includes(this._settingsPanel)) cancel(); };
-                        for (const doc of new Set([document, ...this._discoverMedia().documents])) {
+                        for (const doc of new Set([document, ...this._playableMedia().documents])) {
                             observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
                             for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {
-                                listen(frame, 'load', () => { if (!this._automaticStartup || category !== 'videoStart' || !valid()) cancel(); });
+                                listen(frame, 'load', () => { if (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid()) cancel(); });
                             }
                         }
                         if (this._completionVideo) listen(this._completionVideo, 'play');
@@ -1020,6 +1075,15 @@
                 }
                 return media;
             },
+            _playableMedia() {
+                const media = this._discoverMedia();
+                // The public inventory retains videos/audio separately; the existing
+                // completion/recovery coordinator consumes one selected native media list.
+                return media.audios ? { ...media, videos: media.audios } : media;
+            },
+            _mediaAction(element, next = false) {
+                return element?.tagName === 'AUDIO' ? (next ? 'nextAudio' : 'audioStart') : (next ? 'nextVideo' : 'videoStart');
+            },
             _taskContextValid(record) {
                 try {
                     return !this._destroyed && record.href === window.location.href && record.generation === this._generation &&
@@ -1039,7 +1103,7 @@
                 const pending = scope.tasks.find(task => !this._processedTasks.has(task.element));
                 if (!pending) {
                     if (!scope.tasks.length) return false;
-                    const media = this._discoverMedia();
+                    const media = this._playableMedia();
                     if (media.videos.some(video => !this._completedVideos.has(video))) return false;
                     this._verifyExternal(0); return true;
                 }
@@ -1104,7 +1168,7 @@
                 return true;
             },
             _discoverAttachmentTask() {
-                const media = this._discoverMedia();
+                const media = this._playableMedia();
                 if (!media.tasks) return null;
                 if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
                 const pending = media.tasks.find(task => !this._completedVideos.has(task.element));
@@ -1126,7 +1190,7 @@
                 this._state = 'VERIFYING_COMPLETION';
                 const scope = this._taskSet();
                 if (!scope || scope.invalid) return this._block('任务范围无法验证');
-                const media = this._discoverMedia();
+                const media = this._playableMedia();
                 if (media.inaccessible || media.unsupported) return this._block('任务包含未知或不可访问的内容');
                 if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
                     media.videos.some(video => !this._completedVideos.has(video))) {
@@ -1146,7 +1210,7 @@
                     record.title !== this._currentStepTitle() || record.href !== window.location.href || record.generation !== this._generation || this._destroyed) return false;
                 if (record.kind === 'assessment') return this._assessmentTarget(record.node) === target;
                 if (this._isChapterTest() || !this._taskContextValid(record) || this._targetAfter(record.node) !== target) return false;
-                const media = this._discoverMedia();
+                const media = this._playableMedia();
                 if (media.inaccessible || media.unsupported || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
                 if ((this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') return false;
                 return media.videos.every(video => video.ended && this._completedVideos.has(video));
@@ -1165,9 +1229,9 @@
                 if (index < 0 || this._targetAfter(this._completionNode) !== target ||
                     assessmentTitle(target?.querySelector('.posCatalog_name')?.getAttribute('title') ||
                         target?.textContent || '')) return false;
-                const tasks = this._discoverMedia();
+                const tasks = this._playableMedia();
                 return !tasks.inaccessible && !tasks.unsupported &&
-                    (!tasks.tasks || tasks.tasks.every(task => task.kind === 'video' && this._completedVideos.has(task.element))) &&
+                    (!tasks.tasks || tasks.tasks.every(task => ['video', 'audio'].includes(task.kind) && this._completedVideos.has(task.element))) &&
                     tasks.videos.includes(this._completionVideo) &&
                     tasks.videos.every(video => video.ended && this._completedVideos.has(video));
             },
@@ -1236,7 +1300,7 @@
                         keyedElements.filter(el => el.id === context.chapterId).length === 1) ||
                     (!context.chapter?.isConnected && !context.chapterId && context.topology && this._catalogTopology() === context.topology));
                 if (!sameChapter) return false;
-                const media = this._discoverMedia();
+                const media = this._playableMedia();
                 if (media.inaccessible || media.unsupported || !media.videos.includes(context.video)) return false;
                 const source = context.video.currentSrc || context.video.getAttribute('src') || '';
                 if (context.source && source !== context.source) return false;
@@ -1313,7 +1377,7 @@
                     this._currentStepTitle() !== this._playStepTitle) {
                     return this._block('完成事件与当前目录不匹配');
                 }
-                const tasks = this._discoverMedia();
+                const tasks = this._playableMedia();
                 if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
                 if (!tasks.videos.includes(this._completionVideo)) return this._block('播放器已替换，完成状态不明确');
                 const next = tasks.videos.find(video => !this._completedVideos.has(video));
@@ -1431,7 +1495,7 @@
                     if (this._playPending || this._actions.pending.has('video-start') || this._actions.pending.has('video-tab')) return;
                     if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
-                    const tasks = this._discoverMedia();
+                    const tasks = this._playableMedia();
                     if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
                     const el = this._getVideoEl();
                     if (el == null) {
@@ -1450,9 +1514,9 @@
                     if (!catalog.current()) return this._block('无法唯一确定当前目录节点');
                     if (this._completedVideos.has(el)) return;
                     if (this._isPlaying && !el.paused && !el.ended) { this._state = 'PLAYING'; return; }
-                    if (!this._actionEnabled(this._nextVideoRequested ? 'nextVideo' : 'videoStart')) { this._state = 'PAUSED_AUTOMATION'; return; }
+                    if (!this._actionEnabled(this._mediaAction(el, this._nextVideoRequested))) { this._state = 'PAUSED_AUTOMATION'; return; }
                     if (!actionReady && this._preparedVideoNode !== catalog.current()) {
-                        const category = this._nextVideoRequested ? 'nextVideo' : 'videoStart';
+                        const category = this._mediaAction(el, this._nextVideoRequested);
                         this._state = 'ACTION_PENDING';
                         this._runAction(category, 'video-start', () => { this._state = 'READY'; this.play(true); },
                             { isValid: () => el.isConnected && !el.ended && !this._completedVideos.has(el) && el === this._getVideoEl() });
@@ -1686,7 +1750,7 @@
                     this._videoEl = null;
                     return null;
                 }
-                const tasks = this._discoverMedia();
+                const tasks = this._playableMedia();
                 if (tasks.inaccessible || tasks.unsupported) {
                     if (this._state !== 'BLOCKED') this._block('存在不可访问或不支持的媒体组件');
                     return null;

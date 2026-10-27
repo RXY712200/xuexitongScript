@@ -16,6 +16,7 @@ const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-vi
 const auditionTask = readFileSync(new URL('../fixtures/synthetic/audition-audio-task.html', import.meta.url), 'utf8');
 const rerenderCatalog = readFileSync(new URL('../fixtures/synthetic/catalog-rerender.html', import.meta.url), 'utf8');
 const complexMedia = readFileSync(new URL('../fixtures/synthetic/complex-media-task.html', import.meta.url), 'utf8');
+const audioFixture = readFileSync(new URL('../fixtures/synthetic/native-audio-task.html', import.meta.url), 'utf8');
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
@@ -195,6 +196,65 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    async function audioLesson(page, variant = '', automatic = false) {
+        await page.evaluate(({ html, variant, automatic }) => {
+            const root = document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML = '<div><audio id="auditionAudio" controls style="display:none"></audio></div><iframe></iframe>';
+            const doc = root.querySelector('iframe').contentDocument; doc.body.innerHTML = html;
+            const audio = doc.querySelector('#audio_html5_api'); window.__audio = audio;
+            audio.__plays = 0; audio.__paused = true; audio.__ended = false;
+            Object.defineProperties(audio, { paused: { get: () => audio.__paused }, ended: { get: () => audio.__ended } });
+            audio.play = () => { audio.__plays++; audio.__paused = false; return Promise.resolve(); };
+            if (variant === 'secondary-playing') Object.defineProperty(doc.querySelector('#audio1_html5_white'), 'paused', { get: () => false });
+            if (variant === 'secondary-visible') doc.querySelector('#audio1_html5').style.display = '';
+            if (variant === 'unknown') doc.body.append(doc.createElement('audio'));
+            if (variant === 'no-ui') doc.querySelector('.vjs-control-bar').remove();
+            if (variant === 'wrong-class') audio.className = '';
+            if (variant === 'duplicate') doc.querySelector('.video-js').append(audio.cloneNode());
+            if (variant === 'aux-playing') Object.defineProperty(root.querySelector('audio'), 'paused', { get: () => false });
+            if (variant === 'unknown-frame') { const f = root.createElement('iframe'); root.body.append(f); f.contentDocument.body.textContent = 'Unknown task'; }
+            if (variant === 'inaccessible') Object.defineProperty(root.querySelector('iframe'), 'contentDocument', { get: () => null });
+            const settings = JSON.parse(JSON.stringify(app.settings)); settings.randomDelaysEnabled = false;
+            if (automatic) settings.features.videoPlayback = false;
+            if (variant === 'disabled') settings.features.audioPlayback = false;
+            app.updateSettings(settings); app.run({ startup: automatic });
+        }, { html: audioFixture, variant, automatic });
+    }
+    await check('audio native primary and inactive secondary preserve fixed speed and marker-gated natural completion', () => using([outer(2), 0], async page => {
+        await audioLesson(page);
+        assert.deepEqual(await page.evaluate(() => [app._state, window.__audio.__plays, window.__audio.playbackRate, app._discoverMedia().videos.length, app._discoverMedia().audios.length]), ['PLAYING',1,1,0,1]);
+        await page.evaluate(() => { window.__audio.__paused = true; app._tryResumePlayback('synthetic focus'); });
+        assert.equal(await page.evaluate(() => window.__audio.__plays), 2);
+        await page.evaluate(() => { window.__audio.__ended = true; window.__audio.dispatchEvent(new Event('ended')); window.__audio.dispatchEvent(new Event('ended')); });
+        await flush(page, 2); assert.equal(await state(page), 'VERIFYING_COMPLETION');
+        assert.equal(await page.evaluate(() => document.querySelector('.posCatalog_active').id), 'node0');
+        await page.evaluate(() => { const n=document.querySelector('.posCatalog_active'); n.querySelector('input').remove(); n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>'); });
+        await flush(page); assert.equal(await state(page), 'ADVANCING'); // Delays explicitly disabled by this fixture.
+        assert.equal(await page.evaluate(() => window.__audio.__plays), 2);
+    }));
+    await check('audio automatic readiness starts once without video feature dependency', () => using([outer(2), 0], async page => {
+        await audioLesson(page, '', true); await flush(page,3);
+        assert.equal(await state(page), 'PLAYING'); assert.equal(await page.evaluate(() => window.__audio.__plays),1);
+    }));
+    for (const variant of ['secondary-playing','secondary-visible','unknown','no-ui','duplicate','aux-playing','unknown-frame','inaccessible']) await check(`audio refuses ${variant}`, () => using([outer(2),0], async page => {
+        await audioLesson(page,variant); assert.equal(await state(page),'BLOCKED'); assert.equal(await page.evaluate(() => window.__audio.__plays),0);
+    }));
+    await check('audio switch disables playback and new delay categories are independently configured', () => using([outer(2),0], async page => {
+        await audioLesson(page,'disabled'); assert.equal(await state(page),'PAUSED_AUTOMATION');
+        assert.deepEqual(await page.evaluate(() => [app.settings.delays.audioStart.minMs,app.settings.delays.nextAudio.maxMs,window.__audio.__plays]),[300,1500,0]);
+    }));
+    await check('audio settings migrate version one without resetting customized legacy fields', () => using([outer(),1], async page => {
+        assert.equal(await page.evaluate(() => {
+            const old=JSON.parse(JSON.stringify(app.settings)); delete old.features.audioPlayback; delete old.features.nextAudio;
+            delete old.delays.audioStart; delete old.delays.nextAudio;
+            old.features.background=false; old.preset='custom'; old.delays.videoStart={enabled:false,minMs:234,maxMs:789};
+            if (!app.updateSettings(old)) return false;
+            const s=app.settings;
+            const malformed=JSON.parse(JSON.stringify(s)); malformed.delays.audioStart.minMs=-1;
+            return !s.features.background && s.delays.videoStart.minMs===234 && !s.delays.videoStart.enabled && s.features.audioPlayback &&
+                s.delays.audioStart.minMs===300 && !app.updateSettings(malformed) && app.settings===s;
+        }),true);
+    }));
     async function attachments(page, variant = '') {
         await page.evaluate(variant => {
             const root = document.querySelector('iframe[info="card"]').contentDocument;
@@ -1591,8 +1651,8 @@ try {
         assert.equal(await host.locator('details').evaluate(el => el.open), false);
         await host.locator('summary').click(); assert.equal(await host.locator('details').evaluate(el => el.open), true);
         await host.locator('[data-preset]').selectOption('short');
-        assert.equal(await host.locator('input[data-feature]').count(), 8);
-        assert.equal(await host.locator('input[data-enable]').count(), 9);
+        assert.equal(await host.locator('input[data-feature]').count(), 10); // Two independently configurable audio switches.
+        assert.equal(await host.locator('input[data-enable]').count(), 11); // Two audio action categories added.
         const min = host.locator('input[data-category="nextLesson"][data-bound="minMs"]');
         await min.fill('-1'); await min.dispatchEvent('change');
         assert.equal(await page.evaluate(() => app.settings.delays.nextLesson.minMs), 1000);

@@ -28,3 +28,29 @@ inventory. Complete build, verification, customization, preservation, recorded-l
 and native-entry suites run as delivery gates. Preservation snapshots explicitly
 allow only the inventory integration; background recovery, completion/rebinding,
 legacy popup protocol and legacy sources retain their previous comparisons.
+
+## Stage 2 — native audio
+
+A separate audio inventory requires a unique connected `audio_html5_api.vjs-tech`
+inside a rendered Video.js container with a rendered control bar, visible iframe
+ancestry and unique current lesson. Native audio rectangles need not be visible.
+The secondary `audio1_html5_white` is accepted only inside its evidenced named
+container when the entire container is hidden and the element is paused, at zero,
+not autoplaying/seeking/errored. A rendered or active secondary is still unsupported.
+Other audio, unknown tasks and inaccessible documents block. These are supported
+structural restrictions, not a claim about the secondary's real business purpose.
+
+The existing native-media recovery/completion coordinator now receives a selected
+audio or video list; public discovery retains separate `videos` and `audios` fields.
+No seeking/progress writes are introduced. Natural ended and platform confirmation
+are required before leaving an audio lesson. Existing recovery guards are unchanged.
+
+Chinese panel adds audio playback/next audio and audio-start/next-audio delays
+(300–900ms / 500–1500ms). Version-1 migration supplies only absent audio fields,
+retains all old values, honors legacy preset defaults and rejects malformed present
+fields without replacing saved settings. Twelve synthetic cases cover recognition,
+natural completion, marker absence/presence, immediate background recovery, startup,
+disabled audio, unsafe secondary/auxiliary media and settings migration.
+
+Authenticated audio-player wrapper/control markup and the secondary container's
+actual hidden state still require user retesting. No blanket native-audio allowlist.
