@@ -115,6 +115,11 @@ const outsideStartup = source => {
     source = source.slice(source.indexOf('    // Rules are limited'));
     source = withoutInventoryGuard(source);
     source = source.replaceAll('                this._attachmentSnapshot = null;\n', '');
+    if (source.includes("        const bridgeProtocol =")) source = source.replace(block(source, '        const bridgeProtocol =', "        const protocol = 'xuexitong-live-v1'"), '');
+    source = source.replace('scheduleClose = fn => fn(), isPlatformComplete, background', 'scheduleClose = fn => fn()')
+        .replace("                if (bridgeAvailable && typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,\n                    isPlatformComplete, onResult, onError, scheduleClose, background });\n", '')
+        .replace("        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),\n            dispose() { env.removeEventListener?.('message', bridgeHello); } };", "        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry) };")
+        .replace("                            isPlatformComplete: () => this._taskContextValid(record) && catalog.status(record.node) === 'completed',\n                            background: this.settings.features.background,\n", '');
     source = source.replace("audioPlayback: '自动播放音频', nextAudio: '自动下一音频', ", '')
         .replace("        audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],\n", '')
         .replace("            if (['audioPlayback', 'nextAudio'].includes(key) && input.features && !Object.hasOwn(input.features, key)) continue;\n", '')

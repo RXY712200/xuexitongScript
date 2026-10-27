@@ -1,6 +1,7 @@
 (function () {
     const APP_KEY = '__xuexitongPlayerV3';
     const BOOT_TIMER_KEY = '__xuexitongPlayerV3BootTimer';
+    window.__xuexitongTaskSupport?.dispose?.();
     window.__xuexitongTaskSupport = createTaskSupport(window);
 
     const previousApp = window[APP_KEY];
@@ -452,6 +453,60 @@
         probe();
     }
     function createTaskSupport(env) {
+        const bridgeProtocol = 'xuexitong-live-bridge-v1';
+        let bridgeAvailable = false;
+        const bridgeHello = event => {
+            if (event.source === env && event.origin === 'https://mooc1.chaoxing.com' &&
+                event.data?.protocol === bridgeProtocol && event.data.type === 'AVAILABLE') bridgeAvailable = true;
+        };
+        if (env.location?.origin === 'https://mooc1.chaoxing.com') {
+            env.addEventListener?.('message', bridgeHello);
+            env.postMessage?.({ protocol: bridgeProtocol, type: 'PING' }, env.location.origin);
+        }
+        function createBridgeParent({ generation, isValid, isPlatformComplete, onResult, onError, scheduleClose, background }) {
+            const id = env.crypto.randomUUID(), started = Date.now();
+            let sent = 0, received = 0, timer, disposed = false, paired = false, ended = false, confirmed = false, terminal = false;
+            const sendBridge = type => env.postMessage({ protocol: bridgeProtocol, type, id, generation,
+                seq: ++sent, timestamp: Date.now(), background: background !== false }, env.location.origin);
+            const dispose = () => {
+                if (disposed) return;
+                sendBridge('CANCEL'); disposed = true; env.clearInterval(timer); env.removeEventListener('message', receive);
+                env.removeEventListener('pagehide', dispose);
+            };
+            const fail = () => { dispose(); onError('直播桥接会话失效或窗口提前关闭，请手动处理'); };
+            const tick = () => {
+                if (disposed) return;
+                if (!isValid() || Date.now() - started > 86400000) return fail();
+                if (ended && !confirmed && isPlatformComplete?.() === true) { confirmed = true; sendBridge('CONFIRM'); }
+            };
+            function receive(event) {
+                const data = event.data;
+                if (disposed || event.source !== env || event.origin !== 'https://mooc1.chaoxing.com' ||
+                    !data || data.protocol !== bridgeProtocol || data.id !== id || data.generation !== generation ||
+                    !Number.isSafeInteger(data.seq) || data.seq <= received || !Number.isFinite(data.timestamp) ||
+                    data.timestamp < started || data.timestamp > Date.now() + 30000 || !isValid()) return;
+                if (!['PAIRED', 'ENDED', 'CLOSED', 'ERROR'].includes(data.type)) return;
+                if (['ENDED', 'CLOSED'].includes(data.type) && !paired) return;
+                received = data.seq;
+                if (data.type === 'PAIRED') paired = true;
+                if (data.type === 'ERROR') return fail();
+                if (data.type === 'ENDED') { ended = true; tick(); }
+                if (data.type === 'CLOSED' && !terminal) {
+                    if (!ended || !confirmed || !isPlatformComplete?.()) return fail();
+                    terminal = true;
+                    scheduleClose(() => {
+                        if (disposed) return;
+                        if (!isValid() || !isPlatformComplete()) return fail();
+                        dispose(); onResult({ kind: 'completed', basis: 'paired-ended-platform-marker-manual-close' });
+                    });
+                }
+            }
+            return { manualOnly: false, dispose, tick, start() {
+                if (disposed || timer || !isValid()) return;
+                env.addEventListener('message', receive); env.addEventListener('pagehide', dispose);
+                timer = env.setInterval(tick, 2000); sendBridge('PREPARE');
+            } };
+        }
         const protocol = 'xuexitong-live-v1';
         const courseOrigin = 'https://mooc1.chaoxing.com';
         const replayOrigin = 'https://zhibo.chaoxing.com';
@@ -468,10 +523,12 @@
                 types.has(data.type) && Number.isSafeInteger(data.seq) && data.seq > session.received &&
                 Number.isFinite(data.timestamp) && data.timestamp >= session.started - 5000 && data.timestamp <= Date.now() + 30000;
         };
-        function createParent({ entry, nativeEntry = false, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn() }) {
+        function createParent({ entry, nativeEntry = false, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn(), isPlatformComplete, background }) {
             if (nativeEntry) {
                 const scope = platformLiveEntry.discover({ document: entry?.ownerDocument });
                 if (!scope?.validateScope() || scope.tasks[0].element !== entry) throw new Error('Unsupported native live entry');
+                if (bridgeAvailable && typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,
+                    isPlatformComplete, onResult, onError, scheduleClose, background });
                 let started = false, disposed = false;
                 return {
                     manualOnly: true, dispose() { disposed = true; },
@@ -708,7 +765,8 @@
             tick();
             return { cancel, tick };
         }
-        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry) };
+        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),
+            dispose() { env.removeEventListener?.('message', bridgeHello); } };
     }
 
     function initializePlayer() {
@@ -808,7 +866,7 @@
                     const title = this._currentStepTitle(), label = node?.querySelector('.posCatalog_name');
                     const nodeTitle = (label?.getAttribute('title') || label?.textContent || '').trim();
                     const stepReady = !document.getElementsByClassName('prev_title').length || !!title;
-                    const ready = node && stepReady && nodeTitle && frame && doc && document.readyState !== 'loading' && media.videos.length > 0 &&
+                    const ready = node && stepReady && nodeTitle && frame && doc && document.readyState !== 'loading' && (media.videos.length > 0 || media.tasks?.length > 0) &&
                         !media.inaccessible && media.documents.every(inner => inner.readyState !== 'loading' &&
                             Array.from(inner.querySelectorAll('iframe')).every(child => {
                                 try {
@@ -1155,6 +1213,8 @@
                     this._state = 'WAITING_LIVE'; // Set before window.open(), including popup-block failure.
                     try {
                         this._liveController = window.__xuexitongTaskSupport.createParent({ entry: pending.element, nativeEntry: pending.nativeEntry === true,
+                            isPlatformComplete: () => this._taskContextValid(record) && catalog.status(record.node) === 'completed',
+                            background: this.settings.features.background,
                             generation: record.generation, threshold: this.configs.liveNearEndThreshold,
                             isValid: () => this._state === 'WAITING_LIVE' && this._taskContextValid(record),
                             onResult: completed, onError: failed, scheduleClose: close => this._runAction('liveReturn', 'live-return', () => {
@@ -1549,6 +1609,7 @@
                             !el.isConnected || this._state !== 'PLAYING') return;
                         this._tryTimes = 0;
                         this._automaticStartup = false;
+                        this._observedLessonId = node.id; this._observedCard = this._cardIdentity();
                         console.log(`%c视频开始播放，倍速: ${el.playbackRate}x`, "color:#4CAF50");
                         this._startVideoMonitoring();
                     } catch (playError) {

@@ -323,6 +323,17 @@ try {
         assert.equal(await page.evaluate(()=>app._generation),generation);
         assert.equal(await page.evaluate(()=>app._videoEl.__plays),1);
     }));
+    await check('sidebar after delayed boot cannot reuse old media as evidence of new lesson content', () => using([outer(2),0,false,'auto-missing-card',false,false,true],async page=>{
+        await page.evaluate(()=>{const f=document.createElement('iframe');f.setAttribute('info','card');document.body.append(f);window.__addVideos(1);});
+        await flush(page,4);assert.equal(await state(page),'PLAYING');
+        await selectSidebar(page);await flush(page,4);assert.equal(await state(page),'WAITING_CATALOG');
+        assert.equal(await page.evaluate(()=>window.__obsoleteMedia.__plays),1);
+    }));
+    await check('multi-attachment document-only startup preserves disabled PDF as pending',()=>using([outer(2),0],async page=>{
+        await page.evaluate(()=>{const root=document.querySelector('iframe').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';const s=JSON.parse(JSON.stringify(app.settings));s.features.document=false;app.updateSettings(s);app.run({startup:true});});
+        await flush(page,3);assert.equal(await state(page),'PAUSED_AUTOMATION');
+        assert.equal(await page.evaluate(()=>app._discoverMedia().tasks[0].status),'pending');
+    }));
     await check('sidebar no proven content change times out safely and destruction cancels waits', () => using([outer(2),1], async page => {
         await selectSidebar(page); await flush(page,41); assert.equal(await state(page),'BLOCKED');
         await selectSidebar(page,0); await page.evaluate(()=>app.destroy()); await flush(page,41);
