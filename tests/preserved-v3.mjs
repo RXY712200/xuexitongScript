@@ -2,7 +2,32 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 const baseline = execFileSync('git', ['show', 'e907cdda9d50fd80c61721061ed0988dfec621a4:v3_optimized.js'], { encoding: 'utf8' });
-const repairSource = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const iterationSource = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+// This iteration deliberately changes controls, document credit policy and the
+// navigation scheduler integration. Keep historical assertions by projecting
+// only those declared methods, then separately compare untouched runtime below.
+const controlsBaseline = execFileSync('git', ['show', 'b880e877702258a744ab5a4fd8bb0ec56e3a50df:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g,'\n');
+const changedControls = ['run','_waitForStartup','updateSettings','_actionEnabled','_runAction','_mountSettingsPanel','_taskSet','_discoverMedia',
+    '_processSupportedTask','_discoverAttachmentTask','_verifyExternal','_externalNavigationEligible','_queueNavigation','_cancelTasks',
+    '_block','_completeVideo','_waitForMediaReady','_audioPlayRejected','_renderAudioNotice','play','destroy'];
+function beforeControls(source) {
+    const first=source.indexOf('    // Native attachment identity'), last=source.indexOf('    function bootRecordedPopup()',first);
+    source=source.slice(0,first)+'    // Document adapters remain opt-in; the recorded popup uses confirmed evidence only.\n'+source.slice(last);
+    const helpers=source.indexOf('            _notify(');
+    source=source.slice(0,helpers)+source.slice(source.indexOf('            _mountSettingsPanel(',helpers));
+    for(const name of changedControls) source=source.replace(method(source,name),method(controlsBaseline,name));
+    return source.replace('        app._mountNoticePanel(); app._mountSettingsPanel();','        app._mountSettingsPanel();')
+        .replace('scheduleStep, onProgress = () => {}','scheduleStep')
+        .replace('                onProgress(bottom > 0 ? Math.min(100, Math.floor(element.scrollTop / bottom * 100)) : 100);\n','')
+        .replace('            const delay = Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 && options.delayMs <= 2147483647 ? options.delayMs :\n                range.enabled ?', '            const delay = range.enabled ?');
+}
+const repairSource = beforeControls(iterationSource);
+assert.equal(repairSource, controlsBaseline, 'all code outside declared controls/document/countdown changes remains identical');
+for(const name of ['_tryResumePlayback','_bindPageGuards','_checkVideoStatus','_continueCompleted','_refreshVideoContext','_navigationEligible','playCurrentIndex'])
+    assert.equal(method(iterationSource,name),method(controlsBaseline,name),name+' preserves reviewed playback/navigation safeguards');
+const bridgeStart=iterationSource.indexOf('        const bridgeProtocol ='), bridgeEnd=iterationSource.indexOf('        function readDocument(',bridgeStart);
+assert.equal(iterationSource.slice(bridgeStart,bridgeEnd),controlsBaseline.slice(controlsBaseline.indexOf('        const bridgeProtocol ='),controlsBaseline.indexOf('        function readDocument(')), 'raw live bridge/owned window protocol unchanged');
+console.log('PASS: controls changes explicitly scoped; playback recovery, natural completion, identity, actual navigation and fail-closed bridge unchanged.');
 // Normalize only the deliberate A/B/C integrations for historical snapshots.
 // New behavior is executed in navigation-v3; unchanged recovery/bridge bodies
 // remain subject to the original byte-for-byte assertions below.

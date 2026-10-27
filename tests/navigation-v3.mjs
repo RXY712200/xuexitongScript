@@ -509,7 +509,9 @@ try {
         await flush(page, 2); assert.equal(await state(page), 'VERIFYING_COMPLETION');
         assert.equal(await page.evaluate(() => document.querySelector('.posCatalog_active').id), 'node0');
         await page.evaluate(() => { const n=document.querySelector('.posCatalog_active'); n.querySelector('input').remove(); n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>'); });
-        await flush(page); assert.equal(await state(page), 'ADVANCING'); // Delays explicitly disabled by this fixture.
+        await flush(page); assert.equal(await state(page), 'NAVIGATION_COOLDOWN'); // The required five-second preview also applies when random delays are disabled.
+        assert.ok(await page.evaluate(() => app._lastNotice.includes('5 秒')));
+        await flush(page); assert.equal(await state(page), 'ADVANCING');
         assert.equal(await page.evaluate(() => window.__audio.__plays), 2);
     }));
     await check('audio automatic readiness starts once without video feature dependency', () => using([outer(2), 0], async page => {
@@ -2234,6 +2236,85 @@ try {
         await page.evaluate(()=>{const a=window.__audio;a.__paused=true;a.__plays=0;a.play=()=>{a.__plays++;return Promise.reject(new DOMException('denied','NotAllowedError'));};app._tryResumePlayback('synthetic focus');});
         assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.__plays,window.__audio.muted]),['WAITING_AUDIO_GESTURE',1,false]);
         await flush(page,5);assert.equal(await page.evaluate(()=>window.__audio.__plays),1);
+    }));
+    await check('controls manual type hint retries BLOCKED once, respects type and stops without parallel playback',()=>using([outer(),1],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app._block('synthetic prior failure');const s=JSON.parse(JSON.stringify(app.settings));s.features.videoPlayback=false;app.updateSettings(s);app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;});
+        const controls=page.locator('#xuexitong-v3-settings');
+        await controls.locator('[data-task-type]').selectOption('audio');await controls.locator('[data-attempt]').click();
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('未识别到此类型')));
+        await controls.locator('[data-task-type]').selectOption('video');await controls.locator('[data-attempt]').click();
+        assert.equal(await state(page),'PLAYING');
+        const before=await page.evaluate(()=>app._videoEl.__plays);
+        await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>app._videoEl.__plays),before);
+        await page.locator('#xuexitong-v3-notice').locator('[data-stop]').click();assert.equal(await state(page),'PAUSED_AUTOMATION');
+        assert.equal(await page.evaluate(()=>app._videoEl.paused),false);
+        assert.equal(await page.evaluate(()=>{document.querySelector('#node0').id='different-task';return app._inspectTask().blocked;}),true);
+        await page.evaluate(()=>app.destroy());assert.equal(await page.locator('#xuexitong-v3-notice').count(),0);
+    }));
+    await check('controls five-second navigation preview replaces legacy delay; stop and stale identity prevent clicks',()=>using([outer(2),1],async page=>{
+        await page.evaluate(()=>{window.__previewClicks=0;document.querySelector('#node1 span').onclick=()=>window.__previewClicks++;});
+        await priorCredit(page);await flush(page);
+        assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+        assert.deepEqual(await page.evaluate(()=>[...window.__timeoutDelays.values()]),[5000]);
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('5 秒')));
+        await page.evaluate(()=>{window.__oldNavigation=[...window.__timeouts.values()][0];window.__clock+=2000;for(const fn of window.__intervals.values())fn();});
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('3 秒')));
+        await page.locator('#xuexitong-v3-notice').locator('[data-stop]').click();
+        await page.evaluate(()=>window.__oldNavigation());assert.equal(await page.evaluate(()=>window.__previewClicks),0);
+        await page.evaluate(()=>app._attemptTask('completed'));await flush(page);
+        await page.evaluate(()=>document.querySelector('#node0').id='obsolete');await flush(page,2);
+        assert.equal(await page.evaluate(()=>window.__previewClicks),0);assert.equal(await state(page),'BLOCKED');
+    }));
+    async function installDocument(page, delayed=false) {
+        await page.evaluate(delayed=>{
+            app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';
+            const wrapper=root.querySelector('iframe').contentDocument;wrapper.body.innerHTML='<iframe title="owned document wrapper"></iframe>';
+            const doc=wrapper.querySelector('iframe').contentDocument;
+            doc.body.innerHTML='<div style="height:100px;overflow-y:auto;width:200px" id="synthetic-scroll"><div style="height:900px"></div></div>';
+            window.__documentFrame=root.querySelector('iframe');window.__documentScroll=doc.querySelector('#synthetic-scroll');
+            if(!delayed)window.__documentScroll.firstChild.innerHTML='<canvas width="180" height="900"></canvas>';
+            const s=JSON.parse(JSON.stringify(app.settings));s.features.document=false;app.updateSettings(s);
+            if(delayed)app._attachmentSnapshot={root,id:'obsolete-inventory',tasks:[]}; // Explicit retry must rediscover, not retain a failed cache.
+            app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;
+        },delayed);
+        const controls=page.locator('#xuexitong-v3-settings');await controls.locator('[data-task-type]').selectOption('document');await controls.locator('[data-attempt]').click();
+    }
+    await check('controls owned document scroll is gradual; local bottom without platform credit cannot navigate',()=>using([outer(2,false,'文档'),0],async page=>{
+        await installDocument(page);assert.equal(await state(page),'READING_DOCUMENT');await flush(page,2);
+        assert.ok(await page.evaluate(()=>window.__documentScroll.scrollTop>0&&window.__documentScroll.scrollTop<800));
+        await flush(page,60);assert.equal(await state(page),'BLOCKED');
+        assert.equal(await page.evaluate(()=>window.__documentScroll.scrollTop),800);
+        assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('平台尚未确认完成')));
+    }));
+    await check('controls delayed document rendering resumes bounded wait and credited reading gets navigation preview',()=>using([outer(2,false,'文档'),0],async page=>{
+        await installDocument(page,true);assert.equal(await state(page),'WAITING_DOCUMENT');
+        await page.evaluate(()=>{window.__documentScroll.firstChild.innerHTML='<canvas width="180" height="900"></canvas>';});await flush(page);
+        assert.equal(await state(page),'READING_DOCUMENT');
+        await page.evaluate(()=>{document.querySelector('#node0 input').value='0';document.querySelector('#node0').insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');});
+        // Stop flushing when the preview appears: mock timers have no wall-clock delay.
+        for(let i=0;i<30&&await state(page)==='READING_DOCUMENT';i++)await flush(page);
+        assert.equal(await state(page),'NAVIGATION_COOLDOWN');assert.ok(await page.evaluate(()=>app._lastNotice.includes('5 秒')));
+        await page.locator('#xuexitong-v3-notice').locator('[data-stop]').click();await flush(page,3);
+        assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+    }));
+    await check('controls native approved-origin replay link opens only by explicit action; text-only cards stay unsupported',()=>using([outer(2,false,'直播'),0,false,null,false,'recorded'],async page=>{
+        await page.evaluate(()=>{
+            app.stopAutomation();const label=document.querySelector('#node0 .posCatalog_name');label.title=label.textContent='专题讲座直播';
+            const root=document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML='<a target="_blank" href="https://zhibo.chaoxing.com/synthetic-replay">可回放</a>';
+            window.__nativeClicks=0;root.querySelector('a').onclick=e=>{e.preventDefault();window.__nativeClicks++;window.__stateAtOpen=app._state;};
+            const s=JSON.parse(JSON.stringify(app.settings));s.features.live=true;app.updateSettings(s);app.run();
+            app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;
+        });
+        assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nativeClicks),0);
+        const controls=page.locator('#xuexitong-v3-settings');await controls.locator('[data-task-type]').selectOption('live');await controls.locator('[data-attempt]').click();
+        assert.deepEqual(await page.evaluate(()=>[window.__nativeClicks,window.__stateAtOpen]),[1,'WAITING_LIVE']);
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('无法确认新窗口')));
+        await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>window.__nativeClicks),1);
+        await page.evaluate(()=>{app.stopAutomation();document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='<div>可回放，观看90%</div>';});
+        await controls.locator('[data-attempt]').click();assert.ok(await page.evaluate(()=>app._lastNotice.includes('未找到可识别的直播入口')));
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
