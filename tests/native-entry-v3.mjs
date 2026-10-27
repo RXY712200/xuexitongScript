@@ -60,13 +60,20 @@ async function setup({ delay = false, mutation = null, allowPopup = false } = {}
     await page.evaluate(delay => {
         const createParent = window.__xuexitongTaskSupport.createParent;
         window.__xuexitongTaskSupport.createParent = options => {
-            const controller = createParent(options); if (controller.manualOnly) window.__lastNative = controller; return controller;
+            const controller = createParent(options); if (options.nativeEntry) window.__lastNative = controller; return controller;
         };
         for (const fn of [...window.__intervals.values()]) fn();
         window.__defaultLive = app.settings.features.live;
         window.__initialState = app._state;
         const settings = structuredClone(app.settings); settings.features.live = true; settings.randomDelaysEnabled = delay;
         settings.delays.liveOpen = { enabled: delay, minMs: 500, maxMs: 500 }; app.updateSettings(settings); app.run();
+        // Missing-companion fallback is now bounded discovery, not an immediate
+        // availability guess. Advance only its start/probe timers in this mock clock.
+        for (let i=0;i<22;i++) for (const [id, item] of [...window.__timeouts]) {
+            if (item.delay===250 || (item.delay===500 && app._actions.pending.has('live-open'))) {
+                window.__timeouts.delete(id);item.fn();
+            }
+        }
     }, delay);
     return { page, context };
 }
@@ -131,7 +138,7 @@ try {
         assert.deepEqual(await page.evaluate(() => window.__calls), []);
     });
     for (const cancel of ['destroy', 'pagehide', 'manual-click', 'replace-entry', 'change-task', 'settings', 'bad-destination']) {
-        await check(`disposed native handoff stays inert after ${cancel}; safety notice is immediate`, { delay: true }, async ({ page }) => {
+        await check(`disposed native handoff stays inert after ${cancel}; bounded discovery expired safely`, { delay: true }, async ({ page }) => {
             assert.equal(await page.evaluate(() => app._state), 'BLOCKED');
             assert.equal(await page.evaluate(() => app._actions.pending.size), 0);
             await page.evaluate(cancel => {

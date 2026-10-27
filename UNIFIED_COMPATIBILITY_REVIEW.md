@@ -72,7 +72,7 @@ and native-live manual handling. Full previous suites remain required. DOM and
 media events are simulated; sidebar operation on the authenticated site still
 requires user retesting.
 
-## Stage 4 — optional openerless companion (PARTIAL)
+## Stage 4 at af56570 — superseded by targeted repair below (PARTIAL)
 
 Install `xuexitong-live-bridge.user.js` separately alongside the unchanged-grant
 core. Only the exact HTTPS course origin and replay origin match. Five GM storage
@@ -139,7 +139,7 @@ git diff --cached --check
 ```
 
 Stage gates: Stage 1 navigation 291/0; Stage 2 303/0; Stage 3 309/0.
-Final observed gate: navigation 311/0; recorded-live 21/0; native-entry 19/0;
+Original af56570 gate: navigation 311/0; recorded-live 21/0; native-entry 19/0;
 bridge 18/0. Build/verify/customization/preservation/syntax/diff gates passed.
 No old behavioral test was deleted. UI field counts were
 updated from 8/9 to 10/11 for the explicitly requested audio switches/categories;
@@ -149,3 +149,75 @@ Authenticated retesting still required: four videos plus PDF stop, actual audio 
 and secondary-player state, delayed/sidebar transitions on real course pages,
 natural completion/marker timing and complete native replay pairing/manual return
 with the companion installed in Tampermonkey. Do not call this production-ready.
+
+## Stage 4 targeted repair — discovery and terminal-message provenance
+
+This correction supersedes the earlier Stage 4 automatic-return behavior. Stages
+1–3 and the legacy owned-popup protocol are unchanged, enforced by a new literal
+source comparison against af565701b82ac878c3a1a6467ed179e384161fd7 outside the
+explicit bridge helper, native bridge selection and helper disposal boundary.
+
+Root causes:
+
+* The single constructor PING was lost when the companion had not yet installed
+  its listener, and a global AVAILABLE latch did not bind capability to a task.
+* Same-window origin/source, public session IDs and sequences identify a route;
+  they cannot authenticate the isolated companion. A page script can observe the
+  PREPARE payload and forge CLOSED. The baseline browser reproduction used a
+  genuine ended event from local WAV playback and an observable completion marker;
+  the forged CLOSED then caused ADVANCING and one next-lesson click.
+
+Repair:
+
+* Discovery now starts only for the current native-live controller, after its
+  normal opening-action scheduler. It sends at most 20 probes, 250ms apart, with a
+  five-second deadline. A fresh discovery UUID, task/session ID and generation are
+  echoed in AVAILABLE. These are cancellation/correlation controls, **not sender
+  authentication**. Exactly one response can activate exactly one PREPARE.
+* Disposing the controller or support removes its listener and probe/session
+  timers. Pagehide/beforeunload/history changes, app cancellation/destruction,
+  settings changes and invalid task identity prevent stale activation. Lesson ID,
+  unique node, card document and page address are captured separately from mutable
+  DOM references. Missing or too-late companions require manual handling; only a
+  new task/run can begin a fresh discovery session.
+* The core bridge has **no onResult or return-scheduler call**. PAIRED/ENDED remain
+  advisory, while the companion independently checks its own natural-ended state
+  and the actual page marker. CLOSED stops the core and requests manual navigation;
+  it cannot authorize completion, a return delay or lesson navigation. This also
+  applies to a genuine companion/user closure message. No claim of authenticated
+  same-window sender provenance is made. Stronger provenance would require an
+  independently established trust channel, unavailable under this boundary.
+* The companion still never opens/closes an unowned tab or rewrites the native
+  platform handler. Its UI explicitly says to choose the next lesson manually.
+
+Tests retain all prior cases, updating the former successful automatic-return
+expectation to the required fail-closed behavior. Native fallback mock clocks now
+expire discovery before asserting manual fallback; their safety assertions remain.
+New cases cover both injection orders, delayed/missing companions, duplicate
+availability, five discovery cleanup paths, replaced generations and a forged
+same-window CLOSED **after genuine ended plus a completion marker**. The attack
+now yields BLOCKED, zero next-lesson clicks and zero return actions. Real user
+closure also yields no automatic action. Final commands/results are reported with
+the published repair. Chrome/GM mocks are not Tampermonkey or authenticated
+Chaoxing evidence; automatic native replay return remains deliberately unsupported.
+
+Repair verification (all commands exited 0):
+
+```
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs         # source/payload synchronized and syntactically valid
+node tests/customization-v3.mjs  # fixed 1.0x / assessment / unknown-content smoke PASS
+node tests/preserved-v3.mjs      # all historical checks + literal Stage 1–3 boundary PASS
+node tests/navigation-v3.mjs    # RESULT: 311 passed, 0 failed
+node tests/recorded-live-v3.mjs # RESULT: 21 passed; 0 failed
+node tests/native-entry-v3.mjs  # RESULT: 19 passed; 0 failed
+node tests/bridge-v3.mjs        # RESULT: 31 passed, 0 failed
+node --check <all 16 .js/.mjs files> # PASS
+git diff --check               # PASS
+```
+
+The original CLOSED reproducer failed against af56570 with ADVANCING and one next
+click. It now passes with BLOCKED and zero clicks. A second forged ENDED+CLOSED
+case cannot replace natural playback completion. The former automatic-return test
+also verifies genuine user confirmation yields zero randomized return draws and
+no automatic continuation. All private fixtures remain excluded from Git.

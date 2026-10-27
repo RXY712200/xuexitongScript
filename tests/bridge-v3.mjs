@@ -19,7 +19,8 @@ async function check(label, action) {
     try { await action(); passed++; console.log(`PASS ${label}`); }
     catch (error) { failures.push(label); console.error(`FAIL ${label}: ${error.stack}`); }
 }
-async function setup({ natural = false, wrongFlags = false, wrongHref = false } = {}) {
+async function setup({ natural = false, wrongFlags = false, wrongHref = false, nextLesson = false,
+    coreFirst = false, companionDelay = 0, missingCompanion = false, discoveryCleanup = null } = {}) {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
     await context.route(`${course}/**`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><div class="prev_title" title="直播"></div><div id="coursetree"><ul><li><ul><li><div id="synthetic-leaf" class="posCatalog_select posCatalog_active"><span class="posCatalog_name">Synthetic replay</span><input class="jobUnfinishCount" value="1"></div></li></ul></li></ul></div><iframe id="iframe" info="card"></iframe>' }));
@@ -41,6 +42,8 @@ async function setup({ natural = false, wrongFlags = false, wrongHref = false } 
             window.__roots = []; const attach = Element.prototype.attachShadow;
             Element.prototype.attachShadow = function (options) { const root = attach.call(this, options); window.__roots.push(root); return root; };
             window.__gm = { values: {}, listeners: new Map(), next: 0 };
+            window.__bridgePublic = [];
+            window.addEventListener('message', event => { if (event.data?.protocol === 'xuexitong-live-bridge-v1') window.__bridgePublic.push(event.data); });
             window.GM_getValue = (key, fallback) => window.__gm.values[key] ?? fallback;
             window.GM_setValue = (key, value) => { window.__gm.values[key] = value; void window.__publishGM(key, value); };
             window.GM_deleteValue = key => { delete window.__gm.values[key]; void window.__publishGM(key); };
@@ -52,17 +55,36 @@ async function setup({ natural = false, wrongFlags = false, wrongHref = false } 
         return page;
     }
     const parent = await prepare(`${course}/mycourse/studentstudy-synthetic`);
-    await parent.evaluate(replay => {
+    await parent.evaluate(({ replay, nextLesson }) => {
         const doc = document.querySelector('iframe').contentDocument;
         doc.body.innerHTML = `<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct">Synthetic native entry</div></div></a><a id="openUrl" target="_blank" href="${replay}/synthetic-replay">Synthetic native destination</a>`;
         window.__nativeCalls = 0; doc.querySelector('a.liveHref').addEventListener('click', () => window.__nativeCalls++);
+        window.__nextCalls = 0;
+        if (nextLesson) {
+            const leaf=document.createElement('li'); leaf.innerHTML='<div id="synthetic-next" class="posCatalog_select"><span class="posCatalog_name">Synthetic next lesson</span></div>';
+            leaf.querySelector('span').onclick=()=>window.__nextCalls++;document.querySelector('#coursetree ul li ul').append(leaf);
+        }
         localStorage.setItem('xuexitong.v3.action-settings.v1', JSON.stringify({ version:1,preset:'custom',collapsed:true,randomDelaysEnabled:false,
             features:Object.fromEntries(['videoPlayback','nextVideo','nextLesson','nextChapter','assessment','document','live','background'].map(key=>[key,true])),
             delays:Object.fromEntries(['videoStart','nextVideo','documentScroll','nextDocument','nextLesson','nextChapter','assessment','liveOpen','liveReturn'].map(key=>[key,{enabled:false,minMs:0,maxMs:0}])) }));
-    }, replay);
-    await parent.addScriptTag({ content: jquery }); await parent.addScriptTag({ content: bridge }); await parent.addScriptTag({ content: core });
+    }, { replay, nextLesson });
+    await parent.addScriptTag({ content: jquery });
+    if (!coreFirst && !missingCompanion) await parent.addScriptTag({ content: bridge });
+    await parent.addScriptTag({ content: core });
     await parent.waitForFunction(() => window.app?._state === 'WAITING_LIVE');
-    await parent.waitForFunction(() => window.__roots.some(root => root.querySelector('button')?.textContent.includes('原生打开')));
+    await parent.waitForFunction(() => window.__bridgePublic.some(message => message.type === 'PING'));
+    if (discoveryCleanup) await parent.evaluate(kind => {
+        if (kind === 'destroy') app.destroy();
+        if (kind === 'pagehide') window.dispatchEvent(new Event('pagehide'));
+        if (kind === 'dispose') window.__xuexitongTaskSupport.dispose();
+        if (kind === 'settings') { const settings=structuredClone(app.settings);settings.features.live=false;app.updateSettings(settings); }
+        if (kind === 'task') { document.querySelector('.posCatalog_active').id='different-synthetic-task'; }
+        if (kind === 'restart') app.run();
+    }, discoveryCleanup);
+    if (companionDelay) await parent.waitForTimeout(companionDelay);
+    if (coreFirst && !missingCompanion) await parent.addScriptTag({ content: bridge });
+    if (missingCompanion) await parent.waitForFunction(() => app._state === 'BLOCKED',null,{timeout:8000});
+    else if (!discoveryCleanup) await parent.waitForFunction(() => window.__roots.some(root => root.querySelector('button')?.textContent.includes('原生打开')));
     const child = await prepare(`${replay}/${wrongHref ? 'other-replay' : 'synthetic-replay'}`);
     if (!natural) await child.evaluate(() => {
         const player = document.querySelector('video'); window.__plays=0; window.__ended=false; window.__paused=true;
@@ -91,6 +113,65 @@ async function setup({ natural = false, wrongFlags = false, wrongHref = false } 
 }
 async function using(options, fn) { const env=await setup(options); try { await fn(env); } finally { await env.close(); } }
 try {
+    for (const options of [{}, {coreFirst:true}, {coreFirst:true,companionDelay:1250}]) await check(`bridge discovery injection order ${JSON.stringify(options)}`,()=>using(options,async e=>{
+        assert.equal(await e.parent.evaluate(()=>window.__bridgePublic.filter(m=>m.type==='PREPARE').length),1);
+        await e.pair();await e.child.waitForFunction(()=>window.__plays===1);
+        assert.equal(await e.parent.evaluate(()=>app._state),'WAITING_LIVE');
+        assert.equal([...e.values.keys()].filter(key=>key.endsWith('.meta')).length,1);
+    }));
+    await check('bridge discovery missing companion has a finite deadline and ignores late installation',()=>using({missingCompanion:true},async e=>{
+        const pings=await e.parent.evaluate(()=>window.__bridgePublic.filter(m=>m.type==='PING').length);
+        assert.ok(pings>0 && pings<=20);
+        await e.parent.addScriptTag({content:bridge});
+        await e.parent.evaluate(protocol=>{const ping=window.__bridgePublic.find(m=>m.type==='PING');window.postMessage({...ping,protocol,type:'AVAILABLE',timestamp:Date.now()},location.origin);},protocol);
+        await e.parent.waitForTimeout(600);
+        assert.deepEqual(await e.parent.evaluate(()=>[app._state,window.__bridgePublic.filter(m=>m.type==='PING').length,window.__bridgePublic.filter(m=>m.type==='PREPARE').length]),['BLOCKED',pings,0]);
+        assert.equal(e.values.size,0);
+    }));
+    for (const kind of ['destroy','pagehide','dispose','settings','task']) await check(`bridge discovery cleanup ${kind} rejects stale availability and never prepares`,()=>using({coreFirst:true,discoveryCleanup:kind,companionDelay:400},async e=>{
+        const pings=await e.parent.evaluate(()=>window.__bridgePublic.filter(m=>m.type==='PING').length);
+        await e.parent.evaluate(protocol=>{const ping=window.__bridgePublic.find(m=>m.type==='PING');window.postMessage({...ping,protocol,type:'AVAILABLE',timestamp:Date.now()},location.origin);},protocol);
+        await e.parent.waitForTimeout(400);
+        assert.deepEqual(await e.parent.evaluate(()=>[window.__bridgePublic.filter(m=>m.type==='PREPARE').length,window.__bridgePublic.filter(m=>m.type==='PING').length]),[0,pings]);
+        assert.equal(e.values.size,0);
+    }));
+    await check('bridge duplicate AVAILABLE responses never prepare twice or replace the session',()=>using({},async e=>{
+        await e.parent.evaluate(protocol=>{const ping=window.__bridgePublic.find(m=>m.type==='PING');for(let i=0;i<5;i++)window.postMessage({...ping,protocol,type:'AVAILABLE',timestamp:Date.now()},location.origin);},protocol);
+        await e.pair();await e.child.waitForFunction(()=>window.__plays===1);
+        assert.equal(await e.parent.evaluate(()=>window.__bridgePublic.filter(m=>m.type==='PREPARE').length),1);
+        assert.equal([...e.values.keys()].filter(key=>key.endsWith('.meta')).length,1);
+    }));
+    await check('bridge replacement generation rejects prior discovery responses and prepares only the new session',()=>using({coreFirst:true,discoveryCleanup:'restart',companionDelay:400},async e=>{
+        await e.parent.waitForFunction(()=>window.__bridgePublic.some(m=>m.type==='PREPARE'));
+        await e.parent.evaluate(protocol=>{const old=window.__bridgePublic.find(m=>m.type==='PING');window.postMessage({...old,protocol,type:'AVAILABLE',timestamp:Date.now()},location.origin);},protocol);
+        await e.parent.waitForTimeout(300);
+        assert.deepEqual(await e.parent.evaluate(()=>{
+            const first=window.__bridgePublic.find(m=>m.type==='PING'),prepares=window.__bridgePublic.filter(m=>m.type==='PREPARE');
+            return [prepares.length,prepares[0].id!==first.id,prepares[0].generation>first.generation];
+        }),[1,true,true]);
+    }));
+    await check('bridge fabricated same-window CLOSED after genuine ended and platform marker cannot navigate',()=>using({natural:true,nextLesson:true},async e=>{
+        await e.pair();await e.parent.waitForFunction(()=>Object.values(window.__gm.values).some(v=>v?.type==='ENDED'));
+        await e.confirmMarker();await e.child.waitForFunction(()=>Object.values(window.__gm.values).some(v=>v?.type==='CONFIRMED'));
+        await e.parent.evaluate(protocol=>{
+            const exposed=window.__bridgePublic.find(message=>message.type==='PREPARE');
+            window.postMessage({protocol,type:'CLOSED',id:exposed.id,generation:exposed.generation,seq:999,timestamp:Date.now()},location.origin);
+        },protocol);
+        await e.parent.waitForFunction(()=>app._state!=='WAITING_LIVE');
+        assert.deepEqual(await e.parent.evaluate(()=>[app._state,window.__nextCalls,app._actions.pending.size]),['BLOCKED',0,0]);
+        assert.equal(e.child.isClosed(),false);
+    }));
+    await check('bridge fabricated ENDED plus CLOSED cannot replace the companion natural-ended state',()=>using({nextLesson:true},async e=>{
+        await e.pair();await e.child.waitForFunction(()=>window.__plays===1);await e.confirmMarker();
+        await e.parent.evaluate(protocol=>{
+            const exposed=window.__bridgePublic.find(m=>m.type==='PREPARE');
+            for(const [type,seq] of [['ENDED',998],['CLOSED',999]]) window.postMessage({protocol,type,id:exposed.id,generation:exposed.generation,seq,timestamp:Date.now()},location.origin);
+        },protocol);
+        await e.parent.waitForFunction(()=>app._state==='BLOCKED');
+        assert.equal(await e.parent.evaluate(()=>window.__nextCalls),0);
+        assert.equal(await e.child.evaluate(()=>window.__ended),false);
+        assert.equal(e.child.isClosed(),false);
+    }));
     await check('bridge openerless explicit pairing preserves native handler and stores hashes only',()=>using({},async e=>{
         assert.equal(await e.child.evaluate(()=>window.opener),null); await e.pair();
         await e.child.waitForFunction(()=>window.__plays===1);
@@ -99,7 +180,7 @@ try {
         assert.equal(JSON.stringify([...e.values]).includes('https://'),false);
         assert.equal(await e.child.evaluate(()=>document.querySelector('video').playbackRate),1);
     }));
-    await check('bridge real browser natural ended waits for marker and explicit unowned-tab closure confirmation',()=>using({natural:true},async e=>{
+    await check('bridge real browser ended and genuine user closure confirmation still cannot bypass provenance boundary',()=>using({natural:true},async e=>{
         await e.pair(); await e.parent.waitForFunction(()=>Object.values(window.__gm.values).some(v=>v?.type==='ENDED'),null,{timeout:6000}).catch(async error=>{throw new Error(error.message+' '+JSON.stringify({packets:[...e.values],child:await e.child.evaluate(()=>({ended:document.querySelector('video').ended,error:document.querySelector('video').error?.code,text:window.__roots.map(r=>r.textContent)}))}));});
         assert.equal(await e.parent.evaluate(()=>app._state),'WAITING_LIVE');
         assert.equal(e.packet('parent').type,'ACCEPT');
@@ -109,13 +190,10 @@ try {
         await e.child.evaluate(()=>window.dispatchEvent(new Event('pagehide')));
         await e.parent.waitForFunction(()=>window.__roots.some(root=>root.textContent.includes('这不能证明已关闭')));
         assert.equal(await e.parent.evaluate(()=>app._state),'WAITING_LIVE');
-        const meta=e.meta();
         await e.parent.evaluate(()=>{const s=JSON.parse(JSON.stringify(app.settings));s.randomDelaysEnabled=true;s.delays.liveReturn={enabled:true,minMs:1200,maxMs:1200};app.updateSettings(s);window.__draws=0;Math.random=()=>{window.__draws++;return .5;};});
         await e.child.close(); await e.ui(e.parent,'button');
-        await e.parent.waitForFunction(()=>app._actions.pending.has('live-return'),null,{timeout:2000});
-        await e.parent.evaluate(({protocol,meta})=>window.postMessage({protocol,type:'CLOSED',id:meta.id,generation:meta.generation,seq:999,timestamp:Date.now()},location.origin),{protocol,meta});
-        assert.deepEqual(await e.parent.evaluate(()=>[app._actions.pending.size,app._actions.pending.get('live-return')?.category,window.__draws]),[1,'liveReturn',1]);
-        await e.parent.waitForFunction(()=>app._state==='FINISHED');
+        await e.parent.waitForFunction(()=>app._state==='BLOCKED');
+        assert.deepEqual(await e.parent.evaluate(()=>[app._actions.pending.size,window.__draws]),[0,0]);
         assert.equal(e.values.size,0);
     }));
     for (const option of ['wrongFlags','wrongHref']) await check(`bridge rejects ${option} pairing`,()=>using({[option]:true},async e=>{
@@ -211,6 +289,8 @@ try {
         assert.ok(!bridge.includes('GM_openInTab'));assert.ok(!bridge.includes('unsafeWindow'));assert.ok(!bridge.includes('window.close('));
         assert.ok(bridge.includes('event.isTrusted'));assert.ok(bridge.includes("if (packet.type === 'LEFT')"));
         assert.ok(!core.includes('@grant        GM_'));assert.ok(!bridge.includes('currentTime ='));
+        const helper=core.slice(core.indexOf('        function createBridgeParent('),core.indexOf("        const protocol = 'xuexitong-live-v1'"));
+        assert.ok(!/\bonResult\s*\(/.test(helper));assert.ok(!/\bscheduleClose\s*\(/.test(helper));
     });
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; mocked GM storage across openerless Chrome pages; one local WAV natural-ended case; no Tampermonkey or authenticated platform.`);
     if(failures.length)process.exitCode=1;

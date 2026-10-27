@@ -177,7 +177,7 @@ The play() request was interrupted by a call to pause()
 
 新增真实入口结构识别：仅在唯一 `iframe#iframe[info="card"]` 中识别唯一 `a.liveHref > div.liveCard > div.live-ct`，只读检查平台动态创建或更新的 `#openUrl`。**未安装可选桥接时，该原生入口仅支持人工交接，不支持自动开窗返回。** 原平台处理器保持不变，脚本不会为获取 URL 而调用关系函数，不把 `javascript:void(0)` 当作回放地址，也不改写原生点击或安全策略。启用直播功能后，请手动点击原卡片。原生 `.click()` 不返回窗口引用，不会猜测归属或关闭弹窗。已有显式持有合法窗口引用的适配器仍保留原跨域协调流程。
 
-可选伴随脚本：[xuexitong-live-bridge.user.js](xuexitong-live-bridge.user.js)。在 Tampermonkey 中单独安装，核心脚本仍为 `@grant none`。开启直播协调后，课程页等待；手动打开原生回放，再按桥接面板提示在两个页面确认临时配对码。要求地址精确匹配、回放状态和播放器受支持、自然 ended、平台完成标记，以及用户关闭确认；不自动打开或关闭无主窗口。`pagehide` 只表示离开，不能证明关闭。真实 Tampermonkey 与登录平台流程尚未验证，见 [UNIFIED_COMPATIBILITY_REVIEW.md](UNIFIED_COMPATIBILITY_REVIEW.md)。新增测试：`node tests/bridge-v3.mjs`。
+可选伴随脚本：[xuexitong-live-bridge.user.js](xuexitong-live-bridge.user.js)。在 Tampermonkey 中单独安装，核心脚本仍为 `@grant none`。当前任务开始后有界发现伴随脚本：每 250ms 探测，最多 20 次或 5 秒，取消后不接受迟到响应；支持两种加载顺序。手动打开原生回放后，可按提示显式配对，保留真实 ended 和页面完成标记检查。**同页消息不能证明发送者来自伴随脚本，因此此桥接路径的自动续课已禁用，即使真实回放结束且用户确认关闭也须手动选择下一课节。** 不自动打开或关闭无主窗口；`pagehide` 不证明关闭，会话 ID 也不证明发送者身份。真实 Tampermonkey 与登录平台流程尚未验证，见 [UNIFIED_COMPATIBILITY_REVIEW.md](UNIFIED_COMPATIBILITY_REVIEW.md)。测试：`node tests/bridge-v3.mjs`。
 
 “暂缓章节测验并继续学习”默认开启：只暂缓 `章节测验`、`章节测试`、`本章自测`，保持未完成状态，按目录顺序寻找后续学习项。认证、考试、锁定项或没有明确后续目标时停止，不答题、不提交。
 

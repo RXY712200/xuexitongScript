@@ -345,7 +345,7 @@ try {
         await flush(page,4); assert.equal(await page.evaluate(()=>app._isPlaying),false);
         await selectSidebar(page,2);
         await page.evaluate(()=>{document.querySelector('.prev_title').title='直播'; const f=document.querySelector('iframe[info="card"]'); f.id='iframe'; f.contentDocument.body.innerHTML='<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct">Synthetic live</div></div></a>';});
-        await flush(page,5); assert.equal(await state(page),'BLOCKED');
+        await flush(page,25); assert.equal(await state(page),'BLOCKED'); // Bounded optional-companion discovery expires.
     }));
     await check('multi-attachment inventory preserves ordered four videos and pending PDF', () => using([outer(2), 0], async page => {
         await attachments(page);

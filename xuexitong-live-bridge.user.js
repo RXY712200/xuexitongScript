@@ -100,7 +100,14 @@
         window.addEventListener('message', event => {
             const data = event.data;
             if (event.source !== window || event.origin !== course || data?.protocol !== protocol) return;
-            if (data.type === 'PING') { window.postMessage({ protocol, type: 'AVAILABLE' }, course); return; }
+            if (data.type === 'PING') {
+                if (uuid(data.id) && uuid(data.discoveryId) && Number.isSafeInteger(data.generation) && data.generation >= 0 &&
+                    Number.isFinite(data.timestamp) && Math.abs(Date.now() - data.timestamp) <= 30000) {
+                    window.postMessage({ protocol, type: 'AVAILABLE', id: data.id, generation: data.generation,
+                        discoveryId: data.discoveryId, timestamp: Date.now() }, course);
+                }
+                return;
+            }
             if (!['PREPARE', 'CANCEL', 'CONFIRM'].includes(data.type)) return;
             if (!uuid(data.id) || !Number.isSafeInteger(data.generation) || data.generation < 0 || !Number.isSafeInteger(data.seq) || data.seq <= 0 ||
                 !Number.isFinite(data.timestamp) || data.timestamp > Date.now() + 30000 || data.timestamp < Date.now() - 30000) return;
@@ -117,7 +124,7 @@
                     if (current?.left && current.ended && current.confirmed && sameContext(context)) {
                         const count = context.node.querySelector('.jobUnfinishCount');
                         if (!context.node.querySelector('.icon_Completed') || (count && !/^0$/.test(count.value.trim()))) return fail('平台完成标记已变化');
-                        message('CLOSED'); dispose(); return;
+                        message('CLOSED'); dispose(); output.textContent = '配对已结束；请手动选择下一课节。此桥接路径不自动续课。'; return;
                     }
                     if (!current || current.meta || !current.activated || !sameContext(context)) return fail('缺少本次原生打开证据，保持手动处理');
                     const links = context.doc.querySelectorAll('a#openUrl');
@@ -140,8 +147,8 @@
                         if (packet.type === 'ENDED' && !current.ended) { current.ended = true; message('ENDED'); output.textContent = '回放自然结束，等待课程平台完成标记。'; }
                         if (packet.type === 'LEFT') {
                             if (!current.ended || !current.confirmed) return fail('回放在确认完成前被关闭');
-                            current.left = true; output.textContent = '回放页已离开（这不能证明已关闭）。请确认您已关闭对应回放页，再点击继续。';
-                            button.textContent = '我已关闭对应回放页，继续'; button.disabled = false;
+                            current.left = true; output.textContent = '回放页已离开（这不能证明已关闭）。请自行关闭对应回放页；结束配对后须手动导航。';
+                            button.textContent = '结束配对，随后手动导航'; button.disabled = false;
                         }
                         if (packet.type === 'ERROR') fail('回放中断，保持手动处理');
                     });
@@ -207,7 +214,7 @@
                     Promise.resolve(player.play()).catch(() => fail('播放启动被浏览器拒绝'));
                     output.textContent = '配对成功，保持 1.0x；课程页等待此回放自然结束。';
                 }
-                if (packet.type === 'CONFIRMED' && current.ended) { current.confirmed = true; output.textContent = '平台完成已确认。请手动关闭本回放页，原课程将复核后继续。'; }
+                if (packet.type === 'CONFIRMED' && current.ended) { current.confirmed = true; output.textContent = '已观察到页面完成标记。请手动关闭本回放页，再手动选择下一课节；桥接不自动续课。'; }
             });
             timer = setInterval(recover, 2000); writeChild('READY'); button.disabled = true;
         }, true);

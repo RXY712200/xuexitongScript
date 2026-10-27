@@ -454,58 +454,76 @@
     }
     function createTaskSupport(env) {
         const bridgeProtocol = 'xuexitong-live-bridge-v1';
-        let bridgeAvailable = false;
-        const bridgeHello = event => {
-            if (event.source === env && event.origin === 'https://mooc1.chaoxing.com' &&
-                event.data?.protocol === bridgeProtocol && event.data.type === 'AVAILABLE') bridgeAvailable = true;
-        };
-        if (env.location?.origin === 'https://mooc1.chaoxing.com') {
-            env.addEventListener?.('message', bridgeHello);
-            env.postMessage?.({ protocol: bridgeProtocol, type: 'PING' }, env.location.origin);
-        }
-        function createBridgeParent({ generation, isValid, isPlatformComplete, onResult, onError, scheduleClose, background }) {
-            const id = env.crypto.randomUUID(), started = Date.now();
-            let sent = 0, received = 0, timer, disposed = false, paired = false, ended = false, confirmed = false, terminal = false;
+        const bridgeParents = new Set();
+        function createBridgeParent({ generation, isValid, isPlatformComplete, onError, background }) {
+            const id = env.crypto.randomUUID(), discoveryId = env.crypto.randomUUID();
+            const node = catalog.current(), lessonId = node?.id, cardDocument = videoAdapter.cardDocument(), href = env.location.href;
+            const valid = () => isValid() && node?.isConnected && lessonId && node.id === lessonId && catalog.current() === node &&
+                Array.from(document.querySelectorAll('[id]')).filter(element => element.id === lessonId).length === 1 &&
+                videoAdapter.cardDocument() === cardDocument && env.location.href === href;
+            let started, sent = 0, received = 0, timer = null, probeTimer = null, attempts = 0;
+            let disposed = false, phase = 'IDLE', paired = false, ended = false, confirmed = false;
             const sendBridge = type => env.postMessage({ protocol: bridgeProtocol, type, id, generation,
                 seq: ++sent, timestamp: Date.now(), background: background !== false }, env.location.origin);
             const dispose = () => {
                 if (disposed) return;
-                sendBridge('CANCEL'); disposed = true; env.clearInterval(timer); env.removeEventListener('message', receive);
-                env.removeEventListener('pagehide', dispose);
+                const prepared = phase === 'ACTIVE';
+                disposed = true; phase = 'DISPOSED'; env.clearInterval(timer); env.clearTimeout(probeTimer);
+                bridgeParents.delete(controller);
+                if (prepared) sendBridge('CANCEL');
+                env.removeEventListener('message', receive);
+                for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) env.removeEventListener(type, dispose);
             };
-            const fail = () => { dispose(); onError('直播桥接会话失效或窗口提前关闭，请手动处理'); };
+            const fail = (reason = '直播桥接会话失效或窗口提前关闭，请手动处理') => {
+                if (disposed) return;
+                dispose(); onError(reason);
+            };
             const tick = () => {
                 if (disposed) return;
-                if (!isValid() || Date.now() - started > 86400000) return fail();
+                if (!valid() || Date.now() - started > 86400000) return fail();
+                // These messages are advisory: same-window source/origin/IDs do not
+                // authenticate the companion. Its isolated side also checks ended/marker.
                 if (ended && !confirmed && isPlatformComplete?.() === true) { confirmed = true; sendBridge('CONFIRM'); }
+            };
+            const probe = () => {
+                if (disposed || phase !== 'DISCOVERING') return;
+                if (!valid()) return dispose();
+                if (attempts >= 20 || Date.now() - started >= 5000) return fail('未在有限等待内发现可选直播桥；请手动处理，脚本不会自动推进');
+                attempts++;
+                env.postMessage({ protocol: bridgeProtocol, type: 'PING', id, generation, discoveryId, timestamp: Date.now() }, env.location.origin);
+                probeTimer = env.setTimeout(probe, 250);
             };
             function receive(event) {
                 const data = event.data;
                 if (disposed || event.source !== env || event.origin !== 'https://mooc1.chaoxing.com' ||
                     !data || data.protocol !== bridgeProtocol || data.id !== id || data.generation !== generation ||
-                    !Number.isSafeInteger(data.seq) || data.seq <= received || !Number.isFinite(data.timestamp) ||
-                    data.timestamp < started || data.timestamp > Date.now() + 30000 || !isValid()) return;
+                    !Number.isFinite(data.timestamp) ||
+                    data.timestamp < started || data.timestamp > Date.now() + 30000 || !valid()) return;
+                if (data.type === 'AVAILABLE') {
+                    if (phase !== 'DISCOVERING' || data.discoveryId !== discoveryId || Date.now() - started >= 5000) return;
+                    phase = 'ACTIVE'; env.clearTimeout(probeTimer); probeTimer = null;
+                    timer = env.setInterval(tick, 2000); sendBridge('PREPARE'); return;
+                }
+                if (phase !== 'ACTIVE' || !Number.isSafeInteger(data.seq) || data.seq <= received) return;
                 if (!['PAIRED', 'ENDED', 'CLOSED', 'ERROR'].includes(data.type)) return;
                 if (['ENDED', 'CLOSED'].includes(data.type) && !paired) return;
                 received = data.seq;
                 if (data.type === 'PAIRED') paired = true;
                 if (data.type === 'ERROR') return fail();
                 if (data.type === 'ENDED') { ended = true; tick(); }
-                if (data.type === 'CLOSED' && !terminal) {
-                    if (!ended || !confirmed || !isPlatformComplete?.()) return fail();
-                    terminal = true;
-                    scheduleClose(() => {
-                        if (disposed) return;
-                        if (!isValid() || !isPlatformComplete()) return fail();
-                        dispose(); onResult({ kind: 'completed', basis: 'paired-ended-platform-marker-manual-close' });
-                    });
-                }
+                // No page-world message can prove companion provenance or tab closure.
+                // There is intentionally no onResult/scheduleClose route in this adapter.
+                if (data.type === 'CLOSED') return fail('同页桥接终止消息无法验证发送者；自动续课已禁用，请手动导航');
             }
-            return { manualOnly: false, dispose, tick, start() {
-                if (disposed || timer || !isValid()) return;
-                env.addEventListener('message', receive); env.addEventListener('pagehide', dispose);
-                timer = env.setInterval(tick, 2000); sendBridge('PREPARE');
+            const controller = { manualOnly: false, dispose, tick, start() {
+                if (disposed || phase !== 'IDLE' || !valid()) return;
+                phase = 'DISCOVERING'; started = Date.now(); bridgeParents.add(controller);
+                env.addEventListener('message', receive);
+                for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) env.addEventListener(type, dispose);
+                probe();
             } };
+            bridgeParents.add(controller);
+            return controller;
         }
         const protocol = 'xuexitong-live-v1';
         const courseOrigin = 'https://mooc1.chaoxing.com';
@@ -527,7 +545,7 @@
             if (nativeEntry) {
                 const scope = platformLiveEntry.discover({ document: entry?.ownerDocument });
                 if (!scope?.validateScope() || scope.tasks[0].element !== entry) throw new Error('Unsupported native live entry');
-                if (bridgeAvailable && typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,
+                if (typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,
                     isPlatformComplete, onResult, onError, scheduleClose, background });
                 let started = false, disposed = false;
                 return {
@@ -766,7 +784,7 @@
             return { cancel, tick };
         }
         return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),
-            dispose() { env.removeEventListener?.('message', bridgeHello); } };
+            dispose() { for (const parent of [...bridgeParents]) parent.dispose(); } };
     }
 
     function initializePlayer() {

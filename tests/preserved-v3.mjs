@@ -117,8 +117,8 @@ const outsideStartup = source => {
     source = source.replaceAll('                this._attachmentSnapshot = null;\n', '');
     if (source.includes("        const bridgeProtocol =")) source = source.replace(block(source, '        const bridgeProtocol =', "        const protocol = 'xuexitong-live-v1'"), '');
     source = source.replace('scheduleClose = fn => fn(), isPlatformComplete, background', 'scheduleClose = fn => fn()')
-        .replace("                if (bridgeAvailable && typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,\n                    isPlatformComplete, onResult, onError, scheduleClose, background });\n", '')
-        .replace("        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),\n            dispose() { env.removeEventListener?.('message', bridgeHello); } };", "        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry) };")
+        .replace("                if (typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,\n                    isPlatformComplete, onResult, onError, scheduleClose, background });\n", '')
+        .replace("        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),\n            dispose() { for (const parent of [...bridgeParents]) parent.dispose(); } };", "        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry) };")
         .replace("                            isPlatformComplete: () => this._taskContextValid(record) && catalog.status(record.node) === 'completed',\n                            background: this.settings.features.background,\n", '');
     source = source.replace("audioPlayback: '自动播放音频', nextAudio: '自动下一音频', ", '')
         .replace("        audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],\n", '')
@@ -133,3 +133,11 @@ const outsideStartup = source => {
 };
 assert.equal(outsideStartup(current), outsideStartup(startupBaseline));
 console.log('PASS: legacy audition predicate/depth bound preserved; d7ea26a completion/rebinding methods unchanged; startup/media changes isolated from all other runtime code.');
+
+const stage4Baseline = execFileSync('git', ['show', 'af565701b82ac878c3a1a6467ed179e384161fd7:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
+const outsideBridgeRepair = source => source.replace(block(source, '        const bridgeProtocol =', "        const protocol = 'xuexitong-live-v1'"), '')
+    .replace("bridgeAvailable && typeof isPlatformComplete", 'typeof isPlatformComplete')
+    .replace("dispose() { env.removeEventListener?.('message', bridgeHello); }", 'dispose() { /* bridge lifecycle */ }')
+    .replace('dispose() { for (const parent of [...bridgeParents]) parent.dispose(); }', 'dispose() { /* bridge lifecycle */ }');
+assert.equal(outsideBridgeRepair(actual), outsideBridgeRepair(stage4Baseline), 'all Stage 1–3 runtime and legacy popup code must remain byte-identical');
+console.log('PASS: Stage 1–3 and legacy popup runtime unchanged from af56570 outside the explicit bridge repair.');
