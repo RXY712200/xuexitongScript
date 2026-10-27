@@ -200,6 +200,8 @@ node tests/preserved-v3.mjs
 
 定向兼容修复：`ans-attach-online ans-insertaudio` 现在会遍历内部文档后执行原有音频识别；尚未出现主播放器时有界等待。明确关联到唯一 Video.js 播放器的范围控件可通过，独立表单、无法证明归属的控件、object/embed/canvas 仍停止。`auditionAudio` 的严格条件未放宽，新增具体拒绝原因；本次真实诊断未包含全部属性，因此不猜测其失败条件。音频/视频混合附件仍不自动处理；多个纯音频附件按顺序处理。详见审查报告末节，本地合成测试不代表真实页面兼容。
 
+后续辅助音频修正：唯一、隐藏且未活动的根级 `auditionAudio` 可在错误码为 4 时通过，但必须运行时确认没有 `src` 属性、`currentSrc` 为空、`srcObject` 为 null，且没有 `<source>` 子元素。其他归属、控件、暂停、自动播放、寻址和位置检查仍保留。上述源状态未在真实诊断中提供；有源声明或无法确认时仍停止，使用 `auxiliary-audio-error-source-unverified` 区分源证据不足与非空闲状态。主播放器、第二音频或未知媒体没有此例外。
+
 
 ## 免责声明
 

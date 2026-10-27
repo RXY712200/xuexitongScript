@@ -119,6 +119,7 @@
                 return result;
             }
             const audio = primary[0], doc = audio.ownerDocument, node = catalog.current(), wrapper = audio.closest('.video-js');
+            if (primary.some(player => player.error)) block('audio-player-error');
             if (primary.length !== 1 || !node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1 ||
                 !audio.isConnected || !wrapper?.isConnected || !wrapper.getClientRects().length ||
                 !lineage.get(doc)?.every(owner => owner?.isConnected && !owner.hidden && !owner.inert && owner.getClientRects().length) ||
@@ -202,6 +203,7 @@
                     if (lineage.length >= 4 && doc.querySelector('iframe')) { reject('task-depth-limit'); return; }
                     const supported = Array.from(doc.querySelectorAll('video[id*="video_html5"]'));
                     media.push(...supported);
+                    if (supported.some(player => player.error)) reject('video-player-error');
                     if (doc.querySelector('audio, video:not([id*="video_html5"])')) reject('unknown-attachment-media');
                     for (const reason of this.controlReasons(doc, supported)) { reject('unknown-attachment-content'); reject(reason); }
                     if (video && !supported.length) {
@@ -253,15 +255,29 @@
                 'auxiliary-audio-parent': audio?.parentElement?.tagName === 'DIV',
                 'auxiliary-audio-controls': audio?.controls === true,
                 'auxiliary-audio-visible-or-detached': audio?.isConnected && audio.getClientRects().length === 0,
-                'auxiliary-audio-not-idle': audio?.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !audio.error,
+                'auxiliary-audio-not-idle': audio?.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0,
             };
-            return Object.entries(checks).filter(([, valid]) => !valid).map(([reason]) => reason);
+            return [...Object.entries(checks).filter(([, valid]) => !valid).map(([reason]) => reason),
+                ...[this.auxiliaryAudioErrorReason(audio, root)].filter(Boolean)];
+        },
+        auxiliaryAudioErrorReason(audio, root) {
+            try {
+                if (!audio.error) return null;
+                if (audio.error.code !== 4) return 'auxiliary-audio-error-unsupported-code';
+                if (root !== this.cardDocument()) return 'auxiliary-audio-error-root-unverified';
+                // Code 4 is not a general media-error exemption. Source values were
+                // not observed on the authenticated page; verify them locally now.
+                if (audio.getAttribute('src') !== null || audio.currentSrc !== '' || audio.srcObject !== null || audio.querySelector('source')) {
+                    return 'auxiliary-audio-error-source-unverified';
+                }
+                return null;
+            } catch (_) { return 'auxiliary-audio-error-source-unverified'; }
         },
         auxiliaryAudio(audio, root) {
             return audio?.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
                 audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
                 audio.isConnected && audio.controls && audio.getClientRects().length === 0 && audio.paused &&
-                !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !audio.error;
+                !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !this.auxiliaryAudioErrorReason(audio, root);
         },
         cardFrame() {
             const cards = document.querySelectorAll('iframe[info="card"], iframe[src*="/knowledge/cards"]');
@@ -314,6 +330,7 @@
                 else visit(content, 1); // Keep all nested task checks and the depth bound.
             }
             result.videos = [...new Set(result.videos)].filter(video => video.isConnected);
+            if (result.videos.some(player => player.error)) block('video-player-error');
             let ownership = false;
             if (selection) {
                 try {
@@ -381,6 +398,8 @@
                         audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
                         audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
                 } catch (_) { /* Unverifiable context keeps audio unsupported. */ }
+                const errorReason = auxiliary && this.auxiliaryAudioErrorReason(audios[0], result.documents[0]);
+                if (errorReason) { auxiliary = false; block(errorReason); }
                 if (!auxiliary) block('unclassified-audio');
             }
             if (result.inaccessible) result.reasons.push('inaccessible-task-frame');

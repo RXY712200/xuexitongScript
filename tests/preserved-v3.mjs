@@ -143,3 +143,17 @@ const outsideMediaRepair = source => {
 assert.equal(outsideMediaRepair(actual), outsideMediaRepair(mediaBaseline), 'all runtime outside discovery/classification/readiness must match f587605');
 assert.equal(block(actual, "        const bridgeProtocol =", '    function initializePlayer()'), block(mediaBaseline, "        const bridgeProtocol =", '    function initializePlayer()'));
 console.log('PASS: all runtime outside media discovery/readiness, including bridge fail-closed security and legacy popup code, unchanged from f587605.');
+
+const auxiliaryBaseline = execFileSync('git', ['show', '06ca05808b4ca5c2b68f43e7720cfe82b68168be:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
+const outsideAuxiliaryErrorRepair = source => {
+    for (const name of ['auxiliaryAudioErrorReason','auxiliaryAudioReasons','auxiliaryAudio']) {
+        const start=source.indexOf(`        ${name}(`);
+        if(start>=0){const end=source.indexOf('\n        },',start);assert.ok(end>start);source=source.slice(0,start)+source.slice(end+12);}
+    }
+    return source.replace("            if (primary.some(player => player.error)) block('audio-player-error');\n", '')
+        .replace("                    if (supported.some(player => player.error)) reject('video-player-error');\n", '')
+        .replace("            if (result.videos.some(player => player.error)) block('video-player-error');\n", '')
+        .replace("                const errorReason = auxiliary && this.auxiliaryAudioErrorReason(audios[0], result.documents[0]);\n                if (errorReason) { auxiliary = false; block(errorReason); }\n", '');
+};
+assert.equal(outsideAuxiliaryErrorRepair(actual),outsideAuxiliaryErrorRepair(auxiliaryBaseline), 'all runtime outside the scoped auxiliary policy and explicit primary-error refusals must match 06ca058');
+console.log('PASS: only auxiliary error policy/diagnostics and explicit failed-player refusals changed from 06ca058.');

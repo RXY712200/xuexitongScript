@@ -11,6 +11,7 @@ const jquery = readFileSync(process.env.JQUERY_PATH, 'utf8');
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
 const reviewedStartup = execFileSync('git', ['show', 'd7ea26ac373522b250f4bf573fada7c75687c909:v3_optimized.js'], { encoding: 'utf8' });
 const regressionBaseline = execFileSync('git', ['show', 'f587605e91e14d39429168c88936a83840ea19cf:v3_optimized.js'], { encoding: 'utf8' });
+const auxiliaryErrorBaseline = execFileSync('git', ['show', '06ca05808b4ca5c2b68f43e7720cfe82b68168be:v3_optimized.js'], { encoding: 'utf8' });
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
@@ -236,6 +237,81 @@ try {
             app.updateSettings(settings);app.run({startup:automatic});
         },{html:diagnosticFixtures[kind],kind,variant,automatic});
     }
+    async function auxiliaryError(page, variant='', code=4) {
+        await page.evaluate(({variant,code})=>{
+            const root=window.__diagnosticRoot,aux=root.querySelector('#auditionAudio');window.__errorAux=aux;
+            aux.__plays=0;aux.play=()=>{aux.__plays++;return Promise.resolve();};
+            Object.defineProperty(aux,'error',{configurable:true,get:()=>code===null?null:{code}});
+            if(variant==='active')Object.defineProperty(aux,'paused',{get:()=>false});
+            if(variant==='visible')aux.style.display='';
+            if(variant==='duplicate')aux.parentElement.append(aux.cloneNode());
+            if(variant==='seeking')Object.defineProperty(aux,'seeking',{get:()=>true});
+            if(variant==='autoplay')aux.autoplay=true;
+            if(variant==='progress')Object.defineProperty(aux,'currentTime',{get:()=>1});
+            if(variant==='controls')aux.controls=false;
+            if(variant==='class')aux.className='independent-task';
+            if(variant==='parent')root.body.append(aux);
+            if(variant==='unknown-id')aux.id='unrecognized-audio';
+            if(variant==='nested'){
+                const doc=window.__diagnosticPlayers[0].ownerDocument,div=doc.createElement('div');doc.body.append(div);div.append(aux);
+            }
+            if(variant==='src')aux.setAttribute('src','https://media.invalid/synthetic-unavailable.wav');
+            if(variant==='empty-src')aux.setAttribute('src','');
+            if(variant==='source-child')aux.append(root.createElement('source'));
+            if(variant==='current-src')Object.defineProperty(aux,'currentSrc',{get:()=> 'https://media.invalid/synthetic-unavailable.wav'});
+            if(variant==='stream')Object.defineProperty(aux,'srcObject',{get:()=>({})});
+            if(variant==='unobservable-src')Object.defineProperty(aux,'currentSrc',{get(){throw new Error('Synthetic unavailable source evidence');}});
+            if(variant==='primary-error')Object.defineProperty(window.__diagnosticPlayers[0],'error',{get:()=>({code:4})});
+            if(variant==='secondary-error')Object.defineProperty(window.__diagnosticPlayers[0].ownerDocument.querySelector('#audio1_html5_white'),'error',{get:()=>({code:4})});
+            if(variant==='missing-primary')window.__diagnosticPlayers[0].remove();
+            if(variant==='legacy')root.querySelector('iframe').className='';
+        },{variant,code});
+    }
+    for(const kind of ['video','audio']){
+        await check(`auxiliary error ${kind} baseline reproduces code 4 not-idle rejection`,()=>using([outer(2),0,false,null,false,false,false,auxiliaryErrorBaseline],async page=>{
+            await diagnosticLesson(page,kind);await auxiliaryError(page);await flush(page,4);
+            assert.equal(await state(page),'BLOCKED');
+            assert.ok(await page.evaluate(()=>['unclassified-audio','auxiliary-audio-not-idle'].every(reason=>app._discoverMedia().reasons.includes(reason))));
+        }));
+        for(const code of [null,4])await check(`auxiliary error ${kind} inactive root with code ${code} permits only the real player`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind);await auxiliaryError(page,'',code);await flush(page,4);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays,app._videoEl.playbackRate,window.__errorAux.__plays]),['PLAYING',1,1,0]);
+            assert.deepEqual(await page.evaluate(()=>{const a=window.__errorAux;return[a.paused,a.autoplay,a.seeking,a.currentTime,a.error?.code??null];}),[true,false,false,0,code]);
+            assert.ok(await page.evaluate(()=>!app._discoverMedia().reasons.some(reason=>['unclassified-audio','auxiliary-audio-not-idle'].includes(reason))));
+        }));
+        for(const variant of ['active','visible','duplicate','seeking','autoplay','progress','controls','class','parent','unknown-id','nested','src','empty-src','source-child','current-src','stream','unobservable-src','primary-error','missing-primary'])await check(`auxiliary error ${kind} refuses ${variant}`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind);await auxiliaryError(page,variant);await flush(page,42);
+            assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),0);
+            assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+            if(['src','empty-src','source-child','current-src','stream','unobservable-src'].includes(variant)){
+                assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-error-source-unverified')));
+                assert.ok(await page.evaluate(()=>!app._discoverMedia().reasons.includes('auxiliary-audio-not-idle')));
+            }
+            if(variant==='primary-error')assert.ok(await page.evaluate(kind=>app._discoverMedia().reasons.includes(`${kind}-player-error`),kind));
+        }));
+        for(const code of [0,1,2,3,5])await check(`auxiliary error ${kind} rejects unsupported code ${code}`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind);await auxiliaryError(page,'',code);await flush(page,4);
+            assert.equal(await state(page),'BLOCKED');assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-error-unsupported-code')));
+        }));
+    }
+    await check('auxiliary error secondary audio code 4 is not exempted',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'audio');await auxiliaryError(page,'secondary-error');await flush(page,4);assert.equal(await state(page),'BLOCKED');
+    }));
+    await check('auxiliary error legacy ordinary video applies the same root error boundary',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'video');await auxiliaryError(page,'legacy');await flush(page,4);assert.equal(await state(page),'PLAYING');
+        await page.evaluate(()=>{const a=window.__errorAux;Object.defineProperty(a,'error',{get:()=>({code:2})});app.play();});
+        assert.equal(await state(page),'BLOCKED');
+    }));
+    await check('auxiliary error code 4 source changes are revalidated after playback starts',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'video');await auxiliaryError(page);await flush(page,4);assert.equal(await state(page),'PLAYING');
+        await page.evaluate(()=>{window.__errorAux.setAttribute('src','');app._checkVideoStatus();});
+        assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+    }));
+    for(const kind of ['video','audio'])await check(`auxiliary error ${kind} real-player failure cannot turn ended into completion`,()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,kind);await auxiliaryError(page);await flush(page,4);assert.equal(await state(page),'PLAYING');
+        await page.evaluate(()=>{const player=app._videoEl;Object.defineProperty(player,'error',{get:()=>({code:4})});player.__ended=true;player.dispatchEvent(new Event('ended'));});
+        assert.deepEqual(await page.evaluate(()=>[app._state,app._completedVideos.has(window.__diagnosticPlayers[0]),document.querySelector('.jobUnfinishCount').value]),['BLOCKED',false,'1']);
+    }));
     for(const kind of ['video','audio']) {
         await check(`diagnostic ${kind} reviewed baseline reproduces attachment dispatch or control rejection`,()=>using([outer(2),0,false,null,false,false,false,regressionBaseline],async page=>{
             await diagnosticLesson(page,kind,'',false);assert.equal(await state(page),'BLOCKED');
@@ -286,8 +362,9 @@ try {
         assert.equal(await state(page),'BLOCKED');
         assert.deepEqual(await page.evaluate(()=>{const m=app._discoverMedia();return [m.videos.length,m.audios.length,m.tasks.map(t=>t.kind),app._playableMedia().videos.length,m.reasons.includes('unsupported-mixed-attachments')];}),[1,1,['audio','video'],2,true]);
     }));
-    for(const kind of ['video','audio']) await check(`diagnostic ${kind} natural ended waits for platform marker then navigates once despite stale callbacks`,()=>using([outer(2),0],async page=>{
+    for(const withAuxiliaryError of [false,true])for(const kind of ['video','audio']) await check(`diagnostic ${kind} natural ended waits for platform marker then navigates once despite stale callbacks; auxiliary code4=${withAuxiliaryError}`,()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,kind,'',false);
+        if(withAuxiliaryError)await auxiliaryError(page);
         await page.evaluate(()=>{
             window.__diagnosticClicks=0;window.__originalDiagnostic=app._videoEl;
             document.querySelector('#node1 .posCatalog_name').onclick=()=>{

@@ -299,3 +299,70 @@ git diff --check               # PASS
 
 No private HTML, authenticated address or account identifier was used in a new
 fixture or staged for publication. All eight private fixtures remain ignored.
+
+## Inactive root auxiliary error 4 repair from 06ca058
+
+Authenticated evidence now identifies the rejected root auditionAudio state:
+paused=true, autoplay=false, seeking=false, currentTime=0, error.code=4. These
+values show that the blanket !audio.error term, not playback activity, caused
+auxiliary-audio-not-idle. They do not establish src/currentSrc/srcObject or child
+source declarations, nor prove that error 4 is safe for any actual lesson player.
+
+The scoped exception preserves every independent uniqueness, root ownership,
+empty-class, DIV-parent, controls, connection/hidden, paused/autoplay/seeking and
+position condition. It accepts error 4 only in the unique current course-content
+root after local checks confirm **no src attribute (including no empty src
+attribute), currentSrc === '', srcObject === null and no source descendants**.
+This is a conservative no-declared/selected-source case, not an exemption for
+declared but unsupported URLs. Unobservable source state also remains blocked.
+Error-free auxiliary behavior is retained; this new source rule applies only to
+the code-4 exception. No source attribute, player position or error is cleared.
+
+Diagnostics separate actual inactivity checks from error classification. An allowed
+case emits neither unclassified-audio nor auxiliary-audio-not-idle. Refused error
+codes emit auxiliary-audio-error-unsupported-code; declared/selected/stream or
+unobservable sources emit auxiliary-audio-error-source-unverified. No source value
+or authenticated URL is printed. The same error policy gates the legacy ordinary
+video auxiliary exception, so that path cannot bypass the source/error boundary.
+
+Primary video/audio media with any actual error now explicitly blocks discovery,
+including code 4. Secondary audio retains its strict no-error rule. Unsupported
+media and task ownership checks are unchanged. Literal source comparisons against
+06ca058 limit runtime changes to the auxiliary policy/diagnostics and the explicit
+failed-player refusals; completion, 1.0x/recovery, settings, attachment ordering,
+pending PDF, sidebar, assessment and fail-closed live bridge remain unchanged.
+
+Tests reuse the existing labeled synthetic fixtures, simulate MediaError fields,
+and explicitly distinguish observed idle/error attributes from the unobserved
+source state. Positive no-source fixtures are not evidence of real source values.
+The actual 06ca058 source is run as a negative control for both native video and
+audio: code 4 produces the original not-idle/unclassified refusal. Positive and
+negative cases cover no error versus code 4, all independent state/identity guards,
+other codes, source declarations/current source/streams/unreadable state, primary
+and secondary failures, missing primary media, legacy scope and changes after
+playback starts. Ended plus a delayed platform marker still gates navigation;
+primary failure cannot convert an ended event into local completion.
+
+Authenticated status remains PARTIAL until the user retests. In particular, the
+newly supplied idle/error attributes alone cannot prove the real lesson satisfies
+the source boundary. Source-bearing or otherwise unsupported cases deliberately
+remain blocked; no authenticated playback or completion PASS is claimed.
+
+Final checks for this repair (all exit 0):
+
+```
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs         # synchronized payload and valid syntax
+node tests/customization-v3.mjs  # PASS
+node tests/preserved-v3.mjs      # PASS, including exact 06ca058 scope comparison
+node tests/navigation-v3.mjs    # RESULT: 421 passed, 0 failed (360 previous + 61 new)
+node tests/recorded-live-v3.mjs # RESULT: 21 passed; 0 failed
+node tests/native-entry-v3.mjs  # RESULT: 19 passed; 0 failed
+node tests/bridge-v3.mjs        # RESULT: 31 passed, 0 failed
+node --check <all 16 .js/.mjs files> # PASS
+git diff --check               # PASS
+```
+
+The baseline-source negative controls reproduce the authenticated attribute/error
+combination's not-idle rejection; repaired positive cases exercise only the
+explicitly source-less synthetic boundary. All private fixtures remain excluded.
