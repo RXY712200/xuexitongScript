@@ -99,8 +99,12 @@
         },
         discover(knownDocuments = new Set(), selection = null) {
             const result = { videos: [], audios: [], rawAudios: [], documents: [], reasons: [],
-                unsupported: false, inaccessible: false, pending: false, navigationSafe: true };
-            const block = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
+                unsupported: false, inaccessible: false, pending: false, navigationSafe: true, diagnosticTriggers: [] };
+            const block = (reason, element = null, phase = '') => {
+                result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason);
+                if (element) result.diagnosticTriggers.push({ reason, phase, documentIndex: result.documents.indexOf(element.ownerDocument),
+                    tag: element.tagName, knownClasses: ['ans-attach-online','ans-insertvideo-online','ans-insertaudio','insertdoc-online-pdf','liveHref'].filter(name => element.classList.contains(name)) });
+            };
             const uncertain = reason => { result.navigationSafe = false; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
             const frame = this.cardFrame(), root = this.cardDocument(), node = catalog.current();
             if (!frame) { block('nonunique-course-frame'); return result; }
@@ -127,7 +131,13 @@
                 // Ordinary forms/inputs/labels are UI, not evidence of an independent
                 // learning task. Explicit attachment/live boundaries still require an adapter.
                 if (!knownDocuments.has(doc)) for (const boundary of doc.querySelectorAll('.ans-attach-online, a.liveHref')) {
-                    if (boundary.tagName !== 'IFRAME' || boundary.ownerDocument !== root || !kindOf(boundary)) block('unknown-independent-task');
+                    const contained = frames.filter(owner => boundary !== owner && boundary.contains(owner));
+                    const container = doc === root && boundary.tagName !== 'IFRAME' && !boundary.matches('a.liveHref') &&
+                        contained.length > 0 && contained.every(owner => kindOf(owner));
+                    const branchKind = branch && kindOf(branch), boundaryKind = kindOf(boundary);
+                    const ownedRepresentation = doc !== root && boundaryKind && boundaryKind === branchKind &&
+                        (branchKind === 'document' || media.some(el => boundary.contains(el) && candidates.includes(el)));
+                    if (!(boundary.tagName === 'IFRAME' && doc === root && boundaryKind) && !container && !ownedRepresentation) block('unknown-independent-task', boundary, 'task-boundary');
                 }
                 for (const form of doc.querySelectorAll('form')) {
                     const labels = [form.textContent, ...Array.from(form.querySelectorAll('[title], [aria-label], [placeholder]')).map(el =>
@@ -212,8 +222,12 @@
                 // a populated unclassified leaf is not silently omitted from the queue.
                 for (const doc of result.documents) if (!knownDocuments.has(doc) && doc !== root && !doc.querySelector('video, audio, iframe') &&
                     !result.tasks?.some(task => task.kind === 'document' && task.documents.includes(doc))) {
+                    if (attachments.includes(branches.get(doc)) && kindOf(branches.get(doc))) continue; // UI/viewer descendants already belong to a known task.
                     const body = doc.body?.cloneNode(true); body?.querySelectorAll('script, style').forEach(el => el.remove());
-                    if (body?.textContent.trim() || body?.querySelector('object, embed, canvas, form, input, img')) block('unknown-independent-task');
+                    if (body?.textContent.trim() || body?.querySelector('object, embed, canvas, form, input, img')) {
+                        if (attachments.length) uncertain('unassigned-task-content');
+                        else block('unknown-independent-task', doc.body, 'unassigned-leaf');
+                    }
                 }
             }
             if (!candidates.length && !result.tasks?.length && !knownDocuments.size) {
@@ -754,6 +768,7 @@
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
+                this._priorChecked = null; this._completedVisits = new Set();
                 this._automaticStartup = startup;
                 this._state = 'DISCOVERING';
                 this._isPlaying = false;
@@ -845,7 +860,7 @@
             nextUnit() {
                 if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
-                if (!this._externalCompletion && this._state === 'READY_TO_ADVANCE' && !this._refreshVideoContext()) return this._block('视频任务身份无法确认');
+                if (!this._externalCompletion && !this._platformCompletion && this._state === 'READY_TO_ADVANCE' && !this._refreshVideoContext()) return this._block('视频任务身份无法确认');
                 if (this._state !== 'READY_TO_ADVANCE' || catalog.current() !== this._completionNode ||
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('平台完成状态尚未确认，停止自动导航');
@@ -867,6 +882,7 @@
                 try { next = validateSettings(input); } catch (error) { this._settingsMessage = error.message; return false; }
                 const previous = this.settings;
                 this.settings = next;
+                if ((this._mediaReadyCancel || this._audioState?.waiting) && !next.features[this._audioState || this._playableMedia().audios?.length ? 'audioPlayback' : 'videoPlayback']) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }
                 if (this._startupCancel && !next.features[this._playableMedia().audios?.length ? 'audioPlayback' : 'videoPlayback']) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }
                 if (previous.preset !== next.preset && next.preset === 'legacy') {
                     this.configs.randomCooldownMinMs = 5000; this.configs.randomCooldownMaxMs = 12000;
@@ -1232,6 +1248,7 @@
                 return media.videos.every(video => video.ended && this._completedVideos.has(video));
             },
             _navigationEligible(target) {
+                if (this._platformCompletion) return this._priorCompletionValid(this._platformCompletion) && this._targetAfter(this._completionNode) === target && !this._isPlaying;
                 if (this._externalCompletion) return this._externalNavigationEligible(target);
                 if (!this._refreshVideoContext()) return false;
                 if (this._destroyed || this._isPlaying || this._isChapterTest() ||
@@ -1347,6 +1364,8 @@
                 return timer;
             },
             _cancelTasks() {
+                this._mediaReadyCancel?.(); this._clearAudioNotice?.();
+                this._platformCompletion = null;
                 this._catalogTransitionCancel?.();
                 this._startupCancel?.(); this._automaticStartup = false;
                 this._actions?.cancelAll();
@@ -1452,6 +1471,7 @@
                     if (generation !== this._generation || !this._isPlaying || !video.isConnected ||
                         video !== this._videoEl || !this._refreshVideoContext()) return;
                     if (video.ended) { this._completeVideo(video); return; }
+                    if (video.tagName === 'AUDIO') { this._audioPlayRejected(video, e); return; }
                     console.warn("直接恢复播放失败，尝试静音恢复:", e);
                     video.muted = true;
                     video.play().catch((err) => {
@@ -1500,17 +1520,137 @@
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
+            // Prior platform credit is independent of local ended events. Require an
+            // own zero-count AND own completion marker; attachment icons cannot prove a lesson.
+            _priorProof(node) {
+                const own = selector => [...node.querySelectorAll(selector)].filter(el =>
+                    el.closest('.posCatalog_select') === node && !el.closest('.ans-attach-online'));
+                const counts = own('.jobUnfinishCount'), markers = own('.icon_Completed');
+                return counts.length === 1 && counts[0].value.trim() === '0' && markers.length === 1;
+            },
+            _priorCompletionValid(record) {
+                if (this._destroyed || record.generation !== this._generation || record.href !== location.href ||
+                    catalog.current() !== record.node || record.node.id !== record.id || !record.node.isConnected || !this._priorProof(record.node) ||
+                    this._catalogTopology() !== record.topology || this._chapterOf(record.node) !== record.chapter ||
+                    this._currentStepTitle() !== record.title || videoAdapter.cardDocument() !== record.doc || record.doc.readyState === 'loading' ||
+                    this._nodeTitle(record.node) !== record.name || this._isChapterTest()) return false;
+                const media = this._playableMedia();
+                return !media.pending && !media.unsupported && !media.inaccessible && media.navigationSafe !== false &&
+                    (record.players.length > 0 || record.attachments.length > 0) &&
+                    record.players.length === media.videos.length && record.players.every((el, i) => el === media.videos[i] && el.isConnected && el.paused &&
+                        record.sources[i] === (el.currentSrc || el.getAttribute('src') || '')) &&
+                    record.attachments.length === (media.tasks || []).length && record.attachments.every((el, i) => el === media.tasks[i].attachment);
+            },
+            _checkPriorCompletion() {
+                if (this._videoContext || this._isPlaying) return false;
+                const node = catalog.current(), doc = videoAdapter.cardDocument();
+                if (!node || !doc || (this._priorChecked?.node === node && this._priorChecked.doc === doc) || !this._priorProof(node)) return false;
+                const media = this._playableMedia();
+                const record = { node, doc, id: node.id, topology: this._catalogTopology(), chapter: this._chapterOf(node), generation: this._generation, href: location.href, title: this._currentStepTitle(),
+                    name: this._nodeTitle(node), players: [...media.videos], sources: media.videos.map(el => el.currentSrc || el.getAttribute('src') || ''),
+                    attachments: (media.tasks || []).map(task => task.attachment) };
+                if (!this._priorCompletionValid(record)) return false;
+                if (!node.id || document.querySelectorAll(`[id="${CSS.escape(node.id)}"]`).length !== 1 ||
+                    this._completedVisits?.has(node.id)) { this._block('已完成目录重复或身份不明确'); return true; }
+                this._state = 'VERIFYING_PLATFORM_COMPLETION';
+                this._schedule(() => {
+                    if (!this._priorCompletionValid(record)) return this._block('既有平台完成证据或课程身份已变化');
+                    this._priorChecked = { node, doc }; this._completedVisits ||= new Set(); this._completedVisits.add(node.id);
+                    this._platformCompletion = record; this._completionNode = node;
+                    this._state = 'READY_TO_ADVANCE'; this.nextUnit();
+                }, 250);
+                return true;
+            },
+            _waitForMediaReady(el, actionReady) {
+                if (this._mediaReadyCancel) return;
+                const generation = this._generation, node = catalog.current(), doc = videoAdapter.cardDocument(), href = location.href;
+                const id = node?.id, title = this._nodeTitle(node), source = el.currentSrc || el.getAttribute('src') || '';
+                let timer, tries = 0, closed = false;
+                const cleanup = () => {
+                    closed = true;
+                    clearTimeout(timer); this._timers.delete(timer);
+                    el.removeEventListener('loadeddata', tick); el.removeEventListener('canplay', tick);
+                    for (const type of ['pagehide','beforeunload','popstate','hashchange']) window.removeEventListener(type, cancel);
+                    document.removeEventListener('click', interaction, true);
+                    if (this._mediaReadyCancel === cleanup) this._mediaReadyCancel = null;
+                };
+                const cancel = () => { cleanup(); this._block('媒体等待已取消'); };
+                const interaction = event => { if (event.isTrusted && !event.composedPath().includes(this._settingsPanel)) cancel(); };
+                const tick = () => {
+                    if (closed) return;
+                    clearTimeout(timer); this._timers.delete(timer);
+                    if (generation !== this._generation || this._destroyed) return cleanup();
+                    const media = this._playableMedia();
+                    if (node !== catalog.current() || node?.id !== id || this._nodeTitle(node) !== title ||
+                        (source && source !== (el.currentSrc || el.getAttribute('src') || '')) || doc !== videoAdapter.cardDocument() || href !== location.href ||
+                        !el.isConnected || media.unsupported || media.inaccessible || !media.videos.includes(el)) { cleanup(); return this._block('等待期间媒体任务已变化'); }
+                    if (el.readyState >= 2) { cleanup(); this._state = 'READY'; this.play(actionReady); return; }
+                    if (++tries >= 80) { cleanup(); return this._block('选中媒体未就绪，请手动加载后重试'); }
+                    timer = setTimeout(tick, 250); this._timers.add(timer);
+                };
+                this._state = 'WAITING_MEDIA'; this._mediaReadyCancel = cleanup;
+                el.addEventListener('loadeddata', tick); el.addEventListener('canplay', tick);
+                for (const type of ['pagehide','beforeunload','popstate','hashchange']) window.addEventListener(type, cancel);
+                document.addEventListener('click', interaction, true);
+                if (el.currentSrc || el.getAttribute('src') || el.querySelector('source[src]')) el.load();
+                tick();
+            },
+            _clearAudioNotice() {
+                const state = this._audioState;
+                if (state) state.el.removeEventListener('volumechange', state.listener);
+                this._audioNotice?.remove(); this._audioNotice = null; this._audioState = null;
+            },
+            _prepareAudio(el) {
+                if (this._audioState?.el === el && this._audioState.generation === this._generation) return;
+                this._clearAudioNotice();
+                this._audioState = { el, generation: this._generation, waiting: false, listener: () => this._renderAudioNotice() };
+                el.removeAttribute('muted'); el.defaultMuted = false; el.muted = false;
+                if (el.volume === 0) el.volume = 1;
+                el.addEventListener('volumechange', this._audioState.listener);
+            },
+            _audioPlayRejected(el, error) {
+                if (!this._audioState || el !== this._audioState.el || !this._refreshVideoContext() || el.ended) return;
+                this._audioState.waiting = true; this._audioState.error = error?.name || '播放失败';
+                this._state = 'WAITING_AUDIO_GESTURE'; this._isPlaying = false; this._clearCheckInterval(); this._renderAudioNotice();
+            },
+            _renderAudioNotice() {
+                const state = this._audioState, el = state?.el;
+                if (!el?.isConnected || state.generation !== this._generation) return this._clearAudioNotice();
+                this._audioNotice?.remove(); this._audioNotice = null;
+                if (!state.waiting && !el.muted && el.volume > 0) return;
+                const host = document.createElement('div'); this._audioNotice = host;
+                host.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:2147483646;max-width:280px';
+                const root = host.attachShadow({ mode: 'open' });
+                const label = document.createElement('div'); label.style.cssText = 'padding:10px;background:#fff;color:#222;border:1px solid #888;font:13px sans-serif';
+                label.textContent = state.waiting ? `音频需要手动播放（${state.error}）` : el.muted ? '音频已静音' : '音频音量为零';
+                for (const [text, muted] of [['有声播放', false], ['本次允许静音继续', true]]) {
+                    const button = document.createElement('button'); button.textContent = text;
+                    button.addEventListener('click', event => {
+                        if (!event.isTrusted || state !== this._audioState || state.generation !== this._generation ||
+                            !this.settings.features.audioPlayback || !this._refreshVideoContext() || el.ended || this._playPending) return;
+                        el.defaultMuted = false; el.muted = muted; if (!muted && el.volume === 0) el.volume = 1;
+                        el.playbackRate = 1; this._state = 'PLAYING'; this._isPlaying = true; this._playPending = true;
+                        const result = el.play();
+                        Promise.resolve(result).then(() => {
+                            if (state !== this._audioState || !this._refreshVideoContext()) return;
+                            this._playPending = false; state.waiting = false; this._startVideoMonitoring(); this._renderAudioNotice();
+                        }, error => { if (state === this._audioState) { this._playPending = false; this._audioPlayRejected(el, error); } });
+                    }); label.append(button);
+                }
+                root.append(label); document.body.append(host);
+            },
             async play(actionReady = false) {
                 try {
                     if (this._isChapterTest()) {
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_MEDIA', 'WAITING_AUDIO_GESTURE', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
                     if (this._playPending || this._actions.pending.has('video-start') || this._actions.pending.has('video-tab')) return;
+                    if (this._checkPriorCompletion()) return;
                     if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
                     const tasks = this._playableMedia();
@@ -1533,6 +1673,7 @@
                     if (this._completedVideos.has(el)) return;
                     if (this._isPlaying && !el.paused && !el.ended) { this._state = 'PLAYING'; return; }
                     if (!this._actionEnabled(this._mediaAction(el, this._nextVideoRequested))) { this._state = 'PAUSED_AUTOMATION'; return; }
+                    if (el.readyState < 2) { this._waitForMediaReady(el, actionReady); return; }
                     if (!actionReady && this._preparedVideoNode !== catalog.current()) {
                         const category = this._mediaAction(el, this._nextVideoRequested);
                         this._state = 'ACTION_PENDING';
@@ -1557,6 +1698,7 @@
                     this._isPlaying = true;
                     this._videoEventHandle();
                     el.playbackRate = 1.0;
+                    if (el.tagName === 'AUDIO') this._prepareAudio(el); else this._clearAudioNotice();
 
                     try {
                         this._playPending = true;
@@ -1569,6 +1711,7 @@
                         this._observedLessonId = node.id; this._observedCard = this._cardIdentity();
                         console.log(`%c视频开始播放，倍速: ${el.playbackRate}x`, "color:#4CAF50");
                         this._startVideoMonitoring();
+                        if (el.tagName === 'AUDIO') this._renderAudioNotice();
                     } catch (playError) {
                         if (generation === this._generation) this._playPending = false;
                         console.error("视频播放失败:", playError);
@@ -1727,6 +1870,7 @@
                 if (video?.ended) { this._completeVideo(video); return; }
                 const generation = this._generation;
                 const node = catalog.current();
+                if (video?.tagName === 'AUDIO') { this._audioPlayRejected(video, error); return; }
                 if (video) {
                     video.muted = true;
                     video.play().then(() => {
@@ -1783,6 +1927,7 @@
                 this._state = 'ADVANCING';
                 this._nextUnitPending = true;
                 this._videoEl = null;
+                this._videoContext = null;
                 this._isPlaying = false;
                 const generation = this._generation;
                 target.click();
@@ -1829,7 +1974,7 @@
                 return this._treeContainerEl;
             },
             _getVideoEl() {
-                if (['WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
+                if (['WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_MEDIA', 'WAITING_LIVE', 'READING_DOCUMENT', 'VERIFYING_PLATFORM_COMPLETION'].includes(this._state)) return null;
                 if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                     this._block('当前播放页面或播放器已变化');
                     this._videoEl = null;

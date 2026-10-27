@@ -2,7 +2,34 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 const baseline = execFileSync('git', ['show', 'e907cdda9d50fd80c61721061ed0988dfec621a4:v3_optimized.js'], { encoding: 'utf8' });
-const actual = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const repairSource = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+// Normalize only the deliberate A/B/C integrations for historical snapshots.
+// New behavior is executed in navigation-v3; unchanged recovery/bridge bodies
+// remain subject to the original byte-for-byte assertions below.
+function beforeRepair(source) {
+    const start=source.indexOf('            // Prior platform credit');
+    source=source.slice(0,start)+source.slice(source.indexOf('            async play(',start));
+    for (const line of [
+        '                this._priorChecked = null; this._completedVisits = new Set();',
+        '                this._mediaReadyCancel?.(); this._clearAudioNotice?.();',
+        '                this._platformCompletion = null;',
+        "                if (this._platformCompletion) return this._priorCompletionValid(this._platformCompletion) && this._targetAfter(this._completionNode) === target && !this._isPlaying;",
+        "                    if (video.tagName === 'AUDIO') { this._audioPlayRejected(video, e); return; }",
+        '                    if (this._checkPriorCompletion()) return;',
+        '                    if (el.readyState < 2) { this._waitForMediaReady(el, actionReady); return; }',
+        "                    if (el.tagName === 'AUDIO') this._prepareAudio(el); else this._clearAudioNotice();",
+        "                        if (el.tagName === 'AUDIO') this._renderAudioNotice();",
+        "                if (video?.tagName === 'AUDIO') { this._audioPlayRejected(video, error); return; }",
+        "                if ((this._mediaReadyCancel || this._audioState?.waiting) && !next.features[this._audioState || this._playableMedia().audios?.length ? 'audioPlayback' : 'videoPlayback']) { this._cancelTasks(); this._state = 'PAUSED_AUTOMATION'; }",
+    ]) source=source.replace(line+'\n','');
+    source=source.replace('!this._externalCompletion && !this._platformCompletion &&','!this._externalCompletion &&')
+        .replace("'WAITING_MEDIA', 'WAITING_AUDIO_GESTURE', 'VERIFYING_PLATFORM_COMPLETION', ",'')
+        .replace("'WAITING_MEDIA', ",'').replace(", 'VERIFYING_PLATFORM_COMPLETION'",'')
+        .replace('                this._videoEl = null;\n                this._videoContext = null;','                this._videoEl = null;')
+        .replace('            // Prior platform credit is independent of local ended events. Require an\n            // own zero-count AND own completion marker; attachment icons cannot prove a lesson.\n','');
+    return source;
+}
+const actual = beforeRepair(repairSource);
 // Shared native audio/video coordinator additions are behavior-tested below the
 // historical snapshots. Normalize only this explicit integration, not recovery code.
 const withoutNavigationSafety = source => source.replaceAll(' || media.navigationSafe === false', '')
@@ -151,4 +178,10 @@ const policyBaseline = execFileSync('git', ['show', '8bf8930f990ff1c13929b50c822
 const outsidePolicy = source => source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '')
     .replace(method(source, '_waitForStartup'), '');
 assert.equal(outsidePolicy(withoutNavigationSafety(actual)),outsidePolicy(policyBaseline), 'only discovery/readiness and the explicit added navigation refusals may differ from 8bf8930');
-console.log('PASS: settings, recovery, natural completion/markers, sidebar and fail-closed bridge remain unchanged from 8bf8930; navigation is stricter for unreadable UI.');
+console.log('PASS: legacy preservation assertions pass after explicit A/B/C integration normalization; new behavior is exercised by targeted browser tests.');
+
+const repairBaseline = execFileSync('git', ['show', '8fde326831a073a1d6d963ccff4e5d59705c2158:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g,'\n');
+const withoutDiscovery = source => source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '');
+assert.equal(withoutDiscovery(beforeRepair(repairSource)), withoutDiscovery(repairBaseline), 'only the explicit A/B/C integrations and discovery may differ from the reviewed repair baseline');
+assert.equal(block(repairSource, '    function createTaskSupport(', '    function initializePlayer()'), block(repairBaseline, '    function createTaskSupport(', '    function initializePlayer()'), 'raw fail-closed bridge and document/live infrastructure unchanged');
+console.log('PASS: exact reviewed-baseline comparison outside declared A/B/C edits; raw document/live bridge unchanged.');

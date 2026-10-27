@@ -72,7 +72,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
             for (let i = 0; i < count; i++) {
                 const v = doc.querySelectorAll('video')[i] || doc.createElement('video'); v.id = `video_html5_api_${i}`;
                 v.__ended = false; v.__paused = true; v.__plays = 0; // Each unstarted player is paused; competition is tested explicitly.
-                Object.defineProperties(v, {
+                Object.defineProperties(v, { readyState: { configurable: true, get: () => v.__readyState ?? 4 },
                     ended: { get: () => v.__ended },
                     paused: { get: () => v.__paused },
                 });
@@ -211,7 +211,7 @@ try {
                 const branch=root.querySelector('iframe'),doc=branch.contentDocument;doc.body.innerHTML=markup;
                 const player=doc.querySelector(kind==='video'?'video':'#audio_html5_api');
                 player.__plays=0;player.__paused=true;player.__ended=false;
-                Object.defineProperties(player,{paused:{get:()=>player.__paused},ended:{get:()=>player.__ended}});
+                Object.defineProperties(player,{readyState:{configurable:true,get:()=>player.__readyState??4},paused:{get:()=>player.__paused},ended:{get:()=>player.__ended}});
                 player.play=()=>{player.__plays++;player.__paused=false;return Promise.resolve();};window.__diagnosticPlayers.push(player);
                 if(variant==='independent-form'){const form=doc.createElement('form');form.innerHTML='<input type="text">';doc.body.append(form);}
                 if(variant==='form-action')doc.querySelector('form')?.setAttribute('action','/synthetic-unsupported-submit');
@@ -465,7 +465,7 @@ try {
             const root=window.__diagnosticRoot,old=root.querySelector('iframe'),extra=root.createElement('iframe');extra.className=old.className;root.body.append(extra);
             extra.contentDocument.body.innerHTML=old.contentDocument.body.innerHTML;
             const second=extra.contentDocument.querySelector('#audio_html5_api');second.__paused=true;second.__ended=false;second.__plays=0;
-            Object.defineProperties(second,{paused:{get:()=>second.__paused},ended:{get:()=>second.__ended}});second.play=()=>{second.__plays++;second.__paused=false;return Promise.resolve();};
+            Object.defineProperties(second,{readyState:{configurable:true,get:()=>second.__readyState??4},paused:{get:()=>second.__paused},ended:{get:()=>second.__ended}});second.play=()=>{second.__plays++;second.__paused=false;return Promise.resolve();};
             window.__secondDiagnostic=second;
             const s=structuredClone(app.settings);s.features.nextAudio=nextEnabled;s.randomDelaysEnabled=true;
             for(const [key,rule]of Object.entries(s.delays))rule.enabled=key==='nextAudio';app.updateSettings(s);app.run({startup:true});
@@ -483,7 +483,7 @@ try {
             const doc = root.querySelector('iframe').contentDocument; doc.body.innerHTML = html;
             const audio = doc.querySelector('#audio_html5_api'); window.__audio = audio;
             audio.__plays = 0; audio.__paused = true; audio.__ended = false;
-            Object.defineProperties(audio, { paused: { get: () => audio.__paused }, ended: { get: () => audio.__ended } });
+            Object.defineProperties(audio, { readyState: { configurable: true, get: () => audio.__readyState ?? 4 }, paused: { get: () => audio.__paused }, ended: { get: () => audio.__ended } });
             audio.play = () => { audio.__plays++; audio.__paused = false; return Promise.resolve(); };
             if (variant === 'secondary-playing') Object.defineProperty(doc.querySelector('#audio1_html5_white'), 'paused', { get: () => false });
             if (variant === 'secondary-visible') doc.querySelector('#audio1_html5').style.display = '';
@@ -547,7 +547,7 @@ try {
                 if (i < 4) {
                     const v = frame.contentDocument.createElement('video'); v.id = 'video_html5_api';
                     v.__paused = true; v.__ended = false; v.__plays = 0;
-                    Object.defineProperties(v, { paused: { get: () => v.__paused }, ended: { get: () => v.__ended } });
+                    Object.defineProperties(v, { readyState: { configurable: true, get: () => v.__readyState ?? 4 }, paused: { get: () => v.__paused }, ended: { get: () => v.__ended } });
                     v.play = () => { v.__paused = false; v.__plays++; return Promise.resolve(); };
                     frame.contentDocument.body.append(v); window.__attachmentVideos.push(v);
                 }
@@ -2121,6 +2121,119 @@ try {
         assert.equal(await page.evaluate(() => app._actions.pending.size), 1);
         assert.equal(await page.evaluate(() => app._tryTimes), 0);
         assert.ok(await page.evaluate(() => [...window.__timeoutDelays.values()].includes(120000)));
+    }));
+    // A: native inventory plus player/viewer UI must not become extra tasks.
+    async function ownedAttachmentUI(page) {
+        const html=readFileSync(new URL('../fixtures/synthetic/owned-attachment-ui.html',import.meta.url),'utf8');
+        await attachments(page,'',false);
+        await page.evaluate(html=>{
+            const root=document.querySelector('iframe[info="card"]').contentDocument;
+            const wrap=root.createElement('div');wrap.className='ans-attach-online';root.body.append(wrap);
+            for(const frame of [...root.querySelectorAll('iframe')])wrap.append(frame);
+            for(const [i,frame] of [...root.querySelectorAll('iframe')].entries()) {
+                const doc=frame.contentDocument;
+                if(i<4) {
+                    doc.body.innerHTML=html;
+                    const v=doc.querySelector('video');v.__paused=true;v.__ended=false;v.__plays=0;v.__readyState=0;
+                    Object.defineProperties(v,{readyState:{get:()=>v.__readyState},paused:{get:()=>v.__paused},ended:{get:()=>v.__ended}});
+                    v.play=()=>{v.__plays++;v.__paused=false;return Promise.resolve();};window.__attachmentVideos[i]=v;
+                    doc.querySelector('iframe').contentDocument.body.innerHTML='<form><input value="owned control"></form>';
+                } else {
+                    doc.body.innerHTML='<div class="ans-attach-online insertdoc-online-pdf"><iframe></iframe></div>';
+                    doc.querySelector('iframe').contentDocument.body.innerHTML='<canvas></canvas><button>Next page</button>';
+                }
+            }
+            app.run();
+        },html);
+    }
+    await check('repair A exact four video and PDF inventory waits only for selected readiness; owned UI nonblocking',()=>using([outer(),1],async page=>{
+        await ownedAttachmentUI(page);
+        assert.deepEqual(await page.evaluate(()=>{const m=app._discoverMedia();return[m.tasks.length,m.unsupported,m.reasons,app._state,window.__attachmentVideos.map(v=>v.__plays)];}),[5,false,[],'WAITING_MEDIA',[0,0,0,0]]);
+        await page.evaluate(()=>{const v=window.__attachmentVideos[0];v.__readyState=4;v.dispatchEvent(new Event('canplay'));});await flush(page);
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__attachmentVideos.map(v=>v.__plays)]),['PLAYING',[1,0,0,0]]);
+        for(let i=0;i<4;i++){
+            if(i>0){await page.evaluate(i=>{const v=window.__attachmentVideos[i];v.__readyState=4;v.dispatchEvent(new Event('canplay'));},i);await flush(page);}
+            await page.evaluate(i=>{const v=window.__attachmentVideos[i];v.__ended=true;v.__paused=true;v.dispatchEvent(new Event('ended'));},i);await flush(page,2);
+        }
+        assert.equal(await state(page),'PAUSED_AUTOMATION');
+        assert.equal(await page.evaluate(()=>app._discoverMedia().tasks[4].status),'pending');
+        assert.deepEqual(await page.evaluate(()=>window.__attachmentVideos.map(v=>v.__plays)),[1,1,1,1]);
+    }));
+    for(const variant of ['unknown','competing','missing','change','cancel']) await check(`repair A ${variant} remains safe`,()=>using([outer(),1],async page=>{
+        await ownedAttachmentUI(page);
+        await page.evaluate(variant=>{
+            const root=document.querySelector('iframe[info="card"]').contentDocument;
+            if(variant==='unknown'){const el=root.createElement('iframe');el.className='ans-attach-online unknown';root.body.append(el);}
+            if(variant==='competing')window.__attachmentVideos[2].__paused=false;
+            if(variant==='missing')window.__attachmentVideos[0].remove();
+            if(variant==='change')document.querySelector('#node0').id='changed';
+            if(variant==='cancel')app.destroy();
+            const v=window.__attachmentVideos[0];v.__readyState=4;v.dispatchEvent(new Event('canplay'));
+        },variant);await flush(page,85);
+        assert.equal(await page.evaluate(()=>window.__attachmentVideos.reduce((n,v)=>n+v.__plays,0)),0);
+        if(variant==='unknown')assert.ok(await page.evaluate(()=>app._discoverMedia().diagnosticTriggers.some(t=>t.phase==='task-boundary'&&t.tag==='IFRAME')));
+    }));
+    // B: both own platform indicators must agree before any playback is bypassed.
+    async function priorCredit(page,variant='single') {
+        if(variant==='multi'||variant==='partial')await attachments(page,'',false);
+        await page.evaluate(variant=>{
+            app._cancelTasks();app._videoContext=null;app._isPlaying=false;
+            const node=document.querySelector('#node0');node.querySelector('.jobUnfinishCount').value=variant==='partial'?'4':'0';
+            if(variant==='partial')node.insertAdjacentHTML('beforeend','<div class="ans-attach-online"><span class="icon_Completed"></span></div>');
+            else node.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
+            if(variant==='missing-count')node.querySelector('input').remove();
+            if(variant==='missing-marker')node.querySelector('.icon_Completed').remove();
+            window.__creditPlayers=[...app._playableMedia().videos];for(const v of window.__creditPlayers){v.__plays=0;v.__paused=true;}
+            app.run();
+        },variant);
+    }
+    for(const variant of ['single','multi'])await check(`repair B reliable ${variant} platform credit avoids replay without fabricated ended`,()=>using([outer(),1],async page=>{
+        await priorCredit(page,variant);assert.equal(await state(page),'VERIFYING_PLATFORM_COMPLETION');await flush(page,2);
+        assert.equal(await state(page),'FINISHED');
+        assert.ok(await page.evaluate(()=>window.__creditPlayers.every(v=>v.__plays===0&&!v.ended&&!app._completedVideos.has(v))));
+    }));
+    for(const variant of ['partial','missing-count','missing-marker'])await check(`repair B ${variant} does not prove full lesson complete`,()=>using([outer(),1],async page=>{
+        await priorCredit(page,variant);await flush(page,2);
+        assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.__creditPlayers[0].__plays),1);
+    }));
+    for(const variant of ['marker','identity','document'])await check(`repair B ${variant} change invalidates prior credit before navigation`,()=>using([outer(2),1],async page=>{
+        await priorCredit(page);
+        await page.evaluate(variant=>{if(variant==='marker')document.querySelector('#node0 input').value='1';if(variant==='identity')document.querySelector('#node0').id='changed';if(variant==='document'){const f=document.querySelector('iframe[info="card"]');f.remove();document.body.insertAdjacentHTML('beforeend','<iframe info="card"></iframe>');}},variant);
+        await flush(page,2);assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__creditPlayers[0].__plays),0);
+    }));
+    await check('repair B completed lesson uses shared navigation and rejects repeated completed identity',()=>using([outer(2),1],async page=>{
+        await page.evaluate(()=>{window.__creditClicks=0;document.querySelector('#node1 span').onclick=()=>window.__creditClicks++;});
+        await priorCredit(page);await flush(page,2);assert.equal(await page.evaluate(()=>window.__creditClicks),1);
+        await page.evaluate(()=>{app._cancelTasks();app._state='READY';app._platformCompletion=null;app._priorChecked=null;app._videoContext=null;app._checkPriorCompletion();});
+        assert.equal(await state(page),'BLOCKED');
+    }));
+    // C: native audio gets an audible first attempt; rejection never auto-mutes it.
+    for(const property of ['muted','defaultMuted','volume'])await check(`repair C audible initial audio corrects ${property}`,()=>using([outer(),1],async page=>{
+        await audioLesson(page,'',false,false);
+        await page.evaluate(property=>{const a=window.__audio;if(property==='volume')a.volume=0;else a[property]=true;app.run();},property);await flush(page);
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.defaultMuted,window.__audio.volume,window.__audio.playbackRate]),['PLAYING',false,false,1,1]);
+    }));
+    await check('repair C autoplay denial requires trusted audio gesture without repeated mute fallback',()=>using([outer(),1],async page=>{
+        await audioLesson(page,'',false,false);
+        await page.evaluate(()=>{const a=window.__audio;a.__plays=0;a.play=()=>{a.__plays++;return Promise.reject(new DOMException('Synthetic autoplay denial','NotAllowedError'));};app.run();});await flush(page,3);
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays]),['WAITING_AUDIO_GESTURE',false,1]);
+        await page.evaluate(()=>app._audioNotice.shadowRoot.querySelector('button').click());
+        assert.equal(await page.evaluate(()=>window.__audio.__plays),1);
+        await page.evaluate(()=>{const a=window.__audio;a.play=()=>{a.__plays++;a.__paused=false;return Promise.resolve();};});
+        await page.getByRole('button',{name:'有声播放',exact:true}).click();
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays,window.__audio.playbackRate]),['PLAYING',false,2,1]);
+        await page.evaluate(()=>{window.__audio.volume=0;window.__audio.dispatchEvent(new Event('volumechange'));});
+        assert.ok(await page.evaluate(()=>app._audioNotice.shadowRoot.textContent.includes('音量为零')));
+        await page.getByRole('button',{name:'本次允许静音继续',exact:true}).click();
+        assert.equal(await page.evaluate(()=>window.__audio.muted),true);
+        assert.ok(await page.evaluate(()=>app._audioNotice.shadowRoot.textContent.includes('已静音')));
+        await page.evaluate(()=>app.destroy());assert.equal(await page.evaluate(()=>!!app._audioNotice),false);
+    }));
+    await check('repair C immediate audio recovery rejection waits; video mute fallback unchanged',()=>using([outer(),1],async page=>{
+        await audioLesson(page);await flush(page);
+        await page.evaluate(()=>{const a=window.__audio;a.__paused=true;a.__plays=0;a.play=()=>{a.__plays++;return Promise.reject(new DOMException('denied','NotAllowedError'));};app._tryResumePlayback('synthetic focus');});
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.__plays,window.__audio.muted]),['WAITING_AUDIO_GESTURE',1,false]);
+        await flush(page,5);assert.equal(await page.evaluate(()=>window.__audio.__plays),1);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
