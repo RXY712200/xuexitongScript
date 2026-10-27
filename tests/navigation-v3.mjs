@@ -12,6 +12,8 @@ const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf
 const reviewedStartup = execFileSync('git', ['show', 'd7ea26ac373522b250f4bf573fada7c75687c909:v3_optimized.js'], { encoding: 'utf8' });
 const regressionBaseline = execFileSync('git', ['show', 'f587605e91e14d39429168c88936a83840ea19cf:v3_optimized.js'], { encoding: 'utf8' });
 const auxiliaryErrorBaseline = execFileSync('git', ['show', '06ca05808b4ca5c2b68f43e7720cfe82b68168be:v3_optimized.js'], { encoding: 'utf8' });
+const policyBaseline = execFileSync('git', ['show', '8bf8930f990ff1c13929b50c822a2be2e35cd8bc:v3_optimized.js'], { encoding: 'utf8' });
+const permissiveUI = readFileSync(new URL('../fixtures/synthetic/permissive-player-ui.html',import.meta.url),'utf8');
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
@@ -69,7 +71,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
             if (scopeCase && count) doc.body.innerHTML = new DOMParser().parseFromString(scopeMedia, 'text/html').body.innerHTML;
             for (let i = 0; i < count; i++) {
                 const v = doc.querySelectorAll('video')[i] || doc.createElement('video'); v.id = `video_html5_api_${i}`;
-                v.__ended = false; v.__paused = false; v.__plays = 0;
+                v.__ended = false; v.__paused = true; v.__plays = 0; // Each unstarted player is paused; competition is tested explicitly.
                 Object.defineProperties(v, {
                     ended: { get: () => v.__ended },
                     paused: { get: () => v.__paused },
@@ -267,6 +269,76 @@ try {
             if(variant==='legacy')root.querySelector('iframe').className='';
         },{variant,code});
     }
+    async function ordinaryUI(page, kind, variant='') {
+        await diagnosticLesson(page,kind,variant==='late'?'late':'');
+        await page.evaluate(({html,variant})=>{
+            window.__addOrdinaryUI=()=>{
+                const root=window.__diagnosticRoot,player=window.__diagnosticPlayers[0],doc=player.ownerDocument;
+                const aux=root.querySelector('#auditionAudio');aux.className='platform-preview';aux.controls=false;
+                aux.setAttribute('src','https://media.invalid/synthetic-preview');Object.defineProperty(aux,'error',{get:()=>({code:4})});
+                const aside=root.createElement('aside');root.body.append(aside);aside.append(aux);
+                player.className='';doc.body.append(player);doc.querySelector('.video-js')?.remove();
+                const ui=doc.createElement('section');ui.innerHTML=new DOMParser().parseFromString(html,'text/html').body.innerHTML;doc.body.append(ui);
+                const nested=doc.createElement('iframe');doc.body.append(nested);nested.contentDocument.body.innerHTML=ui.innerHTML;
+                window.__ordinaryWidget=nested;
+                if(variant==='unreadable')Object.defineProperty(nested,'contentDocument',{get(){throw new DOMException('Synthetic UI denial','SecurityError');}});
+                if(variant==='task')nested.className='ans-attach-online unknown-learning-task';
+                if(variant==='assessment')ui.innerHTML='<form>章节测验<input name="answer"></form>';
+                if(variant==='verification')ui.innerHTML='<form><input placeholder="验证码"></form>';
+            };
+            if(variant!=='late')window.__addOrdinaryUI();
+        },{html:permissiveUI,variant});
+    }
+    for(const kind of ['video','audio']){
+        await check(`permissive ${kind} authenticated-shaped failures reproduce on previous policy`,()=>using([outer(2),0,false,null,false,false,false,policyBaseline],async page=>{
+            await ordinaryUI(page,kind);await flush(page,42);assert.equal(await state(page),'BLOCKED');
+        }));
+        await check(`permissive ${kind} primary survives preview errors and ordinary forms/wrappers on entry and reboot`,()=>using([outer(2),0],async page=>{
+            await ordinaryUI(page,kind);await flush(page,6);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays,app._videoEl.playbackRate]),['PLAYING',1,1]);
+            await page.addScriptTag({content:source});await page.evaluate(()=>{for(const callback of [...window.__intervals.values()])callback();});await flush(page,6);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays]),['PLAYING',2]);
+        }));
+        await check(`permissive ${kind} waits for delayed media instead of rejecting initial UI`,()=>using([outer(2),0],async page=>{
+            await ordinaryUI(page,kind,'late');await flush(page,5);assert.equal(await state(page),'WAITING_STARTUP');
+            await page.evaluate(()=>{window.__installDiagnosticPlayer();window.__addOrdinaryUI();});await flush(page,6);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays]),['PLAYING',1]);
+        }));
+        await check(`permissive ${kind} unreadable widget permits playback but cannot authorize navigation`,()=>using([outer(2),0],async page=>{
+            await ordinaryUI(page,kind,'unreadable');await flush(page,6);assert.equal(await state(page),'PLAYING');
+            await page.evaluate(()=>{window.__policyClicks=0;document.querySelector('#node1 span').onclick=()=>window.__policyClicks++;const n=document.querySelector('#node0');n.querySelector('input').value='0';n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');const p=app._videoEl;p.__ended=true;p.__paused=true;p.dispatchEvent(new Event('ended'));});
+            await flush(page,3);assert.deepEqual(await page.evaluate(()=>[app._state,window.__policyClicks]),['BLOCKED',0]);
+        }));
+        for(const variant of ['task','assessment','verification'])await check(`permissive ${kind} still refuses independent ${variant}`,()=>using([outer(2),0],async page=>{
+            await ordinaryUI(page,kind,variant);await flush(page,6);assert.equal(await state(page),'BLOCKED');
+            assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),0);
+        }));
+        await check(`permissive ${kind} dynamic UI frames do not replace the active player or restart playback`,()=>using([outer(2),0],async page=>{
+            await ordinaryUI(page,kind);await flush(page,6);
+            const generation=await page.evaluate(()=>app._generation);
+            await page.evaluate(()=>{const p=app._videoEl,doc=p.ownerDocument,f=doc.createElement('iframe');doc.body.append(f);f.contentDocument.body.innerHTML='<form><input name="ui-search"></form>';f.dispatchEvent(new Event('load'));app._checkVideoStatus();});
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays,app._generation]),['PLAYING',1,generation]);
+        }));
+    }
+    await check('permissive competing primary playback stops automation rather than controlling two players',()=>using([outer(2),2],async page=>{
+        assert.equal(await state(page),'PLAYING');
+        await page.evaluate(()=>{const other=app._videoEl.ownerDocument.querySelectorAll('video')[1];other.__paused=false;app._checkVideoStatus();});
+        assert.equal(await state(page),'BLOCKED');assert.deepEqual(await page.evaluate(()=>[...document.querySelector('iframe').contentDocument.querySelectorAll('video')].map(p=>p.__plays)),[1,0]);
+    }));
+    await check('permissive visible independent audio player is not mistaken for an idle preview',()=>using([outer(2),1],async page=>{
+        await page.evaluate(()=>{const doc=app._videoEl.ownerDocument,a=doc.createElement('audio');a.controls=true;doc.body.append(a);app.play();});
+        assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._discoverMedia().reasons.includes('unknown-independent-media')),true);
+    }));
+    await check('permissive hidden native audio with an independent visible player UI still blocks',()=>using([outer(2),1],async page=>{
+        await page.evaluate(()=>{const doc=app._videoEl.ownerDocument,ui=doc.createElement('div');ui.className='video-js';ui.innerHTML='<audio id="unknown-task-audio" style="display:none"></audio><div>Independent audio controls</div>';doc.body.append(ui);app.play();});
+        assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._discoverMedia().reasons.includes('unknown-independent-media')),true);
+    }));
+    await check('permissive inactive preview with errors does not discard the pending fifth PDF',()=>using([outer(2),0],async page=>{
+        await attachments(page);await page.evaluate(()=>{const a=document.querySelector('iframe').contentDocument.querySelector('audio');a.controls=false;a.className='preview';a.setAttribute('src','https://media.invalid/synthetic-preview');Object.defineProperty(a,'error',{get:()=>({code:4})});});
+        for(let i=0;i<4;i++){await page.evaluate(i=>{const p=window.__attachmentVideos[i];p.__ended=true;p.__paused=true;p.dispatchEvent(new Event('ended'));},i);await flush(page,2);}
+        assert.equal(await state(page),'PAUSED_AUTOMATION');assert.equal(await page.evaluate(()=>app._discoverMedia().tasks[4].status),'pending');
+        assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+    }));
     for(const kind of ['video','audio']){
         await check(`auxiliary error ${kind} baseline reproduces code 4 not-idle rejection`,()=>using([outer(2),0,false,null,false,false,false,auxiliaryErrorBaseline],async page=>{
             await diagnosticLesson(page,kind);await auxiliaryError(page);await flush(page,4);
@@ -279,33 +351,35 @@ try {
             assert.deepEqual(await page.evaluate(()=>{const a=window.__errorAux;return[a.paused,a.autoplay,a.seeking,a.currentTime,a.error?.code??null];}),[true,false,false,0,code]);
             assert.ok(await page.evaluate(()=>!app._discoverMedia().reasons.some(reason=>['unclassified-audio','auxiliary-audio-not-idle'].includes(reason))));
         }));
-        for(const variant of ['active','visible','duplicate','seeking','autoplay','progress','controls','class','parent','unknown-id','nested','src','empty-src','source-child','current-src','stream','unobservable-src','primary-error','missing-primary'])await check(`auxiliary error ${kind} refuses ${variant}`,()=>using([outer(2),0],async page=>{
+        for(const variant of ['active','visible','duplicate','seeking','autoplay','progress','controls','class','parent','unknown-id','nested','src','empty-src','source-child','current-src','stream','unobservable-src','primary-error','missing-primary'])await check(`auxiliary error ${kind} policy for ${variant}`,()=>using([outer(2),0],async page=>{
             await diagnosticLesson(page,kind);await auxiliaryError(page,variant);await flush(page,42);
-            assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),0);
+            const blocked=['active','seeking','autoplay','primary-error','missing-primary'].includes(variant);
+            assert.equal(await state(page),blocked?'BLOCKED':'PLAYING');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),blocked?0:1);
             assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
             if(['src','empty-src','source-child','current-src','stream','unobservable-src'].includes(variant)){
-                assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-error-source-unverified')));
+                assert.equal(await page.evaluate(()=>app._discoverMedia().unsupported),false); // Inactive previews no longer require source classification.
                 assert.ok(await page.evaluate(()=>!app._discoverMedia().reasons.includes('auxiliary-audio-not-idle')));
             }
             if(variant==='primary-error')assert.ok(await page.evaluate(kind=>app._discoverMedia().reasons.includes(`${kind}-player-error`),kind));
         }));
-        for(const code of [0,1,2,3,5])await check(`auxiliary error ${kind} rejects unsupported code ${code}`,()=>using([outer(2),0],async page=>{
+        for(const code of [0,1,2,3,5])await check(`auxiliary error ${kind} inactive preview code ${code} is nonblocking`,()=>using([outer(2),0],async page=>{
             await diagnosticLesson(page,kind);await auxiliaryError(page,'',code);await flush(page,4);
-            assert.equal(await state(page),'BLOCKED');assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-error-unsupported-code')));
+            assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.__errorAux.__plays),0);
         }));
     }
-    await check('auxiliary error secondary audio code 4 is not exempted',()=>using([outer(2),0],async page=>{
-        await diagnosticLesson(page,'audio');await auxiliaryError(page,'secondary-error');await flush(page,4);assert.equal(await state(page),'BLOCKED');
+    await check('auxiliary error inactive secondary code 4 does not become a playable task',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'audio');await auxiliaryError(page,'secondary-error');await flush(page,4);assert.equal(await state(page),'PLAYING');
+        assert.equal(await page.evaluate(()=>app._discoverMedia().audios.length),1);
     }));
     await check('auxiliary error legacy ordinary video applies the same root error boundary',()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'video');await auxiliaryError(page,'legacy');await flush(page,4);assert.equal(await state(page),'PLAYING');
         await page.evaluate(()=>{const a=window.__errorAux;Object.defineProperty(a,'error',{get:()=>({code:2})});app.play();});
-        assert.equal(await state(page),'BLOCKED');
+        assert.equal(await state(page),'PLAYING'); // An idle preview error is advisory even on the legacy-shaped single-media page.
     }));
-    await check('auxiliary error code 4 source changes are revalidated after playback starts',()=>using([outer(2),0],async page=>{
+    await check('auxiliary error source changes on an inactive preview do not stop the primary',()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'video');await auxiliaryError(page);await flush(page,4);assert.equal(await state(page),'PLAYING');
         await page.evaluate(()=>{window.__errorAux.setAttribute('src','');app._checkVideoStatus();});
-        assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+        assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
     }));
     for(const kind of ['video','audio'])await check(`auxiliary error ${kind} real-player failure cannot turn ended into completion`,()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,kind);await auxiliaryError(page);await flush(page,4);assert.equal(await state(page),'PLAYING');
@@ -332,26 +406,28 @@ try {
             await page.evaluate(()=>window.__installDiagnosticPlayer());await flush(page,4);
             assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays]),['PLAYING',1]);
         }));
-        for(const variant of ['independent-form','wrong-target','named-control','object','embed','canvas','unknown-media','duplicate-player','aux-active','aux-visible','aux-duplicate','aux-controls','aux-class','aux-parent','inaccessible']) await check(`diagnostic ${kind} still blocks ${variant}`,()=>using([outer(2),0],async page=>{
+        for(const variant of ['independent-form','wrong-target','named-control','object','embed','canvas','unknown-media','duplicate-player','aux-active','aux-visible','aux-duplicate','aux-controls','aux-class','aux-parent','inaccessible']) await check(`diagnostic ${kind} permissive discovery policy for ${variant}`,()=>using([outer(2),0],async page=>{
             await diagnosticLesson(page,kind,variant,false);await flush(page,42);
-            assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers.reduce((n,p)=>n+p.__plays,0)),0);
+            const blocked=['duplicate-player','aux-active','inaccessible'].includes(variant)||(kind==='audio'&&variant==='unknown-media');
+            assert.equal(await state(page),blocked?'BLOCKED':'PLAYING');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers.reduce((n,p)=>n+p.__plays,0)),blocked?0:1);
         }));
         await check(`diagnostic ${kind} missing player has a bounded stop`,()=>using([outer(2),0],async page=>{
             await diagnosticLesson(page,kind,'missing');await flush(page,42);assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._timers.size),0);
         }));
     }
-    await check('diagnostic auxiliary rejection reports observed predicate failures without relaxing them',()=>using([outer(2),0],async page=>{
+    await check('diagnostic inactive auxiliary controls are not task-ownership requirements',()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'video','aux-controls',false);
-        assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-controls')));
+        assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>app._discoverMedia().unsupported),false);
         assert.equal(await page.evaluate(()=>app._discoverMedia().rawAudios.length),1);
     }));
-    for(const variant of ['inactive-player','secondary-active','secondary-visible','disabled'])await check(`diagnostic native audio ${variant} is not autoplayed`,()=>using([outer(2),0],async page=>{
+    for(const variant of ['inactive-player','secondary-active','secondary-visible','disabled'])await check(`diagnostic native audio UI/feature policy: ${variant}`,()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'audio',variant,false);
-        assert.equal(await state(page),variant==='disabled'?'PAUSED_AUTOMATION':'BLOCKED');
-        assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),0);
+        const expected=variant==='disabled'?'PAUSED_AUTOMATION':variant==='secondary-active'?'BLOCKED':'PLAYING';
+        assert.equal(await state(page),expected);
+        assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),expected==='PLAYING'?1:0);
     }));
-    await check('diagnostic video rejects an action-bearing form even inside its control bar',()=>using([outer(2),0],async page=>{
-        await diagnosticLesson(page,'video','form-action',false);assert.equal(await state(page),'BLOCKED');
+    await check('diagnostic ordinary UI form does not block playback or get submitted',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'video','form-action',false);assert.equal(await state(page),'PLAYING');
     }));
     await check('diagnostic mixed audio/video preserves raw media and ordered tasks but refuses unknown coordination',()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'audio','',false);
@@ -440,8 +516,9 @@ try {
         await audioLesson(page, '', true); await flush(page,3);
         assert.equal(await state(page), 'PLAYING'); assert.equal(await page.evaluate(() => window.__audio.__plays),1);
     }));
-    for (const variant of ['secondary-playing','secondary-visible','unknown','no-ui','duplicate','aux-playing','unknown-frame','inaccessible']) await check(`audio refuses ${variant}`, () => using([outer(2),0], async page => {
-        await audioLesson(page,variant); assert.equal(await state(page),'BLOCKED'); assert.equal(await page.evaluate(() => window.__audio.__plays),0);
+    for (const variant of ['secondary-playing','secondary-visible','unknown','no-ui','duplicate','aux-playing','unknown-frame','inaccessible']) await check(`audio single-media policy for ${variant}`, () => using([outer(2),0], async page => {
+        await audioLesson(page,variant);if(variant==='inaccessible')await flush(page,42);const blocked=['secondary-playing','duplicate','aux-playing','inaccessible'].includes(variant);
+        assert.equal(await state(page),blocked?'BLOCKED':'PLAYING'); assert.equal(await page.evaluate(() => window.__audio.__plays),blocked?0:1);
     }));
     await check('audio switch disables playback and new delay categories are independently configured', () => using([outer(2),0], async page => {
         await audioLesson(page,'disabled'); assert.equal(await state(page),'PAUSED_AUTOMATION');
@@ -565,8 +642,8 @@ try {
         assert.equal(await page.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('audio').paused), true);
     }));
     for (const variant of ['unknown', 'inaccessible', 'extra', 'audio', 'sibling']) await check(`multi-attachment rejects ${variant}`, () => using([outer(2), 0], async page => {
-        await attachments(page, variant); assert.equal(await state(page), 'BLOCKED');
-        assert.equal(await page.evaluate(() => window.__attachmentVideos.reduce((n, v) => n + v.__plays, 0)), 0);
+        await attachments(page, variant); assert.equal(await state(page), variant==='audio'?'PLAYING':'BLOCKED');
+        assert.equal(await page.evaluate(() => window.__attachmentVideos.reduce((n, v) => n + v.__plays, 0)), variant==='audio'?1:0);
     }));
     await check('multi-attachment replacement invalidates completion and enabled unknown PDF stays unfinished', () => using([outer(2), 0], async page => {
         await attachments(page);
@@ -695,10 +772,11 @@ try {
         assert.equal(await bootRuns(page), 1);
     }));
     for (const variant of ['visible-inactive', 'playing-inactive', 'no-active-player', 'unknown-audio', 'unknown-leaf', 'wrapper-form', 'inaccessible', 'unverified', 'unclassified-audio']) {
-        await check(`complex ownership never discards unsafe content: ${variant}`, () => using([outer(2), 2, false, `complex-${variant}`], async page => {
+        await check(`complex ownership distinguishes task boundaries from UI: ${variant}`, () => using([outer(2), 2, false, `complex-${variant}`], async page => {
             await page.evaluate(() => { app.taskAdapter = window.__ownershipAdapter; app.run(); });
-            assert.equal(await state(page), 'BLOCKED');
-            assert.deepEqual(await page.evaluate(() => window.__complexVideos.map(v => v.__plays)), [0, 0]);
+            const uiOnly=['unknown-audio','wrapper-form','unclassified-audio'].includes(variant);
+            assert.equal(await state(page),uiOnly?'PLAYING':'BLOCKED');
+            assert.deepEqual(await page.evaluate(() => window.__complexVideos.map(v => v.__plays)),uiOnly?[1,0]:[0,0]);
         }));
     }
     await check('complex ownership loss stops old callbacks rather than switching players', () => using([outer(2), 2, false, 'complex-normal'], async page => {
@@ -919,7 +997,9 @@ try {
     }));
     for (const variant of ['match', 'id', 'visible', 'playing', 'duplicate', 'no-video', 'nested', 'class', 'controls', 'parent', 'progress', 'autoplay', 'seeking', 'extra-video', 'extra-frame', 'unknown-leaf', 'other-audio', 'inaccessible']) {
         await check(`audition audio structural classification: ${variant}`, () => using([outer(2), 1, false, `audition-${variant}`], async page => {
-            assert.equal(await state(page), variant === 'match' ? 'PLAYING' : 'BLOCKED');
+            if(variant==='no-video')await flush(page,45);
+            const blocked=['playing','autoplay','seeking','extra-video','no-video'].includes(variant);
+            assert.equal(await state(page),blocked?'BLOCKED':'PLAYING');
             if (variant === 'unknown-leaf') await page.evaluate(() => {
                 const root = document.querySelector('iframe').contentDocument;
                 const leaf = root.querySelector('iframe').contentDocument.querySelector('iframe').contentDocument;
@@ -929,7 +1009,8 @@ try {
             if (variant === 'match') {
                 assert.deepEqual(media, { videos: 1, documents: 3, unsupported: false, inaccessible: false });
                 assert.equal(await page.evaluate(() => app._videoEl.playbackRate), 1);
-            } else assert.equal(media.unsupported || media.inaccessible, true);
+            } else if(blocked)assert.equal(media.unsupported || media.inaccessible || await page.evaluate(()=>app._discoverMedia().pending), true);
+            else assert.equal(media.unsupported || media.inaccessible,false);
             assert.equal(await page.evaluate(() => document.querySelector('#node0 input').value), '1');
         }));
     }
@@ -958,8 +1039,8 @@ try {
             const html = readFileSync(new URL(`../fixtures/private/sample-${String(i).padStart(2, '0')}.html`, import.meta.url), 'utf8');
             await using([html, 0], async page => {
                 assert.equal(await page.evaluate(() => app.cellData.nCells), 1);
-                assert.equal(await state(page), [3, 7].includes(i) ? 'BLOCKED' : 'LOADING');
-                await flush(page, 12);
+                assert.ok([3,7].includes(i)?await state(page)==='BLOCKED':['LOADING','WAITING_STARTUP'].includes(await state(page)));
+                await flush(page, 45);
                 assert.equal(await state(page), 'BLOCKED');
                 assert.equal(await page.evaluate(() => app._timers.size), 0);
             });
@@ -1012,13 +1093,13 @@ try {
         const result = await page.evaluate(() => { const old = app._videoEl; old.remove(); return app._getVideoEl() === old; });
         assert.equal(result, false);
     }));
-    await check('synthetic in-task cross-origin-like inaccessible iframe: safe block', () => using([], async page => {
+    await check('synthetic inaccessible unmarked widget permits playback but not navigation', () => using([], async page => {
         await page.evaluate(() => { const f = document.createElement('iframe'); document.querySelector('iframe[info="card"]').contentDocument.body.append(f); Object.defineProperty(f, 'contentDocument', { get() { throw new DOMException('denied', 'SecurityError'); } }); app.play(); });
-        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await state(page), 'PLAYING');assert.equal(await page.evaluate(()=>app._discoverMedia().navigationSafe),false);
     }));
-    await check('synthetic audio mixed with video: unsupported safe block', () => using([], async page => {
+    await check('synthetic inert empty audio beside video is not a competing task', () => using([], async page => {
         await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.append(document.createElement('audio')); app.play(); });
-        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await state(page), 'PLAYING');
     }));
     await check('synthetic unknown content never auto-skips', () => using([outer(2, false, 'Unknown resource'), 0], async page => {
         await page.evaluate(() => { app.configs.autoAdvanceNoVideo = true; });
@@ -1099,9 +1180,9 @@ try {
         await page.evaluate(() => { document.querySelector('.jobUnfinishCount').value = '0'; const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
         await flush(page, 12); assert.equal(await state(page), 'BLOCKED');
     }));
-    await check('synthetic unknown iframe alongside video stops', () => using([], async page => {
+    await check('synthetic unmarked text iframe alongside video is UI rather than an inferred task', () => using([], async page => {
         await page.evaluate(() => { const f = document.createElement('iframe'); document.querySelector('iframe').contentDocument.body.append(f); f.contentDocument.body.textContent = 'Unknown resource'; app.play(); });
-        assert.equal(await state(page), 'BLOCKED');
+        assert.equal(await state(page), 'PLAYING');
     }));
     await check('synthetic user changes chapter before old completion', () => using([outer(2, true)], async page => {
         await page.evaluate(() => { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); const v = app._videoEl; v.__ended = true; v.dispatchEvent(new Event('ended')); });
@@ -1210,7 +1291,7 @@ try {
         }));
     }
     for (const kind of ['audio', 'unknown', 'inaccessible']) {
-        await check(`synthetic selected task ${kind} still blocks with auxiliary frames present`, () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
+        await check(`synthetic unmarked ${kind} UI does not block the selected primary`, () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
             assert.equal(await state(page), 'PLAYING');
             await page.evaluate(kind => {
                 const doc = document.querySelector('iframe[info="card"]').contentDocument;
@@ -1222,8 +1303,9 @@ try {
                 }
                 app.play();
             }, kind);
-            assert.equal(await state(page), 'BLOCKED');
-            assert.equal(await page.evaluate(() => app._isPlaying), false);
+            assert.equal(await state(page), 'PLAYING');
+            assert.equal(await page.evaluate(() => app._isPlaying), true);
+            if(kind==='inaccessible')assert.equal(await page.evaluate(()=>app._discoverMedia().navigationSafe),false);
         }));
     }
     await check('synthetic inaccessible selected cards root blocks', () => using([scopeOuter, 1, true, 'normal-aux'], async page => {
@@ -1320,7 +1402,7 @@ try {
                 if (cancel === 'chapter') { document.querySelector('#node0').classList.remove('posCatalog_active'); document.querySelector('#node1').classList.add('posCatalog_active'); }
                 if (cancel === 'title') document.querySelector('.prev_title').title = 'Unknown resource';
                 if (cancel === 'pagehide' || cancel === 'popstate') window.dispatchEvent(new Event(cancel));
-                if (cancel === 'unsupported-task') document.querySelector('iframe').contentDocument.body.append(document.createElement('audio'));
+                if (cancel === 'unsupported-task') {const task=document.createElement('div');task.className='ans-attach-online unknown-task';document.querySelector('iframe').contentDocument.body.append(task);}
                 if (cancel === 'player-replacement') app._videoEl.remove();
                 if (cancel === 'target-removal') document.querySelector('#node1').remove();
                 if (cancel === 'assessment') document.querySelector('.prev_title').title = '章节测验';
@@ -1448,6 +1530,7 @@ try {
     }));
     await check('synthetic unsupported document viewers stay stopped without an adapter', () => using([outer(), 0], async page => {
         await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.textContent = 'Unknown viewer'; app.run(); });
+        await flush(page,45); // No player is retried within the bounded loading window, never skipped.
         assert.equal(await state(page), 'BLOCKED');
     }));
     const assessmentPage = (assessment = '章节测验', priorComplete = true, includeNextChapter = true) =>
@@ -1746,6 +1829,7 @@ try {
     }));
     await check('synthetic live-like page without an evidence adapter never opens a window', () => using(liveOptions, async page => {
         await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.innerHTML = '<a target="_blank" href="https://course.test/live">Synthetic lecture</a>'; window.open = () => { throw new Error('Unrecognized task opened a window'); }; app.run(); });
+        await flush(page,45);
         assert.equal(await state(page), 'BLOCKED'); assert.equal(await page.evaluate(() => app.taskAdapter), null);
     }));
     await check('synthetic duplicate child installation keeps one player and one session listener', () => using(liveOptions, async page => {

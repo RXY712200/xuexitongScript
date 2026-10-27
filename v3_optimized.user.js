@@ -90,319 +90,143 @@
         },
     };
     const videoAdapter = {
-        audioInventory({ root = this.cardDocument(), path = [this.cardFrame()], courseRoot = root, potential = false } = {}) {
-            const frame = this.cardFrame();
-            if (!root) return null;
-            const docs = [], lineage = new Map(); let inaccessible = false;
-            const visit = (doc, path) => {
-                if (!doc || docs.includes(doc)) { inaccessible = true; return; }
-                docs.push(doc); lineage.set(doc, path);
-                for (const child of doc.querySelectorAll('iframe')) {
-                    try { if (path.length >= 4) inaccessible = true; else visit(child.contentDocument, [...path, child]); }
-                    catch (_) { inaccessible = true; }
-                }
-            };
-            visit(root, path);
-            const primary = docs.flatMap(doc => Array.from(doc.querySelectorAll('audio#audio_html5_api.vjs-tech')));
-            if (!primary.length && !potential) return null;
-            const result = { videos: [], audios: [], documents: docs, tasks: [], reasons: [], unsupported: false, inaccessible };
-            const block = reason => { result.unsupported = true; result.reasons.push(reason); };
-            result.rawAudios = docs.flatMap(doc => Array.from(doc.querySelectorAll('audio')));
-            result.videos = docs.flatMap(doc => Array.from(doc.querySelectorAll('video')));
-            if (result.rawAudios.filter(audio => audio.id === 'audio_html5_api').length > 1) block('ambiguous-audio-player');
-            if (!primary.length) {
-                result.pending = true; result.reasons.push('audio-player-not-ready');
-                for (const inner of docs) for (const reason of this.controlReasons(inner, [])) block(reason);
-                if (result.rawAudios.some(audio => !['audio_html5_api', 'audio1_html5_white'].includes(audio.id))) block('unclassified-audio');
-                if (result.videos.length) block('video-in-audio-attachment');
-                if (inaccessible) block('inaccessible-task-frame');
-                return result;
-            }
-            const audio = primary[0], doc = audio.ownerDocument, node = catalog.current(), wrapper = audio.closest('.video-js');
-            if (primary.some(player => player.error)) block('audio-player-error');
-            if (primary.length !== 1 || !node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1 ||
-                !audio.isConnected || !wrapper?.isConnected || !wrapper.getClientRects().length ||
-                !lineage.get(doc)?.every(owner => owner?.isConnected && !owner.hidden && !owner.inert && owner.getClientRects().length) ||
-                wrapper.querySelectorAll('audio').length !== 1 || !wrapper.querySelector('.vjs-control-bar')?.getClientRects().length) block('unverified-audio-player');
-            const allAudio = docs.flatMap(inner => Array.from(inner.querySelectorAll('audio')));
-            const secondary = allAudio.filter(el => el.id === 'audio1_html5_white');
-            for (const el of allAudio) {
-                if (el === audio) continue;
-                if (this.auxiliaryAudio(el, courseRoot) && allAudio.filter(other => other.id === 'auditionAudio').length === 1) continue;
-                const container = el.closest('#audio1_html5, .audio1_html5');
-                if (el.id === 'audio1_html5_white' && secondary.length === 1 && el.ownerDocument === doc && container && container !== wrapper &&
-                    container.querySelectorAll('audio, video').length === 1 && !container.getClientRects().length &&
-                    el.paused && !el.autoplay && !el.seeking && el.currentTime === 0 && !el.error) continue;
-                block('unclassified-audio');
-            }
-            for (const inner of docs) {
-                if (inner.querySelector('video')) block('video-in-audio-attachment');
-                for (const reason of this.controlReasons(inner, primary)) block(reason);
-                if (inner !== doc) {
-                    const body = inner.body?.cloneNode(true);
-                    body?.querySelectorAll('script, style, iframe, audio').forEach(el => el.remove());
-                    if (!body || body.textContent.trim() || body.querySelector('img, button, a')) block('unknown-leaf-content');
-                }
-            }
-            if (inaccessible) block('inaccessible-task-frame');
-            result.audios.push(audio);
-            result.tasks.push({ kind: 'audio', attachment: lineage.get(doc)?.[1] || wrapper, element: audio, media: audio,
-                document: doc, documents: docs, lineage: lineage.get(doc), lesson: { id: node?.id, node, root: courseRoot, frame }, position: 0, status: 'pending' });
-            return result;
-        },
-        attachmentInventory() {
-            const frame = this.cardFrame(), root = this.cardDocument();
-            if (!root || !root.querySelector('iframe.ans-attach-online')) return null;
-            const result = { videos: [], audios: [], rawAudios: Array.from(root.querySelectorAll('audio')), tasks: [], documents: [root], unsupported: false, inaccessible: false, reasons: [] };
-            const reject = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
-            const node = catalog.current();
-            const lesson = { id: node?.id, node, root, frame };
-            if (!node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1) reject('unverified-attachment-lesson');
-            const attachments = Array.from(root.querySelectorAll('iframe'));
-            const rootAudio = Array.from(root.querySelectorAll('audio'));
-            if (root.querySelector('video, object, embed, form')) reject('unknown-root-task');
-            if (rootAudio.length && !(rootAudio.length === 1 && this.auxiliaryAudio(rootAudio[0], root))) {
-                reject('unclassified-audio');
-                if (rootAudio.length !== 1) reject('ambiguous-root-audio');
-                else for (const reason of this.auxiliaryAudioReasons(rootAudio[0], root)) reject(reason);
-            }
-            const seen = new Set([root]);
-            for (const attachment of attachments) {
-                const video = attachment.classList.contains('ans-insertvideo-online');
-                const pdf = attachment.classList.contains('insertdoc-online-pdf');
-                const audio = attachment.classList.contains('ans-insertaudio');
-                if (!attachment.classList.contains('ans-attach-online') || [video, pdf, audio].filter(Boolean).length !== 1 || !attachment.isConnected ||
-                    attachment.hidden || attachment.inert || !attachment.getClientRects().length) { reject('unknown-attachment'); continue; }
-                if (audio) {
-                    let doc; try { doc = attachment.contentDocument; } catch (_) { /* No inaccessible fallback. */ }
-                    if (!doc) { result.inaccessible = true; reject('inaccessible-task-frame'); continue; }
-                    const inventory = this.audioInventory({ root: doc, path: [frame, attachment], courseRoot: root, potential: true });
-                    for (const inner of inventory.documents) {
-                        if (seen.has(inner)) reject('duplicate-attachment-document');
-                        seen.add(inner); result.documents.push(inner);
-                    }
-                    result.audios.push(...inventory.audios); result.videos.push(...inventory.videos); result.rawAudios.push(...inventory.rawAudios);
-                    result.inaccessible ||= inventory.inaccessible;
-                    result.pending ||= inventory.pending;
-                    for (const reason of inventory.reasons) {
-                        if (inventory.unsupported) reject(reason); else if (!result.reasons.includes(reason)) result.reasons.push(reason);
-                    }
-                    const primary = inventory.audios.length === 1 ? inventory.audios[0] : null;
-                    result.tasks.push({ kind: 'audio', attachment, element: primary, media: primary, document: primary?.ownerDocument || doc,
-                        documents: inventory.documents, lineage: inventory.tasks[0]?.lineage || [frame, attachment], lesson, position: result.tasks.length, status: 'pending' });
-                    continue;
-                }
-                const media = [], documents = [], lineages = new Map();
-                const visit = (owner, lineage) => {
-                    let doc;
-                    try { doc = owner.contentDocument; } catch (_) { /* Inaccessible task stays blocked. */ }
-                    if (!doc) { result.inaccessible = true; reject('inaccessible-task-frame'); return; }
-                    if (seen.has(doc)) { reject('duplicate-attachment-document'); return; }
-                    seen.add(doc); documents.push(doc); result.documents.push(doc); lineages.set(doc, lineage);
-                    result.rawAudios.push(...doc.querySelectorAll('audio'));
-                    if (lineage.length >= 4 && doc.querySelector('iframe')) { reject('task-depth-limit'); return; }
-                    const supported = Array.from(doc.querySelectorAll('video[id*="video_html5"]'));
-                    media.push(...supported);
-                    if (supported.some(player => player.error)) reject('video-player-error');
-                    if (doc.querySelector('audio, video:not([id*="video_html5"])')) reject('unknown-attachment-media');
-                    for (const reason of this.controlReasons(doc, supported)) { reject('unknown-attachment-content'); reject(reason); }
-                    if (video && !supported.length) {
-                        const body = doc.body?.cloneNode(true);
-                        body?.querySelectorAll('script, style, iframe').forEach(el => el.remove());
-                        if (!body || body.textContent.trim() || body.querySelector('img, button, a')) reject('unknown-leaf-content');
-                    }
-                    for (const nested of doc.querySelectorAll('iframe')) visit(nested, [...lineage, nested]);
-                };
-                visit(attachment, [frame, attachment]);
-                if (video && !media.length) { result.pending = true; result.reasons.push('video-player-not-ready'); }
-                else if (video && (media.length !== 1 || !media[0]?.isConnected)) reject('ambiguous-attachment-player');
-                if (pdf && media.length) reject('media-in-document-attachment');
-                const element = video ? media[0] : null;
-                result.tasks.push({ kind: video ? 'video' : 'document', attachment, element, media: element,
-                    document: element?.ownerDocument || documents[0], documents, lineage: element ? lineages.get(element.ownerDocument) : [frame, attachment],
-                    lesson, position: result.tasks.length, status: 'pending' });
-                if (element) result.videos.push(element);
-            }
-            if (!attachments.length) reject('missing-attachments');
-            if (result.tasks.some(task => task.kind === 'audio') && result.tasks.some(task => task.kind !== 'audio')) reject('unsupported-mixed-attachments');
-            return result;
-        },
-        controlReasons(doc, media) {
-            const reasons = [];
-            const ownedSlider = input => {
-                const wrapper = input.closest('.video-js'), bar = input.closest('.vjs-control-bar');
-                const player = media.length === 1 && media[0];
-                return player && player.ownerDocument === doc && player.isConnected && wrapper && bar && wrapper.contains(bar) &&
-                    wrapper.contains(player) && wrapper.querySelectorAll('video, audio').length === 1 &&
-                    input.type === 'range' && !input.name && !input.hasAttribute('form') &&
-                    input.getAttribute('aria-controls') === player.id && player.id &&
-                    Array.from(doc.querySelectorAll('[id]')).filter(el => el.id === player.id).length === 1;
-            };
-            for (const element of doc.querySelectorAll('form, input, object, embed, canvas')) {
-                if (element.tagName === 'INPUT' && ownedSlider(element)) continue;
-                if (element.tagName === 'FORM' && element.closest('.vjs-control-bar') &&
-                    !['action', 'method', 'target', 'name', 'id', 'onsubmit'].some(key => element.hasAttribute(key)) &&
-                    element.elements.length > 0 && Array.from(element.elements).every(ownedSlider) &&
-                    !element.querySelector('a, object, embed, canvas, iframe, video, audio')) continue;
-                reasons.push(`unverified-player-${element.tagName.toLowerCase()}`);
-            }
-            return [...new Set(reasons)];
-        },
-        auxiliaryAudioReasons(audio, root) {
-            const checks = {
-                'auxiliary-audio-identity': audio?.ownerDocument === root && audio.id === 'auditionAudio' && root.querySelectorAll('[id="auditionAudio"]').length === 1,
-                'auxiliary-audio-class': audio?.className === '',
-                'auxiliary-audio-parent': audio?.parentElement?.tagName === 'DIV',
-                'auxiliary-audio-controls': audio?.controls === true,
-                'auxiliary-audio-visible-or-detached': audio?.isConnected && audio.getClientRects().length === 0,
-                'auxiliary-audio-not-idle': audio?.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0,
-            };
-            return [...Object.entries(checks).filter(([, valid]) => !valid).map(([reason]) => reason),
-                ...[this.auxiliaryAudioErrorReason(audio, root)].filter(Boolean)];
-        },
-        auxiliaryAudioErrorReason(audio, root) {
-            try {
-                if (!audio.error) return null;
-                if (audio.error.code !== 4) return 'auxiliary-audio-error-unsupported-code';
-                if (root !== this.cardDocument()) return 'auxiliary-audio-error-root-unverified';
-                // Code 4 is not a general media-error exemption. Source values were
-                // not observed on the authenticated page; verify them locally now.
-                if (audio.getAttribute('src') !== null || audio.currentSrc !== '' || audio.srcObject !== null || audio.querySelector('source')) {
-                    return 'auxiliary-audio-error-source-unverified';
-                }
-                return null;
-            } catch (_) { return 'auxiliary-audio-error-source-unverified'; }
-        },
-        auxiliaryAudio(audio, root) {
-            return audio?.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
-                audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
-                audio.isConnected && audio.controls && audio.getClientRects().length === 0 && audio.paused &&
-                !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !this.auxiliaryAudioErrorReason(audio, root);
-        },
         cardFrame() {
-            const cards = document.querySelectorAll('iframe[info="card"], iframe[src*="/knowledge/cards"]');
-            return cards.length === 1 ? cards[0] : null;
+            const frames = document.querySelectorAll('iframe[info="card"], iframe[src*="/knowledge/cards"]');
+            return frames.length === 1 ? frames[0] : null;
         },
         cardDocument() {
             try { return this.cardFrame()?.contentDocument || null; } catch (_) { return null; }
         },
         discover(knownDocuments = new Set(), selection = null) {
-            const inventory = this.attachmentInventory();
-            if (inventory) return inventory;
-            const audio = this.audioInventory();
-            if (audio) return audio;
-            const result = { videos: [], inaccessible: false, unsupported: false, documents: [], reasons: [] };
-            const seen = new Set();
-            const audios = [];
-            const branches = new Map();
+            const result = { videos: [], audios: [], rawAudios: [], documents: [], reasons: [],
+                unsupported: false, inaccessible: false, pending: false, navigationSafe: true };
             const block = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
-            const visit = (doc, depth, branch = null) => {
-                if (!doc || seen.has(doc)) return;
-                seen.add(doc);
-                branches.set(doc, branch);
-                result.documents.push(doc);
-                result.videos.push(...doc.querySelectorAll('video#video_html5_api, video[id*="video_html5"]'));
-                audios.push(...doc.querySelectorAll('audio'));
-                if (doc.querySelector('video:not([id*="video_html5"])')) block('unknown-video');
-                if (depth > 0 && !knownDocuments.has(doc) && !doc.querySelector('video, iframe')) {
-                    const body = doc.body?.cloneNode(true);
-                    body?.querySelectorAll('script, style').forEach(node => node.remove());
-                    if (body?.textContent.trim() || body?.querySelector('form, input, object, embed, canvas, img')) {
-                        block('unknown-leaf-content');
-                    }
+            const uncertain = reason => { result.navigationSafe = false; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
+            const frame = this.cardFrame(), root = this.cardDocument(), node = catalog.current();
+            if (!frame) { block('nonunique-course-frame'); return result; }
+            if (!root) { result.inaccessible = true; return result; }
+            const uniqueLesson = node?.id && Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length === 1;
+            const frames = Array.from(root.querySelectorAll('iframe'));
+            const kindOf = owner => {
+                const kinds = [['video','ans-insertvideo-online'],['audio','ans-insertaudio'],['document','insertdoc-online-pdf']]
+                    .filter(([, name]) => owner.classList.contains(name));
+                return kinds.length === 1 && owner.classList.contains('ans-attach-online') ? kinds[0][0] : null;
+            };
+            const attachments = frames.filter(owner => owner.classList.contains('ans-attach-online'));
+            const multi = attachments.length > 1 || !!selection;
+            const seen = new Set(), paths = new Map(), branches = new Map(), candidates = [], allMedia = [];
+            const active = media => (!media.paused && !media.ended) || media.seeking || (media.autoplay && !media.ended);
+            const visible = element => element.getClientRects().length > 0 && !element.hidden && !element.inert && element.getAttribute('aria-hidden') !== 'true';
+            const visit = (doc, path, branch = null) => {
+                if (!doc || seen.has(doc)) { block('duplicate-task-document'); return; }
+                seen.add(doc); result.documents.push(doc); paths.set(doc, path); branches.set(doc, branch);
+                const media = Array.from(doc.querySelectorAll('video, audio')); allMedia.push(...media);
+                for (const el of media) {
+                    if ((el.tagName === 'VIDEO' && el.id.includes('video_html5')) || (el.tagName === 'AUDIO' && el.id === 'audio_html5_api')) candidates.push(el);
                 }
-                for (const frame of doc.querySelectorAll('iframe')) {
-                    try {
-                        if (depth >= 4) { block('task-depth-limit'); continue; }
-                        const inner = frame.contentDocument;
-                        if (!inner) { result.inaccessible = true; continue; }
-                        visit(inner, depth + 1, branch || frame);
-                    } catch (_) { result.inaccessible = true; }
+                // Ordinary forms/inputs/labels are UI, not evidence of an independent
+                // learning task. Explicit attachment/live boundaries still require an adapter.
+                if (!knownDocuments.has(doc)) for (const boundary of doc.querySelectorAll('.ans-attach-online, a.liveHref')) {
+                    if (boundary.tagName !== 'IFRAME' || boundary.ownerDocument !== root || !kindOf(boundary)) block('unknown-independent-task');
+                }
+                for (const form of doc.querySelectorAll('form')) {
+                    const labels = [form.textContent, ...Array.from(form.querySelectorAll('[title], [aria-label], [placeholder]')).map(el =>
+                        ['title','aria-label','placeholder'].map(attr => el.getAttribute(attr) || '').join(' '))].join(' ');
+                    const assessment = optionalAssessment(form.textContent.trim()) || (form.querySelector('[name^="answer"]') && assessmentTitle(labels));
+                    const verification = /验证码|人脸|captcha|authentication/i.test(labels) || form.querySelector('input[type="password"], input[autocomplete="one-time-code"]');
+                    if (verification || assessment) block('assessment-or-verification-required');
+                }
+                for (const child of doc.querySelectorAll('iframe')) {
+                    if (path.length >= 4) { uncertain('task-depth-limit'); if (multi || child.classList.contains('ans-attach-online')) block('task-depth-limit'); continue; }
+                    let inner; try { inner = child.contentDocument; } catch (_) { /* Unknown widgets cannot authorize navigation. */ }
+                    if (!inner) {
+                        uncertain('unreadable-task-content');
+                        if (multi || child.classList.contains('ans-attach-online')) result.inaccessible = true;
+                        continue;
+                    }
+                    visit(inner, [...path, child], branch || child);
                 }
             };
-            // Only the unique course-content frame defines task scope. Editor, popup,
-            // reporting and other outer-page frames are not learning modules.
-            const frame = this.cardFrame();
-            if (!frame) block('nonunique-course-frame');
-            else {
-                const content = this.cardDocument();
-                if (!content) result.inaccessible = true;
-                else visit(content, 1); // Keep all nested task checks and the depth bound.
-            }
-            result.videos = [...new Set(result.videos)].filter(video => video.isConnected);
-            if (result.videos.some(player => player.error)) block('video-player-error');
-            let ownership = false;
+            visit(root, [frame]);
+            result.videos = candidates.filter(el => el.tagName === 'VIDEO');
+            result.audios = candidates.filter(el => el.tagName === 'AUDIO');
+            result.rawAudios = allMedia.filter(el => el.tagName === 'AUDIO');
+            let selected = candidates;
             if (selection) {
                 try {
-                    const root = result.documents[0], roots = Array.from(root.querySelectorAll('iframe'));
-                    const active = selection.activeFrame, inactive = selection.inactiveFrames;
-                    const partition = Array.isArray(inactive) ? [active, ...inactive] : [];
-                    const activePath = video => {
-                        let doc = video.ownerDocument;
-                        while (doc !== root) {
-                            const owner = doc.defaultView?.frameElement;
-                            if (!owner || owner.hidden || owner.inert || owner.getAttribute('aria-hidden') === 'true' || !owner.getClientRects().length) return false;
-                            doc = owner.ownerDocument;
-                        }
-                        return video.getClientRects().length > 0;
-                    };
-                    const classified = result.documents.every(doc => {
-                        if (doc.querySelector('form, input, object, embed, canvas')) return false;
-                        if (doc.querySelector('video')) return true;
-                        const body = doc.body?.cloneNode(true);
-                        body?.querySelectorAll('script, style, iframe, audio').forEach(el => el.remove());
-                        return body && !body.textContent.trim() && !body.querySelector('img, button, a');
-                    });
-                    ownership = typeof selection.validateScope === 'function' && selection.validateScope() === true &&
-                        !result.inaccessible && classified && roots.length > 0 && new Set(partition).size === roots.length &&
-                        partition.length === roots.length && partition.every(owner => roots.includes(owner) && owner.isConnected) &&
-                        roots.includes(active) && !root.querySelector('video') && !active.hidden && !active.inert && active.getAttribute('aria-hidden') !== 'true' &&
-                        inactive.every(owner => owner.hidden && owner.inert && owner.getAttribute('aria-hidden') === 'true');
-                    const selected = result.videos.filter(video => branches.get(video.ownerDocument) === active);
-                    const omitted = result.videos.filter(video => branches.get(video.ownerDocument) !== active);
-                    ownership = ownership && selected.length > 0 && selected.every(activePath) &&
-                        omitted.every(video => inactive.includes(branches.get(video.ownerDocument)) && video.paused &&
-                            !video.autoplay && !video.seeking && video.currentTime === 0 && !video.error);
-                    if (ownership) result.videos = selected;
-                    else block('unverified-media-ownership');
+                    const partition = [selection.activeFrame, ...selection.inactiveFrames];
+                    const inactive = selection.inactiveFrames;
+                    const omitted = candidates.filter(el => branches.get(el.ownerDocument) !== selection.activeFrame);
+                    if (!selection.validateScope?.() || partition.length !== frames.length || new Set(partition).size !== frames.length ||
+                        !partition.every(owner => frames.includes(owner) && owner.isConnected) || !visible(selection.activeFrame) ||
+                        !inactive.every(owner => owner.hidden && owner.inert && owner.getAttribute('aria-hidden') === 'true') ||
+                        omitted.some(el => active(el) || el.currentTime !== 0 || el.error)) block('unverified-media-ownership');
+                    selected = candidates.filter(el => branches.get(el.ownerDocument) === selection.activeFrame);
+                    if (!selected.length) block('missing-owned-player');
                 } catch (_) { block('unverified-media-ownership'); }
-            } else if (new Set(result.videos.map(video => branches.get(video.ownerDocument))).size > 1) {
-                block('ambiguous-player-branches');
             }
-            if (audios.length) {
-                // This is a structural exception, not proof of auditionAudio's purpose.
-                // Decide only after the full task tree is checked; never clear a blocker.
-                let auxiliary = false;
-                try {
-                    const [root, player, leaf] = result.documents, audio = audios[0];
-                    const leafBody = leaf?.body?.cloneNode(true);
-                    leafBody?.querySelectorAll('script, style').forEach(node => node.remove());
-                    auxiliary = !result.inaccessible && !result.unsupported && result.documents.length === 3 &&
-                        audios.length === 1 && result.videos.length === 1 && audio.ownerDocument === root &&
-                        root.querySelectorAll('video').length === 0 && root.querySelectorAll('iframe').length === 1 &&
-                        root.querySelector('iframe').contentDocument === player &&
-                        player.querySelectorAll('video').length === 1 && result.videos[0].ownerDocument === player &&
-                        player.querySelectorAll('iframe').length === 1 && player.querySelector('iframe').contentDocument === leaf &&
-                        leaf.querySelectorAll('video, iframe').length === 0 &&
-                        leafBody && !leafBody.textContent.trim() && !leafBody.querySelector('form, input, object, embed, canvas, img') &&
-                        root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
-                        audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
-                        audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
-                        audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
-                    // Broader topologies require an explicit, continuously validated
-                    // ownership profile. No platform-specific profile is guessed here.
-                    if (!auxiliary && ownership) auxiliary = !result.inaccessible && !result.unsupported &&
-                        selection.auxiliaryAudio === audio &&
-                        audios.length === 1 && audio.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
-                        audio.id === 'auditionAudio' && audio.className === '' && audio.parentElement?.tagName === 'DIV' &&
-                        audio.isConnected && audio.controls && audio.getClientRects().length === 0 &&
-                        audio.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0;
-                } catch (_) { /* Unverifiable context keeps audio unsupported. */ }
-                const errorReason = auxiliary && this.auxiliaryAudioErrorReason(audios[0], result.documents[0]);
-                if (errorReason) { auxiliary = false; block(errorReason); }
-                if (!auxiliary) block('unclassified-audio');
+            const auxiliary = allMedia.filter(el => !candidates.includes(el));
+            for (const el of auxiliary) {
+                // Known preview/secondary elements are nonblocking while inactive,
+                // regardless of their source, error, CSS class, parent or controls.
+                if (active(el)) block('competing-media-playback');
+                else if (!['auditionAudio','audio1_html5_white'].includes(el.id)) {
+                    const wrapper = el.closest('.video-js');
+                    if ((visible(el) && (el.tagName === 'VIDEO' || el.controls)) ||
+                        (wrapper && visible(wrapper) && !selected.some(player => wrapper.contains(player)))) block('unknown-independent-media');
+                }
+            }
+            for (const el of selected) {
+                if (!el.isConnected) block('disconnected-player');
+                if (selected.some(other => other !== el && other.ownerDocument === el.ownerDocument && other.id === el.id)) block('ambiguous-player-id');
+                if (el.error) block(el.tagName === 'AUDIO' ? 'audio-player-error' : 'video-player-error');
+                const path = paths.get(el.ownerDocument);
+                if (!path?.every(visible)) block('inactive-player-branch');
+            }
+            if (selected.filter(el => !el.paused && !el.ended).length > 1) block('competing-primary-playback');
+            if (selected.length > 1 && selected.some(el => el.autoplay && !el.ended)) block('competing-primary-autoplay');
+            if (attachments.length) {
+                if (!uniqueLesson) block('unverified-attachment-lesson');
+                result.tasks = [];
+                for (const owner of attachments) {
+                    const kind = kindOf(owner), owned = selected.filter(el => branches.get(el.ownerDocument) === owner);
+                    if (!kind || !visible(owner)) { block('unknown-attachment'); continue; }
+                    if (kind === 'document' && owned.length) block('media-in-document-attachment');
+                    if (kind !== 'document' && (owned.length > 1 || owned.some(el => el.tagName !== (kind === 'video' ? 'VIDEO' : 'AUDIO')))) block('ambiguous-attachment-player');
+                    if (kind !== 'document' && !owned.length) result.pending = true;
+                    const el = kind === 'document' ? null : owned[0] || null;
+                    const lineage = el ? paths.get(el.ownerDocument) : [frame, owner];
+                    const documents = lineage.map(item => { try { return item.contentDocument; } catch (_) { return null; } }).filter(Boolean);
+                    result.tasks.push({ kind, attachment: owner, element: el, media: el, lineage, documents,
+                        document: el?.ownerDocument || documents.at(-1), lesson: { id: node?.id, node, root, frame }, position: result.tasks.length, status: 'pending' });
+                }
+                if (selected.some(el => !attachments.includes(branches.get(el.ownerDocument)))) block('ambiguous-player-ownership');
+                if (result.tasks.some(task => task.kind === 'audio') && result.tasks.some(task => task.kind !== 'audio')) block('unsupported-mixed-attachments');
+            } else if (!selection && selected.length > 1) {
+                // Preserve the existing ordered, single-document video list. Multiple
+                // branches/types need an explicit attachment inventory or selection.
+                if (new Set(selected.map(el => el.ownerDocument)).size > 1 || selected.some(el => el.tagName === 'AUDIO')) block('ambiguous-player-branches');
+            }
+            if (multi) {
+                // Stricter inventory validation for multi-attachment/explicit selection:
+                // a populated unclassified leaf is not silently omitted from the queue.
+                for (const doc of result.documents) if (!knownDocuments.has(doc) && doc !== root && !doc.querySelector('video, audio, iframe') &&
+                    !result.tasks?.some(task => task.kind === 'document' && task.documents.includes(doc))) {
+                    const body = doc.body?.cloneNode(true); body?.querySelectorAll('script, style').forEach(el => el.remove());
+                    if (body?.textContent.trim() || body?.querySelector('object, embed, canvas, form, input, img')) block('unknown-independent-task');
+                }
+            }
+            if (!candidates.length && !result.tasks?.length && !knownDocuments.size) {
+                result.pending = true; // Empty/initializing cards remain bounded by startup/play retries.
             }
             if (result.inaccessible) result.reasons.push('inaccessible-task-frame');
+            if (result.pending) result.reasons.push('player-not-ready');
+            // UI unreadability may permit playback, but never authorizes leaving a lesson.
+            if (result.inaccessible || result.unsupported || result.pending) result.navigationSafe = false;
+            if (selection) {
+                result.videos = selected.filter(el => el.tagName === 'VIDEO');
+                result.audios = selected.filter(el => el.tagName === 'AUDIO');
+            }
             return result;
         },
     };
@@ -985,21 +809,29 @@
                         cleanup(); return this._block('首次启动时课程任务已改变');
                     }
                     const frame = videoAdapter.cardFrame(), doc = videoAdapter.cardDocument(), media = this._playableMedia();
+                    if (media.reasons?.includes('assessment-or-verification-required')) { cleanup(); return this._block('检测到测验或身份验证，停止自动播放'); }
                     const title = this._currentStepTitle(), label = node?.querySelector('.posCatalog_name');
                     const nodeTitle = (label?.getAttribute('title') || label?.textContent || '').trim();
                     const stepReady = !document.getElementsByClassName('prev_title').length || !!title;
+                    const requiredFrames = new Set([frame]);
+                    for (const player of media.videos) {
+                        let inner = player.ownerDocument;
+                        for (let depth=0; inner && inner !== document && depth<5; depth++) {
+                            const owner=inner.defaultView?.frameElement;if(!owner)break;
+                            requiredFrames.add(owner);inner=owner.ownerDocument;
+                        }
+                    }
                     const ready = node && stepReady && nodeTitle && frame && doc && document.readyState !== 'loading' && (media.videos.length > 0 || media.tasks?.length > 0) &&
-                        !media.pending && !media.inaccessible && media.documents.every(inner => inner.readyState !== 'loading' &&
-                            Array.from(inner.querySelectorAll('iframe')).every(child => {
+                        !media.pending && !media.inaccessible && [...requiredFrames].every(child => {
                                 try {
                                     const nested = child.contentDocument;
                                     const src = child.getAttribute('src')?.trim();
-                                    const destination = src ? new URL(src, inner.baseURI) : null;
+                                    const destination = src ? new URL(src, child.ownerDocument.baseURI) : null;
                                     return nested && nested.readyState !== 'loading' &&
                                         (!destination || !['http:', 'https:'].includes(destination.protocol) || nested.URL !== 'about:blank') &&
                                         (!child.hasAttribute('srcdoc') || nested.URL === 'about:srcdoc');
                                 } catch (_) { return false; }
-                            }));
+                            });
                     const snapshot = [node, title, nodeTitle, doc, ...media.documents, ...media.videos];
                     if (ready && previous && previous.length === snapshot.length && previous.every((value, index) => value === snapshot[index])) {
                         cleanup(); this._state = 'DISCOVERING'; this._initCellData(); this.play(); return;
@@ -1375,7 +1207,7 @@
                 const scope = this._taskSet();
                 if (!scope || scope.invalid) return this._block('任务范围无法验证');
                 const media = this._playableMedia();
-                if (media.inaccessible || media.unsupported) return this._block('任务包含未知或不可访问的内容');
+                if (media.inaccessible || media.unsupported || media.navigationSafe === false) return this._block('任务包含未知或不可访问的内容');
                 if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
                     media.videos.some(video => !this._completedVideos.has(video))) {
                     this._liveReturnPendingNavigation = false;
@@ -1395,7 +1227,7 @@
                 if (record.kind === 'assessment') return this._assessmentTarget(record.node) === target;
                 if (this._isChapterTest() || !this._taskContextValid(record) || this._targetAfter(record.node) !== target) return false;
                 const media = this._playableMedia();
-                if (media.inaccessible || media.unsupported || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
+                if (media.inaccessible || media.unsupported || media.navigationSafe === false || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
                 if ((this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') return false;
                 return media.videos.every(video => video.ended && this._completedVideos.has(video));
             },
@@ -1414,7 +1246,7 @@
                     assessmentTitle(target?.querySelector('.posCatalog_name')?.getAttribute('title') ||
                         target?.textContent || '')) return false;
                 const tasks = this._playableMedia();
-                return !tasks.inaccessible && !tasks.unsupported &&
+                return !tasks.inaccessible && !tasks.unsupported && tasks.navigationSafe !== false &&
                     (!tasks.tasks || tasks.tasks.every(task => ['video', 'audio'].includes(task.kind) && this._completedVideos.has(task.element))) &&
                     tasks.videos.includes(this._completionVideo) &&
                     tasks.videos.every(video => video.ended && this._completedVideos.has(video));
@@ -1564,6 +1396,7 @@
                 }
                 const tasks = this._playableMedia();
                 if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
+                if (tasks.navigationSafe === false) return this._block('未确认的任务内容禁止自动离开课节');
                 if (!tasks.videos.includes(this._completionVideo)) return this._block('播放器已替换，完成状态不明确');
                 const next = tasks.videos.find(video => !this._completedVideos.has(video));
                 if (next) {

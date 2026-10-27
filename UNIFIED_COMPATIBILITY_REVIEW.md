@@ -1,5 +1,9 @@
 # Unified compatibility review
 
+**Current playback policy:** [PLAYBACK_POLICY_REVIEW.md](PLAYBACK_POLICY_REVIEW.md)
+supersedes the historical strict media/auxiliary whitelist sections below. Prior
+stage reports remain as history; the live bridge fail-closed boundary is unchanged.
+
 Evidence boundary: all new execution evidence below is sanitized synthetic Chrome
 DOM/media/timer simulation. User-reported authenticated successes are not replaced
 by synthetic results. No new authenticated end-to-end result is claimed.

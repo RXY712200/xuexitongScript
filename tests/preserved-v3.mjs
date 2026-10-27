@@ -5,7 +5,10 @@ const baseline = execFileSync('git', ['show', 'e907cdda9d50fd80c61721061ed0988df
 const actual = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 // Shared native audio/video coordinator additions are behavior-tested below the
 // historical snapshots. Normalize only this explicit integration, not recovery code.
-const current = actual.replaceAll('this._playableMedia()', 'this._discoverMedia()')
+const withoutNavigationSafety = source => source.replaceAll(' || media.navigationSafe === false', '')
+    .replaceAll(' && tasks.navigationSafe !== false', '')
+    .replace("                if (tasks.navigationSafe === false) return this._block('未确认的任务内容禁止自动离开课节');\n", '');
+const current = withoutNavigationSafety(actual).replaceAll('this._playableMedia()', 'this._discoverMedia()')
     .replace("                    (category !== 'nextAudio' || this.settings.features.audioPlayback) &&\n", '')
     .replace("['videoStart', 'nextVideo', 'audioStart', 'nextAudio']", "['videoStart', 'nextVideo']")
     .replace("!['videoStart', 'audioStart'].includes(category)", "category !== 'videoStart'")
@@ -75,9 +78,9 @@ for (const [start, end] of [
 console.log('PASS: 58a252a owned-popup protocol/child recovery and assessment/settings rules preserved; scheduler timing unchanged.');
 
 const lifecycleBaseline = execFileSync('git', ['show', '87c3086245c1078fa13ad7df0391b99e656ebefb:v3_optimized.js'], { encoding: 'utf8' });
-assert.equal(block(current, '                    const [root, player, leaf]', '                    // Broader topologies').trim(),
-    block(lifecycleBaseline, '                    const [root, player, leaf]', '                } catch (_) { /* Unverifiable context').trim());
-assert.ok(current.includes("if (depth >= 4) { block('task-depth-limit'); continue; }"));
+// Deliberate policy replacement: the legacy auxiliary/UI whitelist is obsolete.
+// Bounded scope, selected task lineage, primary errors and completion are tested instead.
+assert.ok(actual.includes("if (path.length >= 4)"));
 assert.equal(method(current, '_runAction'), method(lifecycleBaseline, '_runAction').replace('node === catalog.current()', 'this._sameVideoTaskNode(node)')
     .replace("for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) listen(frame, 'load');",
         "for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {\n                                listen(frame, 'load', () => { if (!this._automaticStartup || category !== 'videoStart' || !valid()) cancel(); });\n                            }"));
@@ -132,7 +135,7 @@ const outsideStartup = source => {
     return source.replace('app.run({ startup: true });', 'app.run();').replace(/\n{2,}/g, '\n');
 };
 assert.equal(outsideStartup(current), outsideStartup(startupBaseline));
-console.log('PASS: legacy audition predicate/depth bound preserved; d7ea26a completion/rebinding methods unchanged; startup/media changes isolated from all other runtime code.');
+console.log('PASS: bounded media scope; d7ea26a completion/rebinding preserved with additional navigation-safety refusal.');
 
 const mediaBaseline = execFileSync('git', ['show', 'f587605e91e14d39429168c88936a83840ea19cf:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
 const outsideMediaRepair = source => {
@@ -140,20 +143,12 @@ const outsideMediaRepair = source => {
     for (const name of ['_discoverMedia', '_playableMedia', '_discoverAttachmentTask', '_waitForStartup']) source = source.replace(method(source, name), '');
     return source;
 };
-assert.equal(outsideMediaRepair(actual), outsideMediaRepair(mediaBaseline), 'all runtime outside discovery/classification/readiness must match f587605');
+assert.equal(outsideMediaRepair(withoutNavigationSafety(actual)), outsideMediaRepair(mediaBaseline), 'all runtime outside discovery/readiness and added navigation refusal must match f587605');
 assert.equal(block(actual, "        const bridgeProtocol =", '    function initializePlayer()'), block(mediaBaseline, "        const bridgeProtocol =", '    function initializePlayer()'));
 console.log('PASS: all runtime outside media discovery/readiness, including bridge fail-closed security and legacy popup code, unchanged from f587605.');
 
-const auxiliaryBaseline = execFileSync('git', ['show', '06ca05808b4ca5c2b68f43e7720cfe82b68168be:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
-const outsideAuxiliaryErrorRepair = source => {
-    for (const name of ['auxiliaryAudioErrorReason','auxiliaryAudioReasons','auxiliaryAudio']) {
-        const start=source.indexOf(`        ${name}(`);
-        if(start>=0){const end=source.indexOf('\n        },',start);assert.ok(end>start);source=source.slice(0,start)+source.slice(end+12);}
-    }
-    return source.replace("            if (primary.some(player => player.error)) block('audio-player-error');\n", '')
-        .replace("                    if (supported.some(player => player.error)) reject('video-player-error');\n", '')
-        .replace("            if (result.videos.some(player => player.error)) block('video-player-error');\n", '')
-        .replace("                const errorReason = auxiliary && this.auxiliaryAudioErrorReason(audios[0], result.documents[0]);\n                if (errorReason) { auxiliary = false; block(errorReason); }\n", '');
-};
-assert.equal(outsideAuxiliaryErrorRepair(actual),outsideAuxiliaryErrorRepair(auxiliaryBaseline), 'all runtime outside the scoped auxiliary policy and explicit primary-error refusals must match 06ca058');
-console.log('PASS: only auxiliary error policy/diagnostics and explicit failed-player refusals changed from 06ca058.');
+const policyBaseline = execFileSync('git', ['show', '8bf8930f990ff1c13929b50c822a2be2e35cd8bc:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
+const outsidePolicy = source => source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '')
+    .replace(method(source, '_waitForStartup'), '');
+assert.equal(outsidePolicy(withoutNavigationSafety(actual)),outsidePolicy(policyBaseline), 'only discovery/readiness and the explicit added navigation refusals may differ from 8bf8930');
+console.log('PASS: settings, recovery, natural completion/markers, sidebar and fail-closed bridge remain unchanged from 8bf8930; navigation is stricter for unreadable UI.');
