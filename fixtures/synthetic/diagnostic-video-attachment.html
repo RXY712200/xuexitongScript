@@ -1,0 +1,8 @@
+<!doctype html><title>Synthetic diagnostic A, not an authenticated snapshot</title>
+<!-- Observed: root auditionAudio, one approved video iframe, one nested empty iframe.
+Assumptions for a supported control contract: hidden idle audio with the previous
+strict DIV/controls/empty-class invariants; one Video.js wrapper and explicitly
+targeted range control. The actual rejected controls/audio properties are unknown. -->
+<div><audio id="auditionAudio" controls style="display:none"></audio></div>
+<iframe class="ans-attach-online ans-insertvideo-online"></iframe>
+<template><div class="video-js"><video id="video_html5_api" class="vjs-tech"></video><div class="vjs-control-bar"><form><input type="range" aria-controls="video_html5_api" aria-label="Synthetic volume"></form></div></div><iframe></iframe></template>

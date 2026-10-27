@@ -76,8 +76,8 @@
         },
     };
     const videoAdapter = {
-        audioInventory() {
-            const root = this.cardDocument(), frame = this.cardFrame();
+        audioInventory({ root = this.cardDocument(), path = [this.cardFrame()], courseRoot = root, potential = false } = {}) {
+            const frame = this.cardFrame();
             if (!root) return null;
             const docs = [], lineage = new Map(); let inaccessible = false;
             const visit = (doc, path) => {
@@ -88,11 +88,22 @@
                     catch (_) { inaccessible = true; }
                 }
             };
-            visit(root, [frame]);
+            visit(root, path);
             const primary = docs.flatMap(doc => Array.from(doc.querySelectorAll('audio#audio_html5_api.vjs-tech')));
-            if (!primary.length) return null;
+            if (!primary.length && !potential) return null;
             const result = { videos: [], audios: [], documents: docs, tasks: [], reasons: [], unsupported: false, inaccessible };
             const block = reason => { result.unsupported = true; result.reasons.push(reason); };
+            result.rawAudios = docs.flatMap(doc => Array.from(doc.querySelectorAll('audio')));
+            result.videos = docs.flatMap(doc => Array.from(doc.querySelectorAll('video')));
+            if (result.rawAudios.filter(audio => audio.id === 'audio_html5_api').length > 1) block('ambiguous-audio-player');
+            if (!primary.length) {
+                result.pending = true; result.reasons.push('audio-player-not-ready');
+                for (const inner of docs) for (const reason of this.controlReasons(inner, [])) block(reason);
+                if (result.rawAudios.some(audio => !['audio_html5_api', 'audio1_html5_white'].includes(audio.id))) block('unclassified-audio');
+                if (result.videos.length) block('video-in-audio-attachment');
+                if (inaccessible) block('inaccessible-task-frame');
+                return result;
+            }
             const audio = primary[0], doc = audio.ownerDocument, node = catalog.current(), wrapper = audio.closest('.video-js');
             if (primary.length !== 1 || !node?.id || Array.from(document.querySelectorAll('[id]')).filter(el => el.id === node.id).length !== 1 ||
                 !audio.isConnected || !wrapper?.isConnected || !wrapper.getClientRects().length ||
@@ -102,7 +113,7 @@
             const secondary = allAudio.filter(el => el.id === 'audio1_html5_white');
             for (const el of allAudio) {
                 if (el === audio) continue;
-                if (this.auxiliaryAudio(el, root) && allAudio.filter(other => other.id === 'auditionAudio').length === 1) continue;
+                if (this.auxiliaryAudio(el, courseRoot) && allAudio.filter(other => other.id === 'auditionAudio').length === 1) continue;
                 const container = el.closest('#audio1_html5, .audio1_html5');
                 if (el.id === 'audio1_html5_white' && secondary.length === 1 && el.ownerDocument === doc && container && container !== wrapper &&
                     container.querySelectorAll('audio, video').length === 1 && !container.getClientRects().length &&
@@ -110,7 +121,8 @@
                 block('unclassified-audio');
             }
             for (const inner of docs) {
-                if (inner.querySelector('video, form, input, object, embed, canvas')) block('unknown-audio-task-content');
+                if (inner.querySelector('video')) block('video-in-audio-attachment');
+                for (const reason of this.controlReasons(inner, primary)) block(reason);
                 if (inner !== doc) {
                     const body = inner.body?.cloneNode(true);
                     body?.querySelectorAll('script, style, iframe, audio').forEach(el => el.remove());
@@ -120,13 +132,13 @@
             if (inaccessible) block('inaccessible-task-frame');
             result.audios.push(audio);
             result.tasks.push({ kind: 'audio', attachment: lineage.get(doc)?.[1] || wrapper, element: audio, media: audio,
-                document: doc, documents: docs, lineage: lineage.get(doc), lesson: { id: node?.id, node, root, frame }, position: 0, status: 'pending' });
+                document: doc, documents: docs, lineage: lineage.get(doc), lesson: { id: node?.id, node, root: courseRoot, frame }, position: 0, status: 'pending' });
             return result;
         },
         attachmentInventory() {
             const frame = this.cardFrame(), root = this.cardDocument();
             if (!root || !root.querySelector('iframe.ans-attach-online')) return null;
-            const result = { videos: [], tasks: [], documents: [root], unsupported: false, inaccessible: false, reasons: [] };
+            const result = { videos: [], audios: [], rawAudios: Array.from(root.querySelectorAll('audio')), tasks: [], documents: [root], unsupported: false, inaccessible: false, reasons: [] };
             const reject = reason => { result.unsupported = true; if (!result.reasons.includes(reason)) result.reasons.push(reason); };
             const node = catalog.current();
             const lesson = { id: node?.id, node, root, frame };
@@ -134,13 +146,37 @@
             const attachments = Array.from(root.querySelectorAll('iframe'));
             const rootAudio = Array.from(root.querySelectorAll('audio'));
             if (root.querySelector('video, object, embed, form')) reject('unknown-root-task');
-            if (rootAudio.length && !(rootAudio.length === 1 && this.auxiliaryAudio(rootAudio[0], root))) reject('unclassified-audio');
+            if (rootAudio.length && !(rootAudio.length === 1 && this.auxiliaryAudio(rootAudio[0], root))) {
+                reject('unclassified-audio');
+                if (rootAudio.length !== 1) reject('ambiguous-root-audio');
+                else for (const reason of this.auxiliaryAudioReasons(rootAudio[0], root)) reject(reason);
+            }
             const seen = new Set([root]);
             for (const attachment of attachments) {
                 const video = attachment.classList.contains('ans-insertvideo-online');
                 const pdf = attachment.classList.contains('insertdoc-online-pdf');
-                if (!attachment.classList.contains('ans-attach-online') || video === pdf || !attachment.isConnected ||
+                const audio = attachment.classList.contains('ans-insertaudio');
+                if (!attachment.classList.contains('ans-attach-online') || [video, pdf, audio].filter(Boolean).length !== 1 || !attachment.isConnected ||
                     attachment.hidden || attachment.inert || !attachment.getClientRects().length) { reject('unknown-attachment'); continue; }
+                if (audio) {
+                    let doc; try { doc = attachment.contentDocument; } catch (_) { /* No inaccessible fallback. */ }
+                    if (!doc) { result.inaccessible = true; reject('inaccessible-task-frame'); continue; }
+                    const inventory = this.audioInventory({ root: doc, path: [frame, attachment], courseRoot: root, potential: true });
+                    for (const inner of inventory.documents) {
+                        if (seen.has(inner)) reject('duplicate-attachment-document');
+                        seen.add(inner); result.documents.push(inner);
+                    }
+                    result.audios.push(...inventory.audios); result.videos.push(...inventory.videos); result.rawAudios.push(...inventory.rawAudios);
+                    result.inaccessible ||= inventory.inaccessible;
+                    result.pending ||= inventory.pending;
+                    for (const reason of inventory.reasons) {
+                        if (inventory.unsupported) reject(reason); else if (!result.reasons.includes(reason)) result.reasons.push(reason);
+                    }
+                    const primary = inventory.audios.length === 1 ? inventory.audios[0] : null;
+                    result.tasks.push({ kind: 'audio', attachment, element: primary, media: primary, document: primary?.ownerDocument || doc,
+                        documents: inventory.documents, lineage: inventory.tasks[0]?.lineage || [frame, attachment], lesson, position: result.tasks.length, status: 'pending' });
+                    continue;
+                }
                 const media = [], documents = [], lineages = new Map();
                 const visit = (owner, lineage) => {
                     let doc;
@@ -148,11 +184,12 @@
                     if (!doc) { result.inaccessible = true; reject('inaccessible-task-frame'); return; }
                     if (seen.has(doc)) { reject('duplicate-attachment-document'); return; }
                     seen.add(doc); documents.push(doc); result.documents.push(doc); lineages.set(doc, lineage);
+                    result.rawAudios.push(...doc.querySelectorAll('audio'));
                     if (lineage.length >= 4 && doc.querySelector('iframe')) { reject('task-depth-limit'); return; }
                     const supported = Array.from(doc.querySelectorAll('video[id*="video_html5"]'));
                     media.push(...supported);
                     if (doc.querySelector('audio, video:not([id*="video_html5"])')) reject('unknown-attachment-media');
-                    if (doc.querySelector('form, input, object, embed, canvas')) reject('unknown-attachment-content');
+                    for (const reason of this.controlReasons(doc, supported)) { reject('unknown-attachment-content'); reject(reason); }
                     if (video && !supported.length) {
                         const body = doc.body?.cloneNode(true);
                         body?.querySelectorAll('script, style, iframe').forEach(el => el.remove());
@@ -161,7 +198,8 @@
                     for (const nested of doc.querySelectorAll('iframe')) visit(nested, [...lineage, nested]);
                 };
                 visit(attachment, [frame, attachment]);
-                if (video && (media.length !== 1 || !media[0]?.isConnected)) reject('ambiguous-attachment-player');
+                if (video && !media.length) { result.pending = true; result.reasons.push('video-player-not-ready'); }
+                else if (video && (media.length !== 1 || !media[0]?.isConnected)) reject('ambiguous-attachment-player');
                 if (pdf && media.length) reject('media-in-document-attachment');
                 const element = video ? media[0] : null;
                 result.tasks.push({ kind: video ? 'video' : 'document', attachment, element, media: element,
@@ -170,7 +208,40 @@
                 if (element) result.videos.push(element);
             }
             if (!attachments.length) reject('missing-attachments');
+            if (result.tasks.some(task => task.kind === 'audio') && result.tasks.some(task => task.kind !== 'audio')) reject('unsupported-mixed-attachments');
             return result;
+        },
+        controlReasons(doc, media) {
+            const reasons = [];
+            const ownedSlider = input => {
+                const wrapper = input.closest('.video-js'), bar = input.closest('.vjs-control-bar');
+                const player = media.length === 1 && media[0];
+                return player && player.ownerDocument === doc && player.isConnected && wrapper && bar && wrapper.contains(bar) &&
+                    wrapper.contains(player) && wrapper.querySelectorAll('video, audio').length === 1 &&
+                    input.type === 'range' && !input.name && !input.hasAttribute('form') &&
+                    input.getAttribute('aria-controls') === player.id && player.id &&
+                    Array.from(doc.querySelectorAll('[id]')).filter(el => el.id === player.id).length === 1;
+            };
+            for (const element of doc.querySelectorAll('form, input, object, embed, canvas')) {
+                if (element.tagName === 'INPUT' && ownedSlider(element)) continue;
+                if (element.tagName === 'FORM' && element.closest('.vjs-control-bar') &&
+                    !['action', 'method', 'target', 'name', 'id', 'onsubmit'].some(key => element.hasAttribute(key)) &&
+                    element.elements.length > 0 && Array.from(element.elements).every(ownedSlider) &&
+                    !element.querySelector('a, object, embed, canvas, iframe, video, audio')) continue;
+                reasons.push(`unverified-player-${element.tagName.toLowerCase()}`);
+            }
+            return [...new Set(reasons)];
+        },
+        auxiliaryAudioReasons(audio, root) {
+            const checks = {
+                'auxiliary-audio-identity': audio?.ownerDocument === root && audio.id === 'auditionAudio' && root.querySelectorAll('[id="auditionAudio"]').length === 1,
+                'auxiliary-audio-class': audio?.className === '',
+                'auxiliary-audio-parent': audio?.parentElement?.tagName === 'DIV',
+                'auxiliary-audio-controls': audio?.controls === true,
+                'auxiliary-audio-visible-or-detached': audio?.isConnected && audio.getClientRects().length === 0,
+                'auxiliary-audio-not-idle': audio?.paused && !audio.autoplay && !audio.seeking && audio.currentTime === 0 && !audio.error,
+            };
+            return Object.entries(checks).filter(([, valid]) => !valid).map(([reason]) => reason);
         },
         auxiliaryAudio(audio, root) {
             return audio?.ownerDocument === root && root.querySelectorAll('[id="auditionAudio"]').length === 1 &&
@@ -885,7 +956,7 @@
                     const nodeTitle = (label?.getAttribute('title') || label?.textContent || '').trim();
                     const stepReady = !document.getElementsByClassName('prev_title').length || !!title;
                     const ready = node && stepReady && nodeTitle && frame && doc && document.readyState !== 'loading' && (media.videos.length > 0 || media.tasks?.length > 0) &&
-                        !media.inaccessible && media.documents.every(inner => inner.readyState !== 'loading' &&
+                        !media.pending && !media.inaccessible && media.documents.every(inner => inner.readyState !== 'loading' &&
                             Array.from(inner.querySelectorAll('iframe')).every(child => {
                                 try {
                                     const nested = child.contentDocument;
@@ -1140,12 +1211,12 @@
                 if (media.tasks) {
                     const snapshot = this._attachmentSnapshot;
                     if (snapshot && (snapshot.root !== media.tasks[0]?.lesson.root || snapshot.id !== catalog.current()?.id ||
-                        snapshot.tasks.length !== media.tasks.length || snapshot.tasks.some((task, i) => task.attachment !== media.tasks[i].attachment ||
+                        snapshot.tasks.length !== media.tasks.length || snapshot.tasks.some((task, i) => task.kind !== media.tasks[i].kind || task.attachment !== media.tasks[i].attachment ||
                             task.element !== media.tasks[i].element || task.documents.some((doc, j) => doc !== media.tasks[i].documents[j]) ||
                             task.documents.length !== media.tasks[i].documents.length))) {
                         media.unsupported = true; media.reasons.push('attachment-inventory-changed');
                     }
-                    if (!snapshot && !media.unsupported && !media.inaccessible) this._attachmentSnapshot = {
+                    if (!snapshot && !media.pending && !media.unsupported && !media.inaccessible) this._attachmentSnapshot = {
                         root: media.tasks[0]?.lesson.root, id: catalog.current()?.id, tasks: media.tasks };
                     for (const task of media.tasks) task.status = this._completedVideos.has(task.element) ? 'completed' : 'pending';
                 }
@@ -1155,7 +1226,8 @@
                 const media = this._discoverMedia();
                 // The public inventory retains videos/audio separately; the existing
                 // completion/recovery coordinator consumes one selected native media list.
-                return media.audios ? { ...media, videos: media.audios } : media;
+                const players = media.tasks ? media.tasks.filter(task => ['video', 'audio'].includes(task.kind) && task.element).map(task => task.element) : [...media.videos, ...(media.audios || [])];
+                return { ...media, videos: players };
             },
             _mediaAction(element, next = false) {
                 return element?.tagName === 'AUDIO' ? (next ? 'nextAudio' : 'audioStart') : (next ? 'nextVideo' : 'videoStart');
@@ -1248,6 +1320,7 @@
             _discoverAttachmentTask() {
                 const media = this._playableMedia();
                 if (!media.tasks) return null;
+                if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
                 if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
                 const pending = media.tasks.find(task => !this._completedVideos.has(task.element));
                 if (pending?.kind === 'document') {
@@ -1256,7 +1329,7 @@
                     return true;
                 }
                 // A playing, seeking or already-ended unprocessed sibling is not silently adopted.
-                if (media.tasks.some(task => task.kind === 'video' && task !== pending && !this._completedVideos.has(task.element) &&
+                if (media.tasks.some(task => ['video', 'audio'].includes(task.kind) && task !== pending && !this._completedVideos.has(task.element) &&
                     (!task.element.paused || task.element.seeking || task.element.ended))) {
                     this._block('其他附件播放器正在活动或完成来源不明确'); return true;
                 }

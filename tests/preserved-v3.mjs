@@ -10,7 +10,7 @@ const current = actual.replaceAll('this._playableMedia()', 'this._discoverMedia(
     .replace("['videoStart', 'nextVideo', 'audioStart', 'nextAudio']", "['videoStart', 'nextVideo']")
     .replace("!['videoStart', 'audioStart'].includes(category)", "category !== 'videoStart'")
     .replace("if (this._startupCancel && !next.features[this._discoverMedia().audios?.length ? 'audioPlayback' : 'videoPlayback'])", 'if (!next.features.videoPlayback && this._startupCancel)')
-    .replace("['video', 'audio'].includes(task.kind)", "task.kind === 'video'")
+    .replaceAll("['video', 'audio'].includes(task.kind)", "task.kind === 'video'")
     .replace('                this._bindCatalogNavigation();\n', '')
     .replace('                this._catalogObserver?.disconnect(); this._catalogObserver = null;\n                document.removeEventListener?.(\'click\', this._catalogClick, true);\n', '')
     .replace('                        this._observedLessonId = nCell.id; this._observedCard = this._cardIdentity();\n', '');
@@ -134,10 +134,12 @@ const outsideStartup = source => {
 assert.equal(outsideStartup(current), outsideStartup(startupBaseline));
 console.log('PASS: legacy audition predicate/depth bound preserved; d7ea26a completion/rebinding methods unchanged; startup/media changes isolated from all other runtime code.');
 
-const stage4Baseline = execFileSync('git', ['show', 'af565701b82ac878c3a1a6467ed179e384161fd7:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
-const outsideBridgeRepair = source => source.replace(block(source, '        const bridgeProtocol =', "        const protocol = 'xuexitong-live-v1'"), '')
-    .replace("bridgeAvailable && typeof isPlatformComplete", 'typeof isPlatformComplete')
-    .replace("dispose() { env.removeEventListener?.('message', bridgeHello); }", 'dispose() { /* bridge lifecycle */ }')
-    .replace('dispose() { for (const parent of [...bridgeParents]) parent.dispose(); }', 'dispose() { /* bridge lifecycle */ }');
-assert.equal(outsideBridgeRepair(actual), outsideBridgeRepair(stage4Baseline), 'all Stage 1–3 runtime and legacy popup code must remain byte-identical');
-console.log('PASS: Stage 1–3 and legacy popup runtime unchanged from af56570 outside the explicit bridge repair.');
+const mediaBaseline = execFileSync('git', ['show', 'f587605e91e14d39429168c88936a83840ea19cf:v3_optimized.js'], { encoding: 'utf8' }).replace(/\r\n/g, '\n');
+const outsideMediaRepair = source => {
+    source = source.replace(block(source, '    const videoAdapter =', '    const SETTINGS_KEY'), '');
+    for (const name of ['_discoverMedia', '_playableMedia', '_discoverAttachmentTask', '_waitForStartup']) source = source.replace(method(source, name), '');
+    return source;
+};
+assert.equal(outsideMediaRepair(actual), outsideMediaRepair(mediaBaseline), 'all runtime outside discovery/classification/readiness must match f587605');
+assert.equal(block(actual, "        const bridgeProtocol =", '    function initializePlayer()'), block(mediaBaseline, "        const bridgeProtocol =", '    function initializePlayer()'));
+console.log('PASS: all runtime outside media discovery/readiness, including bridge fail-closed security and legacy popup code, unchanged from f587605.');

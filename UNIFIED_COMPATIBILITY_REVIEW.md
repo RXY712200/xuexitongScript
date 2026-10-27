@@ -221,3 +221,81 @@ click. It now passes with BLOCKED and zero clicks. A second forged ENDED+CLOSED
 case cannot replace natural playback completion. The former automatic-return test
 also verifies genuine user confirmation yields zero randomized return draws and
 no automatic continuation. All private fixtures remain excluded from Git.
+
+## Authenticated-regression repair from f587605 (PARTIAL)
+
+Confirmed causes: attachment discovery ran before generic audio discovery, and
+rejected the real `ans-insertaudio` class before looking inside it. Video attachment
+classification rejected every form/input/object/embed/canvas even when a valid
+player owned a control. The authenticated root auditionAudio also failed its
+predicate, but the supplied diagnostic omitted several required properties. Its
+individual failing condition cannot be inferred. The strict predicate is retained.
+
+Exact scope:
+
+* Exact audio attachments now enter bounded, attachment-scoped traversal and reuse
+  the existing unique Video.js primary, rendered wrapper/control bar, visible
+  iframe-lineage and secondary-audio checks. Missing primary media is pending,
+  not a permanently unsupported attachment; readiness remains bounded to 40
+  samples at 250ms. Unsupported or inaccessible media is never treated as done.
+* Range inputs are allowed only inside the same Video.js wrapper/control bar as
+  one native player, with aria-controls referring to its unique document-local ID,
+  no name and no external form association. A control form must have no action,
+  method, target, name, ID or inline submit handler, and contain only such linked
+  controls. This is an explicit synthetic supported contract, not an assertion
+  that the authenticated rejected controls have this shape. All other forms/inputs
+  and all object/embed/canvas remain refused with specific redacted reason codes.
+* Auxiliary audio retains its identity/class/DIV/controls/hidden/idle/error checks.
+  New reason codes identify the actually observed failed checks (for example,
+  auxiliary-audio-controls), without printing values, course IDs or URLs. No
+  failure is guessed from the incomplete authenticated report.
+* Public video/audio candidates and raw audio elements remain separate from the
+  ordered native-player queue. Multiple verified audio attachments run sequentially
+  using audioPlayback/nextAudio and audioStart/nextAudio delays. Unknown audio+video
+  or audio+PDF mixtures block explicitly; they do not discard the video list or
+  silently skip an attachment. Four-video/pending-PDF behavior is preserved.
+* Incomplete inventories are not frozen during readiness. Once bound, changed
+  kind/attachment/media/document references invalidate the task. Completion,
+  marker confirmation, sidebar generations, assessment deferral, recovery, settings
+  and the entire fail-closed live bridge remain unchanged from f587605, checked by
+  literal source comparisons outside the four allowed coordinator integration
+  methods and media adapter. No completion credit or seeking writes were added.
+
+The two new diagnostic HTML fixtures state observed outer topology separately from
+assumed inner controls, root-audio properties and secondary-wrapper visibility.
+They are authored synthetic structures, not sanitized claims of complete captures.
+Tests run the actual f587605 source as a negative control: the modeled video UI
+blocks as unknown-attachment-content; the modeled audio attachment blocks as
+unknown-attachment with only its root document traversed. They do not reproduce
+the authenticated auxiliary predicate failure without its missing properties.
+
+New regressions cover entry/reboot, delayed/missing primary media, inactive or
+duplicate players, explicit control ownership versus independent forms/objects,
+active/visible/ambiguous auxiliary audio, secondary audio, disabled audio, sequential
+nextAudio switches/delays, genuine-ended simulation followed by delayed markers,
+exactly one navigation, stale callbacks and conservative mixed-task rejection.
+Previous sidebar, four-video/PDF, 1.0x/background and live security tests remain.
+
+Remaining authenticated gaps: the exact rejected video control elements and their
+player ownership, the omitted auditionAudio properties, and the current audio
+wrapper/secondary-player state were not supplied. Those unverified structures
+remain blocked. No authenticated retest was performed; this is PARTIAL, not a
+claim that both real pages now play. Native replay auto-return stays disabled.
+
+Final repair verification (exit 0 for every command):
+
+```
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs         # synchronized payload and valid syntax
+node tests/customization-v3.mjs  # PASS: fixed 1.0x / assessment / unknown-content smoke
+node tests/preserved-v3.mjs      # PASS: unchanged runtime outside allowed media methods
+node tests/navigation-v3.mjs    # RESULT: 360 passed, 0 failed (311 previous + 49 new)
+node tests/recorded-live-v3.mjs # RESULT: 21 passed; 0 failed
+node tests/native-entry-v3.mjs  # RESULT: 19 passed; 0 failed
+node tests/bridge-v3.mjs        # RESULT: 31 passed, 0 failed
+node --check <all 16 .js/.mjs files> # PASS
+git diff --check               # PASS
+```
+
+No private HTML, authenticated address or account identifier was used in a new
+fixture or staged for publication. All eight private fixtures remain ignored.

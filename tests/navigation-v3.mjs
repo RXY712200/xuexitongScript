@@ -10,6 +10,7 @@ const { chromium } = process.env.PLAYWRIGHT_MODULE
 const jquery = readFileSync(process.env.JQUERY_PATH, 'utf8');
 const source = readFileSync(new URL('../v3_optimized.js', import.meta.url), 'utf8');
 const reviewedStartup = execFileSync('git', ['show', 'd7ea26ac373522b250f4bf573fada7c75687c909:v3_optimized.js'], { encoding: 'utf8' });
+const regressionBaseline = execFileSync('git', ['show', 'f587605e91e14d39429168c88936a83840ea19cf:v3_optimized.js'], { encoding: 'utf8' });
 const scopeOuter = readFileSync(new URL('../fixtures/synthetic/course-with-auxiliary-frames.html', import.meta.url), 'utf8');
 const scopeMedia = readFileSync(new URL('../fixtures/synthetic/course-task-video.html', import.meta.url), 'utf8');
 const replayPopup = readFileSync(new URL('../fixtures/synthetic/recorded-live-videojs.html', import.meta.url), 'utf8');
@@ -17,6 +18,7 @@ const auditionTask = readFileSync(new URL('../fixtures/synthetic/audition-audio-
 const rerenderCatalog = readFileSync(new URL('../fixtures/synthetic/catalog-rerender.html', import.meta.url), 'utf8');
 const complexMedia = readFileSync(new URL('../fixtures/synthetic/complex-media-task.html', import.meta.url), 'utf8');
 const audioFixture = readFileSync(new URL('../fixtures/synthetic/native-audio-task.html', import.meta.url), 'utf8');
+const diagnosticFixtures = Object.fromEntries(['video','audio'].map(kind => [kind,readFileSync(new URL(`../fixtures/synthetic/diagnostic-${kind}-attachment.html`,import.meta.url),'utf8')]));
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 console.log(`ENV: Chrome ${browser.version()}; headless; network blocked; media and timers simulated.`);
 let passed = 0;
@@ -196,6 +198,131 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
+    async function diagnosticLesson(page, kind='video', variant='', automatic=true) {
+        await page.evaluate(({html,kind,variant,automatic})=>{
+            const root=document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML=new DOMParser().parseFromString(html,'text/html').body.innerHTML;
+            const template=root.querySelector('template'),markup=template.innerHTML;template.remove();
+            window.__diagnosticRoot=root;window.__diagnosticPlayers=[];
+            window.__installDiagnosticPlayer=()=>{
+                const branch=root.querySelector('iframe'),doc=branch.contentDocument;doc.body.innerHTML=markup;
+                const player=doc.querySelector(kind==='video'?'video':'#audio_html5_api');
+                player.__plays=0;player.__paused=true;player.__ended=false;
+                Object.defineProperties(player,{paused:{get:()=>player.__paused},ended:{get:()=>player.__ended}});
+                player.play=()=>{player.__plays++;player.__paused=false;return Promise.resolve();};window.__diagnosticPlayers.push(player);
+                if(variant==='independent-form'){const form=doc.createElement('form');form.innerHTML='<input type="text">';doc.body.append(form);}
+                if(variant==='form-action')doc.querySelector('form')?.setAttribute('action','/synthetic-unsupported-submit');
+                if(variant==='wrong-target')doc.querySelector('input').setAttribute('aria-controls','unrelated-player');
+                if(variant==='named-control')doc.querySelector('input').name='independent-task';
+                if(['object','embed','canvas'].includes(variant))doc.querySelector('.vjs-control-bar').append(doc.createElement(variant));
+                if(variant==='unknown-media')doc.body.append(doc.createElement(kind==='video'?'audio':'video'));
+                if(variant==='duplicate-player')player.parentElement.append(player.cloneNode());
+                if(variant==='inactive-player')doc.querySelector('.video-js').style.display='none';
+                if(variant==='secondary-active')Object.defineProperty(doc.querySelector('#audio1_html5_white'),'paused',{get:()=>false});
+                if(variant==='secondary-visible')doc.querySelector('#audio1_html5').style.display='';
+            };
+            if(!['late','missing','refresh-late'].includes(variant))window.__installDiagnosticPlayer();
+            const aux=root.querySelector('#auditionAudio');
+            if(variant==='aux-active')Object.defineProperty(aux,'paused',{get:()=>false});
+            if(variant==='aux-visible')aux.style.display='';
+            if(variant==='aux-duplicate')aux.parentElement.append(aux.cloneNode());
+            if(variant==='aux-controls')aux.controls=false;
+            if(variant==='aux-class')aux.className='unknown-role';
+            if(variant==='aux-parent')root.body.append(aux);
+            if(variant==='inaccessible')Object.defineProperty(root.querySelector('iframe'),'contentDocument',{get:()=>null});
+            const settings=structuredClone(app.settings);settings.randomDelaysEnabled=false;
+            if(variant==='disabled')settings.features.audioPlayback=false;
+            if(kind==='audio')settings.features.videoPlayback=false;
+            app.updateSettings(settings);app.run({startup:automatic});
+        },{html:diagnosticFixtures[kind],kind,variant,automatic});
+    }
+    for(const kind of ['video','audio']) {
+        await check(`diagnostic ${kind} reviewed baseline reproduces attachment dispatch or control rejection`,()=>using([outer(2),0,false,null,false,false,false,regressionBaseline],async page=>{
+            await diagnosticLesson(page,kind,'',false);assert.equal(await state(page),'BLOCKED');
+            assert.ok(await page.evaluate(kind=>app._discoverMedia().reasons.includes(kind==='audio'?'unknown-attachment':'unknown-attachment-content'),kind));
+            if(kind==='audio')assert.equal(await page.evaluate(()=>app._discoverMedia().documents.length),1);
+        }));
+        await check(`diagnostic ${kind} attachment starts once with owned controls on entry and refresh-style reboot`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind);await flush(page,4);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays,app._videoEl.playbackRate]),['PLAYING',1,1]);
+            assert.equal(await page.evaluate(()=>app._discoverMedia().unsupported),false);
+            await page.addScriptTag({content:source});await page.evaluate(()=>{for(const fn of [...window.__intervals.values()])fn();});await flush(page,4);
+            assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>app._videoEl.__plays),2);
+            await page.evaluate(()=>app.play());assert.equal(await page.evaluate(()=>app._videoEl.__plays),2);
+        }));
+        await check(`diagnostic ${kind} delayed iframe waits without freezing an incomplete inventory`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind,'late');await flush(page,4);assert.equal(await state(page),'WAITING_STARTUP');
+            assert.equal(await page.evaluate(()=>app._attachmentSnapshot),null);
+            await page.evaluate(()=>window.__installDiagnosticPlayer());await flush(page,4);
+            assert.deepEqual(await page.evaluate(()=>[app._state,app._videoEl.__plays]),['PLAYING',1]);
+        }));
+        for(const variant of ['independent-form','wrong-target','named-control','object','embed','canvas','unknown-media','duplicate-player','aux-active','aux-visible','aux-duplicate','aux-controls','aux-class','aux-parent','inaccessible']) await check(`diagnostic ${kind} still blocks ${variant}`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind,variant,false);await flush(page,42);
+            assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__diagnosticPlayers.reduce((n,p)=>n+p.__plays,0)),0);
+        }));
+        await check(`diagnostic ${kind} missing player has a bounded stop`,()=>using([outer(2),0],async page=>{
+            await diagnosticLesson(page,kind,'missing');await flush(page,42);assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._timers.size),0);
+        }));
+    }
+    await check('diagnostic auxiliary rejection reports observed predicate failures without relaxing them',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'video','aux-controls',false);
+        assert.ok(await page.evaluate(()=>app._discoverMedia().reasons.includes('auxiliary-audio-controls')));
+        assert.equal(await page.evaluate(()=>app._discoverMedia().rawAudios.length),1);
+    }));
+    for(const variant of ['inactive-player','secondary-active','secondary-visible','disabled'])await check(`diagnostic native audio ${variant} is not autoplayed`,()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'audio',variant,false);
+        assert.equal(await state(page),variant==='disabled'?'PAUSED_AUTOMATION':'BLOCKED');
+        assert.equal(await page.evaluate(()=>window.__diagnosticPlayers[0].__plays),0);
+    }));
+    await check('diagnostic video rejects an action-bearing form even inside its control bar',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'video','form-action',false);assert.equal(await state(page),'BLOCKED');
+    }));
+    await check('diagnostic mixed audio/video preserves raw media and ordered tasks but refuses unknown coordination',()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'audio','',false);
+        await page.evaluate(()=>{
+            const root=window.__diagnosticRoot,branch=root.createElement('iframe');branch.className='ans-attach-online ans-insertvideo-online';root.body.append(branch);
+            branch.contentDocument.body.innerHTML='<video id="video_html5_api"></video>';app.run();
+        });
+        assert.equal(await state(page),'BLOCKED');
+        assert.deepEqual(await page.evaluate(()=>{const m=app._discoverMedia();return [m.videos.length,m.audios.length,m.tasks.map(t=>t.kind),app._playableMedia().videos.length,m.reasons.includes('unsupported-mixed-attachments')];}),[1,1,['audio','video'],2,true]);
+    }));
+    for(const kind of ['video','audio']) await check(`diagnostic ${kind} natural ended waits for platform marker then navigates once despite stale callbacks`,()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,kind,'',false);
+        await page.evaluate(()=>{
+            window.__diagnosticClicks=0;window.__originalDiagnostic=app._videoEl;
+            document.querySelector('#node1 .posCatalog_name').onclick=()=>{
+                window.__diagnosticClicks++;document.querySelector('#node0').classList.remove('posCatalog_active');document.querySelector('#node1').classList.add('posCatalog_active');
+                const f=document.createElement('iframe');f.setAttribute('info','card');document.querySelector('iframe[info="card"]').replaceWith(f);window.__addVideos(1);
+            };
+            const v=window.__originalDiagnostic;v.__paused=true;v.__ended=true;v.dispatchEvent(new Event('ended'));v.dispatchEvent(new Event('ended'));
+        });
+        await flush(page,2);assert.equal(await state(page),'VERIFYING_COMPLETION');assert.equal(await page.evaluate(()=>window.__diagnosticClicks),0);
+        await page.evaluate(()=>{
+            window.__oldDiagnosticCallbacks=[...window.__timeouts.values()];
+            const node=document.querySelector('#node0');node.querySelector('input').value='0';node.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
+            if(!app.settings.features.videoPlayback){const s=structuredClone(app.settings);s.features.videoPlayback=true;app.updateSettings(s);}
+        });
+        await flush(page,3);
+        await page.evaluate(()=>{for(const callback of window.__oldDiagnosticCallbacks)callback();window.__originalDiagnostic.dispatchEvent(new Event('ended'));});
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__diagnosticClicks,window.__originalDiagnostic.__plays,app._videoEl.__plays,app._videoEl.playbackRate]),['PLAYING',1,1,1,1]);
+    }));
+    for(const nextEnabled of [true,false])await check(`diagnostic ordered audio attachments honor independent nextAudio=${nextEnabled}`,()=>using([outer(2),0],async page=>{
+        await diagnosticLesson(page,'audio');
+        await page.evaluate(nextEnabled=>{
+            const root=window.__diagnosticRoot,old=root.querySelector('iframe'),extra=root.createElement('iframe');extra.className=old.className;root.body.append(extra);
+            extra.contentDocument.body.innerHTML=old.contentDocument.body.innerHTML;
+            const second=extra.contentDocument.querySelector('#audio_html5_api');second.__paused=true;second.__ended=false;second.__plays=0;
+            Object.defineProperties(second,{paused:{get:()=>second.__paused},ended:{get:()=>second.__ended}});second.play=()=>{second.__plays++;second.__paused=false;return Promise.resolve();};
+            window.__secondDiagnostic=second;
+            const s=structuredClone(app.settings);s.features.nextAudio=nextEnabled;s.randomDelaysEnabled=true;
+            for(const [key,rule]of Object.entries(s.delays))rule.enabled=key==='nextAudio';app.updateSettings(s);app.run({startup:true});
+        },nextEnabled);
+        await flush(page,3);assert.equal(await state(page),'PLAYING');
+        await page.evaluate(()=>{const v=app._videoEl;v.__paused=true;v.__ended=true;v.dispatchEvent(new Event('ended'));});await flush(page);
+        if(nextEnabled){assert.equal(await page.evaluate(()=>app._actions.pending.get('video-start')?.category),'nextAudio');await flush(page);}
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__diagnosticPlayers[0].__plays,window.__secondDiagnostic.__plays]),[nextEnabled?'PLAYING':'PAUSED_AUTOMATION',1,nextEnabled?1:0]);
+        assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+    }));
     async function audioLesson(page, variant = '', automatic = false, restart = true) {
         await page.evaluate(({ html, variant, automatic, restart }) => {
             const root = document.querySelector('iframe[info="card"]').contentDocument;
