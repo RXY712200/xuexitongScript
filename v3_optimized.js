@@ -746,9 +746,9 @@
             get cellData() {
                 return this._cellData;
             },
-            run({ startup = false } = {}) {
+            run({ startup = false, transition = false } = {}) {
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
-                this._cancelTasks();
+                if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
                 this._automaticStartup = startup;
                 this._state = 'DISCOVERING';
@@ -1331,6 +1331,7 @@
                 return timer;
             },
             _cancelTasks() {
+                this._catalogTransitionCancel?.();
                 this._startupCancel?.(); this._automaticStartup = false;
                 this._actions?.cancelAll();
                 this._documentController?.cancel();
@@ -1488,7 +1489,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_STARTUP', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
@@ -1608,6 +1609,7 @@
                 this._queueNavigation(target);
             },
             _bindStepNavigation() {
+                this._bindCatalogNavigation();
                 if (this._stepNavigationBound) {
                     return;
                 }
@@ -1636,6 +1638,70 @@
                         reenterVideoMode();
                     }
                 });
+            },
+            _cardIdentity() {
+                const media = videoAdapter.discover();
+                return [videoAdapter.cardFrame(), videoAdapter.cardDocument(), ...media.documents, ...media.videos,
+                    ...(media.audios || []), ...(media.tasks || []).map(task => task.attachment),
+                    ...media.documents.flatMap(doc => Array.from(doc.querySelectorAll('a.liveHref, form')))];
+            },
+            _bindCatalogNavigation() {
+                if (this._catalogObserver || typeof MutationObserver === 'undefined') return;
+                this._observedLessonId = catalog.current()?.id;
+                this._observedCard = this._cardIdentity();
+                this._catalogClick = event => {
+                    const label = event.target.closest?.('#coursetree .posCatalog_name');
+                    const target = label?.closest('.posCatalog_select');
+                    if (this._destroyed || this._state === 'ADVANCING' || !target || !catalog.entries().includes(target) ||
+                        !target.id || (target.id === this._observedLessonId && !this._catalogTransitionCancel)) return;
+                    this._beginCatalogTransition(target.id);
+                };
+                document.addEventListener('click', this._catalogClick, true);
+                this._catalogObserver = new MutationObserver(() => {
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG'].includes(this._state)) return;
+                    const node = catalog.current();
+                    if (!this._observedLessonId && node?.id) { this._observedLessonId = node.id; return; }
+                    if (node?.id && node.id !== this._observedLessonId) {
+                        if (this._state === 'NAVIGATION_COOLDOWN') return this._block('导航等待时出现未确认的目录切换');
+                        this._beginCatalogTransition(node.id);
+                    }
+                });
+                this._catalogObserver.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+            },
+            _beginCatalogTransition(id) {
+                const old = this._observedCard || this._cardIdentity();
+                this._cancelTasks(); this._detachVideoEvents();
+                this._videoEl = null; this._videoContext = null; this._isPlaying = false;
+                this._attachmentSnapshot = null;
+                this._nextUnitPending = false;
+                this._state = 'WAITING_CATALOG';
+                const generation = this._generation, href = window.location.href;
+                let attempts = 0, timer, previous = null;
+                const same = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+                const cancel = () => this._block('侧栏切换已取消');
+                const cleanup = () => {
+                    clearTimeout(timer); this._timers.delete(timer);
+                    for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) window.removeEventListener(type, cancel);
+                    if (this._catalogTransitionCancel === cleanup) this._catalogTransitionCancel = null;
+                };
+                this._catalogTransitionCancel = cleanup;
+                for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) window.addEventListener(type, cancel);
+                const wait = () => {
+                    this._timers.delete(timer);
+                    if (generation !== this._generation || this._destroyed) return cleanup();
+                    if (href !== window.location.href) { cleanup(); return this._block('侧栏切换时页面已离开'); }
+                    const node = catalog.current(), now = this._cardIdentity();
+                    const valid = node?.id === id && Array.from(document.querySelectorAll('[id]')).filter(el => el.id === id).length === 1 &&
+                        now[1] && !same(old, now) && now[1].readyState !== 'loading';
+                    if (valid && previous && same(previous, now)) {
+                        cleanup(); this._observedLessonId = id; this._observedCard = now;
+                        this.run({ startup: true, transition: true }); return;
+                    }
+                    if (++attempts >= 40) { cleanup(); return this._block('侧栏课节与新内容未能稳定确认'); }
+                    previous = valid ? now : null;
+                    timer = setTimeout(wait, 250); this._timers.add(timer);
+                };
+                wait();
             },
             _handlePlayError(error) {
                 console.error("播放错误详情:", error);
@@ -1709,6 +1775,7 @@
                     if (generation !== this._generation || this._destroyed) return;
                     const contentDocument = videoAdapter.cardDocument();
                     if (catalog.current() === nCell && contentDocument && contentDocument !== oldDocument) {
+                        this._observedLessonId = nCell.id; this._observedCard = this._cardIdentity();
                         this._nextUnitPending = false;
                         this._tryTimes = 0;
                         this._state = 'DISCOVERING';
@@ -1744,7 +1811,7 @@
                 return this._treeContainerEl;
             },
             _getVideoEl() {
-                if (['WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
+                if (['WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT'].includes(this._state)) return null;
                 if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                     this._block('当前播放页面或播放器已变化');
                     this._videoEl = null;
@@ -1835,6 +1902,8 @@
                 document.addEventListener('visibilitychange', resumePlaybackNow);
             },
             destroy() {
+                this._catalogObserver?.disconnect(); this._catalogObserver = null;
+                document.removeEventListener?.('click', this._catalogClick, true);
                 this._destroyed = true;
                 this._settingsPanel?.remove();
                 this._renderSettings = null;

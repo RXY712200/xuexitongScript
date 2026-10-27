@@ -10,7 +10,10 @@ const current = actual.replaceAll('this._playableMedia()', 'this._discoverMedia(
     .replace("['videoStart', 'nextVideo', 'audioStart', 'nextAudio']", "['videoStart', 'nextVideo']")
     .replace("!['videoStart', 'audioStart'].includes(category)", "category !== 'videoStart'")
     .replace("if (this._startupCancel && !next.features[this._discoverMedia().audios?.length ? 'audioPlayback' : 'videoPlayback'])", 'if (!next.features.videoPlayback && this._startupCancel)')
-    .replace("['video', 'audio'].includes(task.kind)", "task.kind === 'video'");
+    .replace("['video', 'audio'].includes(task.kind)", "task.kind === 'video'")
+    .replace('                this._bindCatalogNavigation();\n', '')
+    .replace('                this._catalogObserver?.disconnect(); this._catalogObserver = null;\n                document.removeEventListener?.(\'click\', this._catalogClick, true);\n', '')
+    .replace('                        this._observedLessonId = nCell.id; this._observedCard = this._cardIdentity();\n', '');
 function method(source, name) {
     const start = Math.max(source.indexOf(`            ${name}(`), source.indexOf(`            async ${name}(`));
     assert.ok(start >= 0, name);
@@ -107,7 +110,7 @@ for (const name of ['_catalogTopology', '_refreshVideoContext', '_sameVideoTaskN
     '_navigationEligible', '_queueNavigation', '_tryResumePlayback', '_handlePlayError', '_checkVideoStatus']) {
     assert.equal(withoutInventoryGuard(method(current, name)), method(startupBaseline, name), `${name} preserves d7ea26a completion/continuity`);
 }
-const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_playableMedia', '_mediaAction', '_discoverAttachmentTask', '_cancelTasks', 'play', '_getVideoEl'];
+const startupChanges = ['run', '_waitForStartup', 'nextUnit', 'updateSettings', '_runAction', '_discoverMedia', '_playableMedia', '_mediaAction', '_discoverAttachmentTask', '_cardIdentity', '_bindCatalogNavigation', '_beginCatalogTransition', '_cancelTasks', 'play', '_getVideoEl'];
 const outsideStartup = source => {
     source = source.slice(source.indexOf('    // Rules are limited'));
     source = withoutInventoryGuard(source);

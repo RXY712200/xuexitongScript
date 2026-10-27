@@ -196,8 +196,8 @@ async function using(options, fn) {
 }
 const state = page => page.evaluate(() => app._state);
 try {
-    async function audioLesson(page, variant = '', automatic = false) {
-        await page.evaluate(({ html, variant, automatic }) => {
+    async function audioLesson(page, variant = '', automatic = false, restart = true) {
+        await page.evaluate(({ html, variant, automatic, restart }) => {
             const root = document.querySelector('iframe[info="card"]').contentDocument;
             root.body.innerHTML = '<div><audio id="auditionAudio" controls style="display:none"></audio></div><iframe></iframe>';
             const doc = root.querySelector('iframe').contentDocument; doc.body.innerHTML = html;
@@ -217,8 +217,8 @@ try {
             const settings = JSON.parse(JSON.stringify(app.settings)); settings.randomDelaysEnabled = false;
             if (automatic) settings.features.videoPlayback = false;
             if (variant === 'disabled') settings.features.audioPlayback = false;
-            app.updateSettings(settings); app.run({ startup: automatic });
-        }, { html: audioFixture, variant, automatic });
+            app.updateSettings(settings); if (restart) app.run({ startup: automatic });
+        }, { html: audioFixture, variant, automatic, restart });
     }
     await check('audio native primary and inactive secondary preserve fixed speed and marker-gated natural completion', () => using([outer(2), 0], async page => {
         await audioLesson(page);
@@ -255,8 +255,8 @@ try {
                 s.delays.audioStart.minMs===300 && !app.updateSettings(malformed) && app.settings===s;
         }),true);
     }));
-    async function attachments(page, variant = '') {
-        await page.evaluate(variant => {
+    async function attachments(page, variant = '', restart = true) {
+        await page.evaluate(({ variant, restart }) => {
             const root = document.querySelector('iframe[info="card"]').contentDocument;
             root.body.innerHTML = '<div><audio id="auditionAudio" controls style="display:none"></audio></div>';
             window.__attachmentVideos = [];
@@ -278,9 +278,64 @@ try {
             if (variant === 'audio') root.querySelector('audio').id = 'unknownAudio';
             if (variant === 'sibling') window.__attachmentVideos[2].__paused = false;
             const settings = JSON.parse(JSON.stringify(app.settings)); settings.features.document = false;
-            settings.randomDelaysEnabled = false; app.updateSettings(settings); app.run();
-        }, variant);
+            settings.randomDelaysEnabled = false; app.updateSettings(settings); if (restart) app.run();
+        }, { variant, restart });
     }
+    async function selectSidebar(page, index = 1) {
+        await page.evaluate(index => {
+            window.__obsoleteMedia = app._videoEl;
+            const labels = [...document.querySelectorAll('#coursetree .posCatalog_name')];
+            labels[index].onclick = () => {
+                document.querySelector('.posCatalog_active').classList.remove('posCatalog_active');
+                labels[index].closest('.posCatalog_select').classList.add('posCatalog_active');
+            };
+            labels[index].click();
+        }, index);
+    }
+    await check('sidebar single video to single video without reload cancels obsolete ended and starts once', () => using([outer(3),1], async page => {
+        const generation = await page.evaluate(() => app._generation);
+        await selectSidebar(page); assert.equal(await state(page),'WAITING_CATALOG');
+        await page.evaluate(() => {
+            window.__obsoleteMedia.__ended=true; window.__obsoleteMedia.dispatchEvent(new Event('ended'));
+            document.querySelector('iframe').contentDocument.body.replaceChildren(); window.__addVideos(1);
+        });
+        await flush(page,5);
+        assert.deepEqual(await page.evaluate(() => [app._state,app._videoEl.__plays,app._generation]),['PLAYING',1,generation+1]);
+    }));
+    await check('sidebar video to audio and audio to ordered attachments reuse bounded readiness', () => using([outer(3),1], async page => {
+        await selectSidebar(page); await audioLesson(page,'',false,false); await flush(page,5);
+        assert.deepEqual(await page.evaluate(() => [app._state,app._videoEl.tagName,app._videoEl.__plays]),['PLAYING','AUDIO',1]);
+        await selectSidebar(page,2); await attachments(page,'',false); await flush(page,5);
+        assert.deepEqual(await page.evaluate(() => [app._state,app._videoEl.tagName,window.__attachmentVideos.map(v=>v.__plays)]),['PLAYING','VIDEO',[1,0,0,0]]);
+    }));
+    await check('sidebar fast repeated selections invalidate stale wait callbacks', () => using([outer(3),1], async page => {
+        await selectSidebar(page,1);
+        await page.evaluate(() => { window.__oldWait=[...window.__timeouts.values()][0]; });
+        await selectSidebar(page,2);
+        await page.evaluate(() => { document.querySelector('iframe').contentDocument.body.replaceChildren(); window.__addVideos(1); window.__oldWait(); });
+        await flush(page,5); assert.equal(await state(page),'PLAYING');
+        assert.equal(await page.evaluate(() => [app._videoEl.__plays,document.querySelector('.posCatalog_active').id].join(',')),'1,node2');
+    }));
+    await check('sidebar unchanged catalog replacement does not restart completed logical media', () => using([outer(2),1], async page => {
+        const generation=await page.evaluate(()=>app._generation);
+        await page.evaluate(()=>{const n=document.querySelector('.posCatalog_active'); n.replaceWith(n.cloneNode(true));});
+        await flush(page,2);
+        assert.equal(await page.evaluate(()=>app._generation),generation);
+        assert.equal(await page.evaluate(()=>app._videoEl.__plays),1);
+    }));
+    await check('sidebar no proven content change times out safely and destruction cancels waits', () => using([outer(2),1], async page => {
+        await selectSidebar(page); await flush(page,41); assert.equal(await state(page),'BLOCKED');
+        await selectSidebar(page,0); await page.evaluate(()=>app.destroy()); await flush(page,41);
+        assert.equal(await page.evaluate(()=>app._timers.size),0);
+    }));
+    await check('sidebar assessment remains unanswered and unsupported live remains manual', () => using([outer(3),1,false,null,false,'recorded'], async page => {
+        await selectSidebar(page);
+        await page.evaluate(()=>{document.querySelector('.prev_title').title='章节测验'; document.querySelector('iframe').contentDocument.body.innerHTML='<form>Assessment</form>';});
+        await flush(page,4); assert.equal(await page.evaluate(()=>app._isPlaying),false);
+        await selectSidebar(page,2);
+        await page.evaluate(()=>{document.querySelector('.prev_title').title='直播'; const f=document.querySelector('iframe[info="card"]'); f.id='iframe'; f.contentDocument.body.innerHTML='<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct">Synthetic live</div></div></a>';});
+        await flush(page,5); assert.equal(await state(page),'BLOCKED');
+    }));
     await check('multi-attachment inventory preserves ordered four videos and pending PDF', () => using([outer(2), 0], async page => {
         await attachments(page);
         assert.deepEqual(await page.evaluate(() => app._discoverMedia().tasks.map(t => [t.kind, t.position])), [['video',0],['video',1],['video',2],['video',3],['document',4]]);

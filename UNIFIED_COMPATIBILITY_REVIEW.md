@@ -54,3 +54,20 @@ disabled audio, unsafe secondary/auxiliary media and settings migration.
 
 Authenticated audio-player wrapper/control markup and the secondary container's
 actual hidden state still require user retesting. No blanket native-audio allowlist.
+
+## Stage 3 — sidebar transitions
+
+Capture catalog-name clicks and observe proven unique active-lesson ID changes.
+One bounded WAITING_CATALOG gate cancels old work, detaches media events, increments
+generation once, requires changed and stable card-document/media/task references,
+then reuses startup readiness. It does not reload the page or repeatedly run the
+application. Rapid new selections invalidate the previous gate. Same-ID catalog
+clones/marker updates do not cause a restart. Script-initiated lesson navigation
+owns its transition and updates the sidebar baseline before resuming playback.
+Existing `.prev_white` handling is preserved verbatim after the catalog hook.
+
+Six browser cases cover video→video, video→audio→attachments, stale ended and wait
+callbacks, rapid selections, same-ID replacement, timeout/destruction, assessment
+and native-live manual handling. Full previous suites remain required. DOM and
+media events are simulated; sidebar operation on the authenticated site still
+requires user retesting.
