@@ -2316,6 +2316,18 @@ try {
         await page.evaluate(()=>{app.stopAutomation();document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='<div>可回放，观看90%</div>';});
         await controls.locator('[data-attempt]').click();assert.ok(await page.evaluate(()=>app._lastNotice.includes('未找到可识别的直播入口')));
     }));
+    await check('credit marker-only text lesson advances without media; contradictory count prevents bypass',()=>using([outer(2),0],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();const n=document.querySelector('#node0');n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');app.run();});
+        await flush(page);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+        await page.evaluate(()=>{document.querySelector('#node0').insertAdjacentHTML('beforeend','<input class="jobUnfinishCount" value="1">');});
+        await flush(page);assert.equal(await state(page),'BLOCKED');
+    }));
+    await check('credit unknown text lesson observes delayed marker without inventing completion',()=>using([outer(2),0],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();document.querySelector('#node0 input').remove();app.run();});
+        assert.equal(await state(page),'WAITING_CREDIT');await flush(page,8);assert.equal(await state(page),'WAITING_CREDIT');
+        await page.evaluate(()=>document.querySelector('#node0').insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>'));
+        await flush(page,2);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

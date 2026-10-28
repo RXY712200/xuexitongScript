@@ -67,12 +67,13 @@
         },
         status(node) {
             if (!node) return 'unknown';
-            const count = node.querySelector('.jobUnfinishCount');
-            const value = count && /^\d+$/.test(count.value.trim()) ? Number(count.value) : null;
-            if (count && value === null) return 'unknown';
-            if (value > 0) return 'incomplete';
-            // Zero unfinished tasks alone does not prove completion.
-            return node.querySelector('.icon_Completed') ? 'completed' : 'unknown';
+            const own = selector => [...node.querySelectorAll(selector)].filter(el =>
+                el.closest('.posCatalog_select') === node && !el.closest('.ans-attach-online'));
+            const counts = own('.jobUnfinishCount');
+            const values = counts.map(el => String(el.value ?? el.textContent).trim());
+            if (values.some(value => !/^\d+$/.test(value))) return 'unknown';
+            if (values.some(value => Number(value) > 0)) return 'incomplete';
+            return own('.icon_Completed').length ? 'completed' : 'unknown';
         },
     };
     const videoAdapter = {
@@ -850,6 +851,7 @@
                 this._clearCheckInterval();
                 this._bindStepNavigation();
                 this._notify('正在检测当前小节');
+                if (this._checkPriorCompletion() || this._observeCredit()) return;
                 const scope = startup && this._taskSet();
                 if (startup && !this._isChapterTest() && this._currentStepTitle() !== '学习目标' && !scope?.invalid && !scope?.tasks.length) this._waitForStartup(); else this.play();
             },
@@ -1082,6 +1084,8 @@
                 select.onchange = describe; describe();
                 details.querySelector('[data-inspect]').onclick = () => {
                     const info = this._inspectTask();
+                    const inventory = info.media?.tasks || [];
+                    details.querySelector('[data-task-status]').textContent = inventory.length ? `附件 ${inventory.length} 项：` + inventory.map((task,i) => `${i+1}.${task.kind}：平台信用未知（无已验证的附件级信号），按顺序处理`).join('；') : '未发现可验证的附件级完成信号';
                     details.querySelector('[data-detected]').textContent = `自动检测：${info.blocked ? info.reason : ({ video:'视频',audio:'音频',document:'文档',live:'直播 / 回放' }[info.kind] || '未识别')}${info.completed ? '；平台已有完成标记' : ''}`;
                 };
                 details.querySelector('[data-attempt]').onclick = event => { if (event.isTrusted) this._attemptTask(select.value); };
@@ -1737,11 +1741,27 @@
             _guardLastResumeTs: 0,
             // Prior platform credit is independent of local ended events. Require an
             // own zero-count AND own completion marker; attachment icons cannot prove a lesson.
+            _observeCredit() {
+                const node = catalog.current(), doc = videoAdapter.cardDocument();
+                if (!node || !doc || this._videoContext || catalog.status(node) !== 'unknown' ||
+                    (this._creditObserved?.node === node && this._creditObserved.doc === doc)) return false;
+                this._creditObserved = { node, doc };
+                const id = node.id, title = this._nodeTitle(node), generation = this._generation;
+                let attempts = 0;
+                const tick = () => {
+                    if (generation !== this._generation || this._destroyed) return;
+                    if (catalog.current() !== node || node.id !== id || this._nodeTitle(node) !== title || videoAdapter.cardDocument() !== doc) return this._block('完成观察期间任务身份已变化');
+                    if (catalog.status(node) === 'completed') { this._state = 'READY'; this.play(); return; }
+                    if (catalog.status(node) === 'incomplete' || ++attempts >= 12) {
+                        this._state = 'READY'; this.play(); return;
+                    }
+                    this._schedule(tick, 500);
+                };
+                this._state = 'WAITING_CREDIT'; this._notify('平台完成状态暂未确定，正在有限观察；超时不会视为完成');
+                this._schedule(tick, 500); return true;
+            },
             _priorProof(node) {
-                const own = selector => [...node.querySelectorAll(selector)].filter(el =>
-                    el.closest('.posCatalog_select') === node && !el.closest('.ans-attach-online'));
-                const counts = own('.jobUnfinishCount'), markers = own('.icon_Completed');
-                return counts.length === 1 && counts[0].value.trim() === '0' && markers.length === 1;
+                return catalog.status(node) === 'completed';
             },
             _priorCompletionValid(record) {
                 if (this._destroyed || record.generation !== this._generation || record.href !== location.href ||
@@ -1750,8 +1770,8 @@
                     this._currentStepTitle() !== record.title || videoAdapter.cardDocument() !== record.doc || record.doc.readyState === 'loading' ||
                     this._nodeTitle(record.node) !== record.name || this._isChapterTest()) return false;
                 const media = this._playableMedia();
-                return !media.pending && !media.unsupported && !media.inaccessible && media.navigationSafe !== false &&
-                    (record.players.length > 0 || record.attachments.length > 0) &&
+                return (!media.pending || (!record.players.length && !record.attachments.length)) && !media.unsupported && !media.inaccessible && (media.navigationSafe !== false ||
+                    (!record.players.length && !record.attachments.length && media.documents.length === 1 && media.reasons.every(reason => reason === 'player-not-ready'))) &&
                     record.players.length === media.videos.length && record.players.every((el, i) => el === media.videos[i] && el.isConnected && el.paused &&
                         record.sources[i] === (el.currentSrc || el.getAttribute('src') || '')) &&
                     record.attachments.length === (media.tasks || []).length && record.attachments.every((el, i) => el === media.tasks[i].attachment);
@@ -1863,12 +1883,12 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_AUDIO_GESTURE', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_AUDIO_GESTURE', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
                     if (this._playPending || this._actions.pending.has('video-start') || this._actions.pending.has('video-tab')) return;
-                    if (this._checkPriorCompletion()) return;
+                    if (this._checkPriorCompletion() || this._observeCredit()) return;
                     if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
                     const tasks = this._playableMedia();
