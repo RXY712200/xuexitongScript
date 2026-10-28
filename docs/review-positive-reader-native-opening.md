@@ -96,3 +96,25 @@ Retest real URL identifier availability, Tampermonkey GM raw integration, popup
 policy, Video.js recognition, natural end/credit propagation, self-close permission,
 background throttling and guarded reload. Closure cannot be independently proven
 without a retained child reference; the course relies on ended plus platform credit.
+
+## Session recovery correction (baseline 7389916)
+
+Cancelled/expired attempts and timed-out pending attempts are recoverable only by
+explicit retry. A new random session/nonce replaces the inactive attempt and clears
+stale claim/pulse keys. Active matched children are protected before manual task
+cancellation changes generation. Completed/verify/done states retain their return
+and single-refresh guards, including after expiry; they never become replay retries.
+
+Child heartbeats use a separate per-session value (nonce, child, timestamp, sequence),
+not the parent's heartbeat. Three minutes without a valid child pulse cancels the
+attempt without credit. Pending pairing still times out after two minutes. Recovery
+releases the manual-busy lock; it does not automatically reopen any replay. Parent
+notices now describe GM pairing rather than unconditionally demanding manual return.
+
+Seven focused GM scenarios pass, including blocked-popup retry, pending timeout,
+missing child, protected active child, expiry replacement, terminal guards and the
+existing claim/ack/natural-ended/close/refresh sequence. Mocked timers/storage do
+not prove real tab closure or Tampermonkey background heartbeat behavior. Browser
+throttling beyond the liveness bound can cause a conservative cancellation, never
+successful completion. No reader/audio/video/catalog/navigation implementation was
+changed; only the live retry guard and live notices accompany the GM state changes.

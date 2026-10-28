@@ -1162,6 +1162,7 @@
             },
             _attemptTask(kind) {
                 if (this._destroyed) return;
+                if (kind === 'live' && gmLive?.retryBlocked(this)) { this._notify('回放子页仍在线或正在确认配对，不能重复打开'); return; }
                 if (this._manualBusy || this._isPlaying || ['READING_DOCUMENT','WAITING_CATALOG','ADVANCING'].includes(this._state) || (this._state === 'WAITING_LIVE' && this._liveController)) {
                     this._notify('已有任务正在执行；请先停止自动操作再重试', '安全阻断'); return;
                 }
@@ -1194,11 +1195,11 @@
                     this._nativeOpenAttempts ||= new WeakSet();
                     if (!this._nativeOpenAttempts.has(task.element)) { this._nativeOpenAttempts.add(task.element); task.element.click(); }
                     this._manualBusy = false;
-                    this._notify('已识别原生直播卡片并请求打开；弹窗结果未验证。如未打开，请选择直播后点击“尝试执行”或直接点击原卡片。结束后需手动返回核对信用', '已识别，等待就绪'); return;
+                    this._notify(gmLive ? '已请求打开原生回放，等待 GM 子页配对；如未打开，请点击尝试执行重试。配对后将自动核对平台信用' : '已识别原生直播卡片并请求打开；弹窗结果未验证。如未打开，请点击尝试执行；本环境需手动返回核对信用', '已识别，等待就绪'); return;
                 }
                 this._manualBusy = true;
                 task.element.click(); // Native handler/target/URL remain untouched; no unowned window.close().
-                this._notify('已请求平台原生入口打开；无法确认新窗口或弹窗是否被拦截。完成后请手动处理，自动返回保持禁用', '已识别，尝试执行');
+                this._notify(gmLive ? '已通过用户操作请求打开，等待 GM 配对；无法确认新窗口或弹窗是否被拦截' : '已请求平台原生入口打开；无法确认新窗口或弹窗是否被拦截。完成后请手动处理，自动返回保持禁用', '已识别，尝试执行');
             },
             _waitForDocument(task) {
                 if (this._documentWaitCancel) return;
@@ -2619,13 +2620,19 @@
         const arm = app => {
             env.clearInterval(parentTimer);
             const tick = () => {
-                const r = gm.get(key,null); if (!fresh(r) || r.id !== owned || r.nonce !== parentNonce) { env.clearInterval(parentTimer); app._notify('回放会话过期或身份已变化，停止自动续课'); return; }
+                const r = gm.get(key,null); if (!fresh(r) || r.id !== owned || r.nonce !== parentNonce) { env.clearInterval(parentTimer); app._manualBusy=false; app._notify('回放会话过期或身份已变化，停止自动续课'); return; }
                 if (!validParent(app,r)) { if (listener != null) { gm.unlisten(listener); listener=null; } if (!['ended','verify','done','cancelled'].includes(r.phase)) save({ ...r,phase:'cancelled' }); env.clearInterval(parentTimer); return; }
+                if (r.phase === 'cancelled') { env.clearInterval(parentTimer); if(listener != null){gm.unlisten(listener);listener=null;} return; }
+                if (r.phase === 'active') {
+                    const pulse=gm.get(key+':child',null);
+                    const last=pulse?.id===r.id&&pulse.nonce===r.nonce&&pulse.child===r.child&&pulse.at>=r.created ? pulse.at : r.childBoundAt;
+                    if (!Number.isFinite(last)||now()-last>180000) { save({...r,phase:'cancelled',reason:'child-inactive'}); app._manualBusy=false; app._notify('回放子页已失联，未认定完成；可明确点击尝试执行重试'); return; }
+                }
                 if (r.phase === 'active' && now()-r.heartbeat>10000) { save({...r,heartbeat:now(),background:app.settings.features.background}); return; }
-                if (r.phase === 'pending' && now()-r.created>120000) { save({...r,phase:'cancelled'}); app._notify('回放未在两分钟内配对；请手动检查弹窗和页面标识，不会重复打开'); return; }
+                if (r.phase === 'pending' && now()-r.created>120000) { save({...r,phase:'cancelled'}); app._manualBusy=false; app._notify('回放未在两分钟内配对；请手动检查弹窗和页面标识，不会重复打开'); return; }
                 if (r.phase === 'pending') {
                     const claim = gm.get(key+':claim',null);
-                    if (claim && claim.id === r.id && claim.nonce === r.nonce && claim.created >= r.created && now()-claim.created < 120000 && matches(r.ids,claim.ids)) { acceptedChild=claim.child; save({ ...r,phase:'active',child:claim.child,seq:1 }); }
+                    if (claim && claim.id === r.id && claim.nonce === r.nonce && claim.created >= r.created && now()-claim.created < 120000 && matches(r.ids,claim.ids)) { acceptedChild=claim.child; save({ ...r,phase:'active',child:claim.child,childBoundAt:now(),seq:1 }); }
                 }
                 if (r.phase === 'ended' && r.seq === 2 && r.child === acceptedChild) { env.clearInterval(parentTimer); env.setTimeout(()=>{const terminal=gm.get(key,null);if(validParent(app,terminal))returnCredit(app,terminal);},2000); }
             };
@@ -2634,12 +2641,30 @@
         };
         return {
             restore(app) { const r=gm.get(key,null); return returnCredit(app,r); },
+            retryBlocked(app) {
+                const r=gm.get(key,null); if(!fresh(r)||r.lesson!==catalog.current()?.id||!matches(r.ids,identities()))return false;
+                const pulse=gm.get(key+':child',null), claim=gm.get(key+':claim',null);
+                if(r.phase==='pending')return claim?.id===r.id&&claim.nonce===r.nonce&&now()-r.created<=120000;
+                const last=pulse?.id===r.id&&pulse.nonce===r.nonce&&pulse.child===r.child?pulse.at:r.childBoundAt;
+                return r.phase==='active'&&Number.isFinite(last)&&now()-last<=180000;
+            },
             begin(app,task,scope,manual = false) {
                 if (env.location.origin !== 'https://mooc1.chaoxing.com' || !scope.validateScope() || !app.settings.features.live) return false;
                 const ids=identities();
                 if (!ids?.course || (!ids.clazz && !ids.lesson)) { app._notify('回放会话缺少可匹配的课程/班级/章节标识，请手动打开和返回'); return true; }
                 let r=gm.get(key,null);
-                if (r && !fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) { app._notify('回放会话已过期；请手动核对，不会重复打开'); return false; }
+                if (r && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
+                    if (['ended','verify','done'].includes(r.phase)) {
+                        if (!returnCredit(app,r)) app._notify('已结束会话的信用确认已过期，请手动核对；不会重新播放');
+                        return false;
+                    }
+                    const pulse=gm.get(key+':child',null);
+                    const childLast=pulse?.id===r.id&&pulse.nonce===r.nonce&&pulse.child===r.child ? pulse.at : r.childBoundAt;
+                    const abandoned=r.phase==='active'&&(!Number.isFinite(childLast)||now()-childLast>180000);
+                    const recoverable=!fresh(r)||r.phase==='cancelled'||(r.phase==='pending'&&(now()-r.created>120000||!gm.get(key+':claim',null)))||abandoned;
+                    if (recoverable && manual) { save({...r,phase:'cancelled'}); gm.remove(key+':claim'); gm.remove(key+':child'); r=null; }
+                    else if (recoverable) { app._notify('旧回放尝试已失效或尚未配对；请明确点击尝试执行重试，不会自动重复打开'); return false; }
+                }
                 if (fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
                     if (['ended','verify','done'].includes(r.phase)) { returnCredit(app,r); return false; }
                     if (manual && owned === r.id && r.phase === 'pending' && !r.manualRetried) { save({...r,generation:app._generation,manualRetried:true}); arm(app); return true; }
@@ -2651,7 +2676,7 @@
                 r={version:1,id:random(),nonce:random(),ids,lesson:catalog.current().id,title:app._nodeTitle(catalog.current()),generation:app._generation,videoEnabled:app.settings.features.videoPlayback,background:app.settings.features.background,created:now(),heartbeat:now(),expires:now()+14400000,phase:'pending',seq:0,refreshUsed:false};
                 owned=r.id; parentNonce=r.nonce; acceptedChild=null;
                 env.addEventListener('pagehide',()=>{const current=gm.get(key,null);if(current?.id===owned&&['pending','active'].includes(current.phase))save({...current,phase:'cancelled'});});
-                gm.remove(key+':claim'); save(r); arm(app); return true;
+                gm.remove(key+':claim'); gm.remove(key+':child'); save(r); arm(app); return true;
             },
             child(adapter) {
                 if (env.location.origin !== 'https://zhibo.chaoxing.com' || !adapter.isRecognized()) return;
@@ -2659,7 +2684,7 @@
                 if (!fresh(r) || r.phase !== 'pending' || now()-r.created>120000 || !matches(r.ids,ids)) { notice('回放未匹配唯一有效课程会话；请手动播放及返回'); return; }
                 const existing=gm.get(key+':claim',null); if(existing?.id===r.id) { notice('回放会话已被其他标签页申请，拒绝重复接管'); return; }
                 const child=random(), childHref=env.location.href; gm.set(key+':claim',{id:r.id,nonce:r.nonce,child,ids,created:now()});
-                let player, initial, progressed=false, started=false, lastResume=0, playPending=false, attempted=false, lastPosition=0, lastProgress=now();
+                let player, initial, progressed=false, started=false, lastResume=0, playPending=false, attempted=false, lastPosition=0, lastProgress=now(), pulseSeq=0;
                 const valid = () => { const current=gm.get(key,null); return fresh(current)&&current.id===r.id&&current.nonce===r.nonce&&current.child===child&&current.phase==='active'&&env.location.href===childHref&&now()-current.heartbeat<180000&&current.videoEnabled!==false&&matches(r.ids,identities())&&adapter.isRecognized(); };
                 const finish = () => {
                     if(completed || !valid() || !player?.ended || !progressed || player!==adapter.getPlayer()) return;
@@ -2672,6 +2697,7 @@
                     if(!fresh(current)||current.id!==r.id||!['pending','active'].includes(current.phase)){env.clearInterval(childTimer);return;}
                     if(current.phase==='pending'){notice('等待课程窗口确认回放会话');return;}
                     if(!valid()){env.clearInterval(childTimer);notice('会话身份或播放器已变化，停止自动控制');return;}
+                    gm.set(key+':child',{id:r.id,nonce:r.nonce,child,at:now(),seq:++pulseSeq});
                     const candidate=adapter.getPlayer();
                     if(!started){
                         if(!candidate||candidate.ended){notice('已结束或未就绪的播放器不能证明本会话播放完成');return;}
