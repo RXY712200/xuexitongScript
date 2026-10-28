@@ -825,7 +825,7 @@
                 this._destroyed = false;
                 this._manualPermit = null; this._manualBusy = false;
                 this._detectedKind = null; this._attemptStatus = '';
-                this._priorChecked = null; this._completedVisits = new Set();
+                this._priorChecked = null; if (!transition) this._completedVisits = new Set();
                 this._automaticStartup = startup;
                 this._state = 'DISCOVERING';
                 this._isPlaying = false;
@@ -883,6 +883,11 @@
                         cleanup(); return this._block('首次启动时课程任务已改变');
                     }
                     const frame = videoAdapter.cardFrame(), doc = videoAdapter.cardDocument(), media = this._playableMedia();
+                    if (catalog.status(node) === 'completed') {
+                        cleanup(); this._state = 'READY';
+                        if (!this._checkPriorCompletion()) this._block('完成标记存在，但任务范围尚无法安全确认');
+                        return;
+                    }
                     const scope = this._taskSet();
                     if (scope && !scope.invalid && scope.tasks.length && !media.pending && !media.unsupported && !media.inaccessible && scope.validateScope()) {
                         cleanup(); this._state = 'DISCOVERING'; this._initCellData(); this.play(); return;
@@ -937,6 +942,7 @@
                 if (next === null) return this._block('章末测验或下一章节无法安全识别');
                 if (!next) {
                     this._state = 'FINISHED';
+                    this._notify('已到当前可见目录末尾，自动导航已结束');
                     console.log('已到当前可见目录末尾；不代表整个课程已完成。');
                     return;
                 }
@@ -1001,6 +1007,7 @@
                             this._documentController?.cancel(); this._documentController = null;
                             this._liveController?.dispose(); this._liveController = null;
                             this._state = 'PAUSED_AUTOMATION'; this._playPending = false;
+                            this._notify('自动动作已取消；请明确重新检测后继续');
                         }
                     },
                     watch: cancel => {
@@ -1753,6 +1760,8 @@
                     if (catalog.current() !== node || node.id !== id || this._nodeTitle(node) !== title || videoAdapter.cardDocument() !== doc) return this._block('完成观察期间任务身份已变化');
                     if (catalog.status(node) === 'completed') { this._state = 'READY'; this.play(); return; }
                     if (catalog.status(node) === 'incomplete' || ++attempts >= 12) {
+                        const media = this._playableMedia();
+                        if (catalog.status(node) === 'unknown' && !media.videos.length && !media.tasks?.length && !this._taskSet()?.tasks.length) return this._block('平台完成状态仍未知，有限观察已结束；未跳过当前小节');
                         this._state = 'READY'; this.play(); return;
                     }
                     this._schedule(tick, 500);
@@ -2065,7 +2074,7 @@
                     const node = catalog.current();
                     if (!this._observedLessonId && node?.id) { this._observedLessonId = node.id; return; }
                     if (node?.id && node.id !== this._observedLessonId) {
-                        if (this._state === 'NAVIGATION_COOLDOWN') return this._block('导航等待时出现未确认的目录切换');
+                        if (this._state === 'NAVIGATION_COOLDOWN') { this.stopAutomation(); this._notify('平台或用户已切换小节，旧倒计时已取消；请明确重新检测'); return; }
                         this._beginCatalogTransition(node.id);
                     }
                 });
@@ -2159,6 +2168,9 @@
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('当前内容尚未确认完成');
                 }
+                const destinationId = nCell.id, destinationTitle = this._nodeTitle(nCell), destinationHref = location.href;
+                const oldCard = this._cardIdentity();
+                const oldMarkup = videoAdapter.cardDocument()?.body?.innerHTML;
                 const oldDocument = videoAdapter.cardDocument();
                 if (!oldDocument) return this._block('无法唯一识别 cards 内容 iframe');
                 this._attachmentSnapshot = null;
@@ -2172,24 +2184,32 @@
                 this._videoContext = null;
                 this._isPlaying = false;
                 const generation = this._generation;
+                this._notify('已发起导航，正在确认目标小节');
                 target.click();
                 // Navigation has its own context: the active node must change to the target,
                 // and a new iframe document must arrive before an old player can be reused.
-                let attempts = 0;
+                let attempts = 0, previous = null;
                 const wait = () => {
                     if (generation !== this._generation || this._destroyed) return;
+                    if (location.href !== destinationHref || nCell.id !== destinationId || this._nodeTitle(nCell) !== destinationTitle) return this._block('导航期间页面或目标身份已变化');
                     const contentDocument = videoAdapter.cardDocument();
-                    if (catalog.current() === nCell && contentDocument && contentDocument !== oldDocument) {
-                        this._observedLessonId = nCell.id; this._observedCard = this._cardIdentity();
+                    const card = this._cardIdentity(), markup = contentDocument?.body?.innerHTML;
+                    const changed = contentDocument !== oldDocument || card.length !== oldCard.length || card.some((value,i) => value !== oldCard[i]) || markup !== oldMarkup;
+                    const destination = catalog.current();
+                    if (destination && destination !== nCell && destination !== this._completionNode) return this._block('导航到达非预期小节，已停止');
+                    const valid = destination === nCell && nCell.isConnected && catalog.entries().includes(nCell) &&
+                        contentDocument && contentDocument.readyState !== 'loading' && changed;
+                    const snapshot = [...card, markup];
+                    if (valid && previous && previous.length === snapshot.length && previous.every((value,i) => value === snapshot[i])) {
+                        this._observedLessonId = nCell.id; this._observedCard = card;
                         this._nextUnitPending = false;
-                        this._tryTimes = 0;
-                        this._state = 'DISCOVERING';
-                        this._initCellData();
-                        this.play(); // Video, document and live switches are evaluated independently.
+                        this._notify('目标小节已确认，重新检查平台完成状态');
+                        this.run({ startup: true, transition: true });
                     } else if (++attempts >= this.configs.maxRetries) {
                         this._block('目录切换或内容 iframe 加载未确认');
                     } else {
-                        const timer = setTimeout(() => { this._timers.delete(timer); wait(); }, this.configs.retryInterval);
+                        previous = valid ? snapshot : null;
+                        const timer = setTimeout(() => { this._timers.delete(timer); wait(); }, 250);
                         this._timers.add(timer);
                     }
                 };

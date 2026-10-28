@@ -2328,6 +2328,30 @@ try {
         await page.evaluate(()=>document.querySelector('#node0').insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>'));
         await flush(page,2);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
     }));
+    for(const incomplete of [false,true])await check(`lifecycle reused document consecutive credit; final incomplete=${incomplete}`,()=>using([outer(3),0],async page=>{
+        await page.evaluate(incomplete=>{
+            app.stopAutomation();window.__transitionClicks=0;
+            for(const [i,node] of [...document.querySelectorAll('.posCatalog_select')].entries()){
+                if(!incomplete||i<2){node.querySelector('input').remove();node.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');}
+                node.querySelector('span').onclick=()=>{
+                    window.__transitionClicks++;document.querySelector('.posCatalog_active').classList.remove('posCatalog_active');node.classList.add('posCatalog_active');
+                    document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='<p>Destination '+i+'</p>';
+                    if(incomplete&&i===2)window.__addVideos(1);
+                };
+            }
+            app.run();
+        },incomplete);
+        await flush(page,20);
+        assert.equal(await state(page),incomplete?'PLAYING':'FINISHED');
+        assert.equal(await page.evaluate(()=>window.__transitionClicks),2);
+        assert.equal(await page.evaluate(()=>app._completedVisits.size),incomplete?2:3);
+        assert.ok(await page.evaluate(()=>!app._lastNotice.includes('0 秒')));
+    }));
+    await check('lifecycle startup wait accepts delayed credit without waiting for media',()=>using([outer(2),0],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app.run({startup:true});});assert.equal(await state(page),'WAITING_STARTUP');
+        await page.evaluate(()=>{const n=document.querySelector('#node0');n.querySelector('input').value='0';n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');});
+        await flush(page,2);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }
