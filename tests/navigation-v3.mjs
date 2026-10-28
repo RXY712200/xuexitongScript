@@ -2277,6 +2277,7 @@ try {
             doc.body.innerHTML='<div style="height:100px;overflow-y:auto;width:200px" id="synthetic-scroll"><div style="height:900px"></div></div>';
             window.__documentFrame=root.querySelector('iframe');window.__documentScroll=doc.querySelector('#synthetic-scroll');
             if(!delayed)window.__documentScroll.firstChild.innerHTML='<canvas width="180" height="900"></canvas>';
+            if(!delayed){const zeroLeaf=doc.createElement('iframe');zeroLeaf.style.cssText='position:absolute;top:0;height:100px;width:100px';window.__documentScroll.firstChild.append(zeroLeaf);zeroLeaf.contentDocument.body.innerHTML='<canvas width=10 height=10></canvas>';}
             const s=JSON.parse(JSON.stringify(app.settings));s.features.document=false;app.updateSettings(s);
             if(delayed)app._attachmentSnapshot={root,id:'obsolete-inventory',tasks:[]}; // Explicit retry must rediscover, not retain a failed cache.
             app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;
@@ -2388,8 +2389,8 @@ try {
             window.__nestedOpen=0;doc.querySelector('a').onclick=()=>window.__nestedOpen++;
             const settings=JSON.parse(JSON.stringify(app.settings));settings.features.live=true;app.updateSettings(settings);
             app.run();
-        });assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nestedOpen),0);
-        assert.ok(await page.evaluate(()=>app._lastNotice.includes('需用户点击打开')));
+        });assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('弹窗结果未验证')));
         assert.equal(await page.evaluate(()=>{
             const unrelated=document.createElement('a');document.body.append(unrelated);
             try{window.__xuexitongTaskSupport.createParent({entry:unrelated,nativeEntry:true});return false;}
@@ -2398,9 +2399,9 @@ try {
         await page.evaluate(()=>{app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;});
         const controls=page.locator('#xuexitong-v3-settings');await controls.locator('[data-task-type]').selectOption('live');
         await controls.locator('[data-attempt]').click();
-        assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+        assert.equal(await page.evaluate(()=>window.__nestedOpen),2);
         assert.ok(await page.evaluate(()=>app._lastNotice.includes('无法确认新窗口')));
-        await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+        await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>window.__nestedOpen),2);
     }));
     await check('owned credit skips only unique finished task wrappers without local ended fabrication',()=>using([outer(),1],async page=>{
         await attachments(page,'',false);await page.evaluate(()=>{
@@ -2433,6 +2434,10 @@ try {
             assert.equal(await page.evaluate(()=>app._externalCompletion.node===document.querySelector('#node0')),true);
             assert.equal(await page.evaluate(()=>window.__documentScroll.scrollTop),800);
         }else{await flush(page,3);assert.notEqual(await state(page),'NAVIGATION_COOLDOWN');assert.equal(await page.evaluate(()=>window.__originalDocumentRecord.localDone),false);}
+    }));
+    await check('knowledge map zero range never declares local reading complete',()=>using([outer(),0],async page=>{
+        const result=await page.evaluate(()=>{const el=document.createElement('div');el.style.cssText='height:100px';document.body.append(el);let complete=false,error='';window.__xuexitongTaskSupport.readDocument({element:el,isValid:()=>true,onComplete:()=>complete=true,onError:reason=>error=reason});return{complete,error};});
+        assert.equal(result.complete,false);assert.ok(result.error.includes('无有效滚动范围'));
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

@@ -333,7 +333,7 @@
             if (!href || /^javascript:\s*void\s*\(\s*0\s*\)\s*;?$/i.test(href)) return 'unresolved';
             try {
                 const url = new URL(href, doc.baseURI);
-                if (url.origin !== 'https://zhibo.chaoxing.com') return 'invalid';
+                if (url.origin !== 'https://zhibo.chaoxing.com') return 'unresolved';
             } catch (_) { return 'invalid'; }
             if (link.target !== '_blank') return 'unresolved';
             return link.relList.contains('noopener') || link.relList.contains('noreferrer') ? 'manual-policy' : 'approved-origin-only';
@@ -419,7 +419,9 @@
             }
             return false;
         };
-        const actual = viewers.filter(outer => !viewers.some(inner => inner !== outer && nestedIn(inner, outer)));
+        const positive = viewers.filter(el => el.scrollHeight - el.clientHeight > 1);
+        const actual = positive.filter(outer => !positive.some(inner => inner !== outer && nestedIn(inner, outer)));
+        if (!actual.length && !loading) return { reason: '未找到正滚动范围的阅读区；零范围不代表阅读完成，请检查平台信用或手动处理' };
         viewers.splice(0, viewers.length, ...actual);
         if (viewers.length > 1) {
             const scrolling = viewers.filter(el => el.scrollHeight > el.clientHeight + 1);
@@ -796,7 +798,8 @@
                 if (cancelled) return;
                 if (!isValid() || !element.isConnected || element.clientHeight <= 0) return fail('Document viewer unavailable');
                 const bottom = element.scrollHeight - element.clientHeight;
-                onProgress(bottom > 0 ? Math.min(100, Math.floor(element.scrollTop / bottom * 100)) : 100);
+                if (!Number.isFinite(bottom) || bottom <= 1) return fail('阅读区已无有效滚动范围；不能据此确认本地阅读完成');
+                onProgress(Math.min(100, Math.floor(element.scrollTop / bottom * 100)));
                 if (!Number.isFinite(bottom) || bottom < 0) return fail('Document bottom cannot be verified');
                 if (begun && element.scrollTop >= bottom - 1) {
                     if (bottomHeight === element.scrollHeight) { cancel(); onComplete(); return; }
@@ -1173,7 +1176,12 @@
                 if (!scope.validateScope() || media.unsupported || media.inaccessible || media.videos.length || this._verificationPresent()) return this._block('直播入口与任务范围不一致');
                 this._state = 'WAITING_LIVE'; this._isPlaying = false;
                 this._detectedKind = '直播 / 回放';
-                if (!manual) { this._manualBusy = false; this._notify('检测到直播回放链接；请在任务面板选择直播并点击“尝试执行”（需用户点击打开）', '已识别，等待就绪'); return; }
+                if (!manual) {
+                    this._nativeOpenAttempts ||= new WeakSet();
+                    if (!this._nativeOpenAttempts.has(task.element)) { this._nativeOpenAttempts.add(task.element); task.element.click(); }
+                    this._manualBusy = false;
+                    this._notify('已识别原生直播卡片并请求打开；弹窗结果未验证。如未打开，请选择直播后点击“尝试执行”或直接点击原卡片。结束后需手动返回核对信用', '已识别，等待就绪'); return;
+                }
                 this._manualBusy = true;
                 task.element.click(); // Native handler/target/URL remain untouched; no unowned window.close().
                 this._notify('已请求平台原生入口打开；无法确认新窗口或弹窗是否被拦截。完成后请手动处理，自动返回保持禁用', '已识别，尝试执行');
