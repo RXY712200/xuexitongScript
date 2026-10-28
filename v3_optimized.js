@@ -342,17 +342,41 @@
             const frame = videoAdapter.cardFrame();
             if (window.location?.origin !== 'https://mooc1.chaoxing.com' || !doc ||
                 frame?.id !== 'iframe' || frame.getAttribute('info') !== 'card' || doc !== videoAdapter.cardDocument()) return null;
-            const entries = doc.querySelectorAll('a.liveHref');
-            if (!entries.length) return null;
-            const entry = entries[0];
-            const recognized = () => entry.isConnected && doc.querySelectorAll('a.liveHref').length === 1 &&
-                doc.querySelector('a.liveHref') === entry &&
-                !!entry.querySelector(':scope > div.liveCard > div.live-ct') &&
-                /^javascript:\s*void\s*\(\s*0\s*\)\s*;?$/i.test(entry.getAttribute('href')?.trim() || '') &&
-                this.inspect(entry) !== 'invalid';
+            const root = doc, lesson = catalog.current(), found = [], seen = new Set();
+            let inaccessible = false;
+            const visit = (current, path) => {
+                if (!current || seen.has(current) || path.length > 4) { inaccessible = true; return; }
+                seen.add(current);
+                for (const entry of current.querySelectorAll('a.liveHref')) found.push({ entry, path });
+                for (const child of current.querySelectorAll('iframe')) {
+                    try { visit(child.contentDocument, [...path, child]); } catch (_) { inaccessible = true; }
+                }
+            };
+            visit(root, []);
+            if (!found.length) return null;
+            const { entry, path } = found[0];
+            const recognized = () => {
+                let current = root;
+                for (const owner of path) {
+                    if (!owner.isConnected || owner.ownerDocument !== current || owner.hidden || owner.inert || !owner.getClientRects().length) return false;
+                    try { current = owner.contentDocument; } catch (_) { return false; }
+                }
+                let count = 0, accessible = true;
+                const recount = (inner, depth = 0) => {
+                    if (!inner || depth > 4) { accessible = false; return; }
+                    count += inner.querySelectorAll('a.liveHref').length;
+                    for (const owner of inner.querySelectorAll('iframe')) { try { recount(owner.contentDocument, depth + 1); } catch (_) { accessible = false; } }
+                };
+                recount(root);
+                return accessible && count === 1 && current === entry.ownerDocument && entry.isConnected &&
+                    !!entry.querySelector(':scope > div.liveCard > div.live-ct') &&
+                    /^javascript:\s*void\s*\(\s*0\s*\)\s*;?$/i.test(entry.getAttribute('href')?.trim() || '') &&
+                    this.inspect(entry) !== 'invalid';
+            };
             return { tasks: [{ kind: 'live', element: entry, nativeEntry: true }],
-                validateScope: () => entries.length === 1 && frame === videoAdapter.cardFrame() &&
-                    doc === videoAdapter.cardDocument() && recognized() };
+                validateScope: () => !inaccessible && found.length === 1 && frame === videoAdapter.cardFrame() &&
+                    root === videoAdapter.cardDocument() && lesson === catalog.current() && recognized() };
+
         },
     };
 
@@ -383,9 +407,23 @@
             if (inner.length === 1) viewers.push(inner[0]);
             else if (inner.length > 1) return { reason: '文档滚动区域不唯一' };
         }
+        // A reader inside an owned iframe supersedes its containing shell,
+        // regardless of which viewport happens to have the larger numeric range.
+        const nestedIn = (inner, outer) => {
+            let doc = inner.ownerDocument;
+            for (let depth = 0; doc && depth < 5; depth++) {
+                const owner = doc.defaultView?.frameElement;
+                if (!owner) return false;
+                if (owner.ownerDocument === outer.ownerDocument) return outer.contains(owner);
+                doc = owner.ownerDocument;
+            }
+            return false;
+        };
+        const actual = viewers.filter(outer => !viewers.some(inner => inner !== outer && nestedIn(inner, outer)));
+        viewers.splice(0, viewers.length, ...actual);
         if (viewers.length > 1) {
             const scrolling = viewers.filter(el => el.scrollHeight > el.clientHeight + 1);
-            if (scrolling.length === 1) return { viewer: scrolling[0] };
+            if (scrolling.length === 1 && !loading) return { viewer: scrolling[0] };
             return { reason: `存在 ${viewers.length} 个独立候选阅读区域（实际可滚动 ${scrolling.length} 个）；无可靠顺序，请手动选择原生阅读区域` };
         }
         return viewers.length === 1 && !loading ? { viewer: viewers[0] } : { loading: true, reason: '未找到已渲染的可验证文档滚动区域（可能尚在加载或格式不受支持）' };
@@ -1390,7 +1428,8 @@
                 };
                 if (pending.kind === 'document') {
                     this._state = 'READING_DOCUMENT';
-                    this._notify('检测到文档任务，正在逐步阅读', '正在执行');
+                    const viewport = pending.viewer || pending.element;
+                    this._notify(`文档阅读区已确认：页面图元 ${viewport.querySelectorAll('img,canvas').length}，滚动距离 ${viewport.scrollHeight - viewport.clientHeight}px`, '正在执行');
                     try {
                         let first = true;
                         this._documentController = window.__xuexitongTaskSupport.readDocument({ element: pending.viewer || pending.element,
@@ -1860,7 +1899,7 @@
                 el.addEventListener('loadeddata', tick); el.addEventListener('canplay', tick);
                 for (const type of ['pagehide','beforeunload','popstate','hashchange']) window.addEventListener(type, cancel);
                 document.addEventListener('click', interaction, true);
-                if (el.currentSrc || el.getAttribute('src') || el.querySelector('source[src]')) el.load();
+                // Waiting never resets a resumed position with load().
                 tick();
             },
             _clearAudioNotice() {
@@ -1943,7 +1982,8 @@
                     if (this._completedVideos.has(el)) return;
                     if (this._isPlaying && !el.paused && !el.ended) { this._state = 'PLAYING'; return; }
                     if (!this._actionEnabled(this._mediaAction(el, this._nextVideoRequested))) { this._state = 'PAUSED_AUTOMATION'; return; }
-                    if (el.readyState < 2) { this._waitForMediaReady(el, actionReady); return; }
+                    const sourcePresent = !!(el.currentSrc || el.getAttribute('src') || el.querySelector('source[src]'));
+                    if (el.readyState < 2 && !sourcePresent) { this._waitForMediaReady(el, actionReady); return; }
                     if (!actionReady && this._preparedVideoNode !== catalog.current()) {
                         const category = this._mediaAction(el, this._nextVideoRequested);
                         this._state = 'ACTION_PENDING';

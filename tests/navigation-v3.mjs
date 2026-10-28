@@ -2270,6 +2270,7 @@ try {
             app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;
             root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';
             const wrapper=root.querySelector('iframe').contentDocument;wrapper.body.innerHTML='<iframe title="owned document wrapper"></iframe>';
+            wrapper.documentElement.style.height='184px';wrapper.body.insertAdjacentHTML('beforeend','<canvas width=10 height=10></canvas>');
             const doc=wrapper.querySelector('iframe').contentDocument;
             const shell=wrapper.createElement('iframe');wrapper.body.append(shell);shell.contentDocument.body.innerHTML='<canvas width=10 height=10></canvas>'; // Fitting shell is not a second scrolling reader.
             doc.body.innerHTML='<div style="height:100px;overflow-y:auto;width:200px" id="synthetic-scroll"><div style="height:900px"></div></div>';
@@ -2368,6 +2369,24 @@ try {
         assert.equal(await state(page),'NAVIGATION_COOLDOWN');assert.equal(await page.evaluate(()=>app._completedVisits.size),0);
         await flush(page,6);assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.__routeClicks),1);
         assert.equal(await page.evaluate(()=>app._completedVisits.size),1);
+    }));
+    await check('native evidence source-present idle attachment starts selected player without load or seeking',()=>using([outer(),1],async page=>{
+        await attachments(page,'',false);await page.evaluate(()=>{
+            for(const v of window.__attachmentVideos){v.__readyState=0;v.setAttribute('src','https://course.test/synthetic.mp4');Object.defineProperty(v,'networkState',{get:()=>1});v.load=()=>{throw new Error('must not reset load');};}
+            window.__attachmentVideos[1].currentTime=60;app.run();
+        });await flush(page);assert.equal(await state(page),'PLAYING');
+        assert.deepEqual(await page.evaluate(()=>window.__attachmentVideos.map(v=>v.__plays)),[1,0,0,0]);
+        assert.equal(await page.evaluate(()=>window.__attachmentVideos[1].currentTime),60);
+    }));
+    await check('native evidence nested live card with unresolved target invokes original handler manually',()=>using([outer(2,false,'直播'),0,false,null,false,'recorded'],async page=>{
+        await page.evaluate(()=>{
+            app.stopAutomation();const frame=document.querySelector('iframe[info="card"]');frame.id='iframe';frame.contentDocument.body.innerHTML='<iframe></iframe>';
+            const doc=frame.contentDocument.querySelector('iframe').contentDocument;
+            doc.body.innerHTML='<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct"><span class="liveBtn live_blue">可回放</span></div></div></a><a id="openUrl"></a>';
+            window.__nestedOpen=0;doc.querySelector('a').onclick=()=>window.__nestedOpen++;
+            app._attemptTask('live');
+        });assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('无法确认新窗口')));
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
