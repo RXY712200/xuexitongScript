@@ -2464,6 +2464,11 @@ try {
             assert.equal(await state(page),'VERIFYING_COMPLETION');assert.equal(await page.evaluate(()=>app._completedVideos.has(window.__audio)),true);
         }
     }));
+    await check('GM raw compatibility course still exposes page globals and starts ordinary player',()=>using([outer(),1,false,null,false,false,false,
+        'const unsafeWindow=window;const GM_getValue=(k,d)=>d,GM_setValue=()=>{},GM_deleteValue=()=>{},GM_addValueChangeListener=()=>1,GM_removeValueChangeListener=()=>{};'+source],async page=>{
+        assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.app===window.__xuexitongPlayerV3&&!!window.__xuexitongTaskSupport),true);
+        assert.equal(await page.evaluate(()=>app._videoEl.playbackRate),1);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

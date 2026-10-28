@@ -9,10 +9,19 @@
 // @match        *://*.chaoxing.com/mooc2-ans/mycourse/studentstudy*
 // @match        https://zhibo.chaoxing.com/*
 // @run-at       document-idle
-// @grant        none
+// @sandbox      raw
+// @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        window.close
 // ==/UserScript==
 
-(function () {
+(function (window) {
+    let $ = typeof window.jQuery === 'function' ? window.jQuery : globalThis.$;
+    const gmLive = typeof GM_getValue === 'function' && typeof GM_setValue === 'function' && typeof GM_addValueChangeListener === 'function' && typeof GM_deleteValue === 'function' && typeof GM_removeValueChangeListener === 'function' ? createGMLive(window, { get: GM_getValue, set: GM_setValue, remove: GM_deleteValue, listen: GM_addValueChangeListener, unlisten: GM_removeValueChangeListener, close: () => globalThis.close() }) : null;
     const APP_KEY = '__xuexitongPlayerV3';
     const BOOT_TIMER_KEY = '__xuexitongPlayerV3BootTimer';
     window.__xuexitongTaskSupport?.dispose?.();
@@ -42,6 +51,7 @@
         }
     }
     function waitForCoursePage() {
+        if (typeof window.jQuery === 'function') $ = window.jQuery;
         if (window[BOOT_TIMER_KEY] || (window[APP_KEY] && !window[APP_KEY]._destroyed)) return;
         let attempts = 0;
         const maxAttempts = 20;
@@ -487,7 +497,7 @@
 
     // The recorded popup uses confirmed evidence only.
     function bootRecordedPopup() {
-        if (window.top !== window || !window.opener) return;
+        if (window.top !== window) return;
         const flag = name => {
             if (typeof window[name] === 'number') return window[name];
             const values = Array.from(document.scripts).flatMap(script => Array.from(script.textContent.matchAll(
@@ -504,7 +514,12 @@
         let attempts = 0;
         const stop = () => { clearInterval(window[BOOT_TIMER_KEY]); window[BOOT_TIMER_KEY] = null; window.removeEventListener('pagehide', stop); };
         const probe = () => {
-            if (adapter.isRecognized()) { stop(); window.__xuexitongTaskSupport.installChild(adapter); }
+            if (adapter.isRecognized()) {
+                stop();
+                if (gmLive) gmLive.child(adapter);
+                else if (window.opener) window.__xuexitongTaskSupport.installChild(adapter);
+                else { const panel=document.createElement('p'); panel.textContent='用户脚本环境未提供 GM 跨标签页权限，且没有 opener；请手动播放并返回课程核对信用'; panel.style.cssText='position:fixed;bottom:8px;right:8px;z-index:2147483647;background:white;color:#222;padding:8px'; document.body.append(panel); }
+            }
             else if (++attempts >= 30) { stop(); console.warn('不支持或未加载的直播回放页面；课程窗口保持等待，请手动处理。'); }
         };
         window[BOOT_TIMER_KEY] = setInterval(probe, 1000);
@@ -1195,6 +1210,7 @@
                 if (!scope.validateScope() || media.unsupported || media.inaccessible || media.videos.length || this._verificationPresent()) return this._block('直播入口与任务范围不一致');
                 this._state = 'WAITING_LIVE'; this._isPlaying = false;
                 this._detectedKind = '直播 / 回放';
+                if (gmLive && !gmLive.begin(this, task, scope, manual)) return;
                 if (!manual) {
                     this._nativeOpenAttempts ||= new WeakSet();
                     if (!this._nativeOpenAttempts.has(task.element)) { this._nativeOpenAttempts.add(task.element); task.element.click(); }
@@ -2578,7 +2594,7 @@
         window[APP_KEY] = app;
 
         try {
-            app.run({ startup: true });
+            if (!gmLive?.restore(app)) app.run({ startup: true });
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);
@@ -2587,4 +2603,113 @@
     }
     if (window.location?.origin === 'https://zhibo.chaoxing.com') bootRecordedPopup();
     else bootCourse();
-})();
+    function createGMLive(env, gm) {
+        const key = 'xtx-v34-native-session-v1', now = () => Date.now();
+        const random = () => env.crypto.randomUUID();
+        const identities = () => {
+            const params = new URL(env.location.href).searchParams, result = {};
+            for (const [name, aliases] of Object.entries({ course: ['courseId','courseid'], clazz: ['clazzid','classId','classid'], lesson: ['chapterId','knowledgeId','chapterid','knowledgeid'] })) {
+                const values = aliases.flatMap(alias => params.getAll(alias)).filter(Boolean);
+                if (new Set(values).size > 1) return null;
+                if (values.length) result[name] = values[0];
+            }
+            return result;
+        };
+        const matches = (a,b) => a && b && a.course && a.course === b.course &&
+            a.lesson && a.lesson === b.lesson &&
+            ['course','clazz','lesson'].every(k => !a[k] || !b[k] || a[k] === b[k]);
+        const fresh = r => r && r.version === 1 && r.expires > now();
+        let parentTimer, childTimer, listener, owned, parentNonce, acceptedChild, completed = false;
+        const notice = text => {
+            let panel = env.document.getElementById('xtx-native-replay-status');
+            if (!panel) { panel = env.document.createElement('div'); panel.id = 'xtx-native-replay-status'; panel.style.cssText = 'position:fixed;right:8px;bottom:10px;z-index:2147483647;background:white;color:#222;padding:8px;max-width:300px;font:13px sans-serif'; env.document.body.append(panel); }
+            panel.textContent = text;
+        };
+        const save = r => gm.set(key, r);
+        const validParent = (app,r) => fresh(r) && !app._destroyed && app._generation === r.generation &&
+            app.settings.features.live && app.settings.features.videoPlayback && matches(r.ids,identities()) && app._nodeTitle(catalog.current()) === r.title && catalog.current()?.id === r.lesson;
+        const returnCredit = (app,r) => {
+            if (!fresh(r) || !matches(r.ids,identities()) || catalog.current()?.id !== r.lesson) return false;
+            if (!['ended','verify','done'].includes(r.phase)) return false;
+            app.stopAutomation();
+            if (r.phase === 'done') { app._notify('回放会话已处理；不会重复打开或刷新'); return true; }
+            if (app._priorProof(catalog.current())) { save({ ...r, phase:'done' }); app.run(); return true; }
+            if (!r.refreshUsed) { save({ ...r, phase:'verify', refreshUsed:true }); env.location.reload(); return true; }
+            app._notify('回放自然结束，但平台仍未确认完成；已停止，刷新不会重复执行'); return true;
+        };
+        const arm = app => {
+            env.clearInterval(parentTimer);
+            const tick = () => {
+                const r = gm.get(key,null); if (!fresh(r) || r.id !== owned || r.nonce !== parentNonce) { env.clearInterval(parentTimer); app._notify('回放会话过期或身份已变化，停止自动续课'); return; }
+                if (!validParent(app,r)) { if (listener != null) { gm.unlisten(listener); listener=null; } if (!['ended','verify','done','cancelled'].includes(r.phase)) save({ ...r,phase:'cancelled' }); env.clearInterval(parentTimer); return; }
+                if (r.phase === 'active' && now()-r.heartbeat>10000) { save({...r,heartbeat:now(),background:app.settings.features.background}); return; }
+                if (r.phase === 'pending' && now()-r.created>120000) { save({...r,phase:'cancelled'}); app._notify('回放未在两分钟内配对；请手动检查弹窗和页面标识，不会重复打开'); return; }
+                if (r.phase === 'pending') {
+                    const claim = gm.get(key+':claim',null);
+                    if (claim && claim.id === r.id && claim.nonce === r.nonce && claim.created >= r.created && now()-claim.created < 120000 && matches(r.ids,claim.ids)) { acceptedChild=claim.child; save({ ...r,phase:'active',child:claim.child,seq:1 }); }
+                }
+                if (r.phase === 'ended' && r.seq === 2 && r.child === acceptedChild) { env.clearInterval(parentTimer); env.setTimeout(()=>{const terminal=gm.get(key,null);if(validParent(app,terminal))returnCredit(app,terminal);},2000); }
+            };
+            if (listener != null) gm.unlisten(listener);
+            listener = gm.listen(key, tick); parentTimer=env.setInterval(tick,1000); tick();
+        };
+        return {
+            restore(app) { const r=gm.get(key,null); return returnCredit(app,r); },
+            begin(app,task,scope,manual = false) {
+                if (env.location.origin !== 'https://mooc1.chaoxing.com' || !scope.validateScope() || !app.settings.features.live) return false;
+                const ids=identities();
+                if (!ids?.course || (!ids.clazz && !ids.lesson)) { app._notify('回放会话缺少可匹配的课程/班级/章节标识，请手动打开和返回'); return true; }
+                let r=gm.get(key,null);
+                if (r && !fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) { app._notify('回放会话已过期；请手动核对，不会重复打开'); return false; }
+                if (fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
+                    if (['ended','verify','done'].includes(r.phase)) { returnCredit(app,r); return false; }
+                    if (manual && owned === r.id && r.phase === 'pending' && !r.manualRetried) { save({...r,generation:app._generation,manualRetried:true}); arm(app); return true; }
+                    if (r.phase !== 'pending' || r.generation !== app._generation) { app._notify('该回放会话已打开或取消，请手动核对，禁止重复打开'); return false; }
+                    if (owned === r.id) { app._notify('原生回放已请求打开；自动重复打开已取消，请使用手动重试'); return false; }
+                    app._notify('已有待处理回放会话；请直接使用平台卡片，自动重复打开已禁用'); return false;
+                }
+                if (fresh(r) && ['pending','active'].includes(r.phase)) { app._notify('另一个回放会话仍有效，拒绝并行打开'); return false; }
+                r={version:1,id:random(),nonce:random(),ids,lesson:catalog.current().id,title:app._nodeTitle(catalog.current()),generation:app._generation,videoEnabled:app.settings.features.videoPlayback,background:app.settings.features.background,created:now(),heartbeat:now(),expires:now()+14400000,phase:'pending',seq:0,refreshUsed:false};
+                owned=r.id; parentNonce=r.nonce; acceptedChild=null;
+                env.addEventListener('pagehide',()=>{const current=gm.get(key,null);if(current?.id===owned&&['pending','active'].includes(current.phase))save({...current,phase:'cancelled'});});
+                gm.remove(key+':claim'); save(r); arm(app); return true;
+            },
+            child(adapter) {
+                if (env.location.origin !== 'https://zhibo.chaoxing.com' || !adapter.isRecognized()) return;
+                const r=gm.get(key,null), ids=identities();
+                if (!fresh(r) || r.phase !== 'pending' || now()-r.created>120000 || !matches(r.ids,ids)) { notice('回放未匹配唯一有效课程会话；请手动播放及返回'); return; }
+                const existing=gm.get(key+':claim',null); if(existing?.id===r.id) { notice('回放会话已被其他标签页申请，拒绝重复接管'); return; }
+                const child=random(), childHref=env.location.href; gm.set(key+':claim',{id:r.id,nonce:r.nonce,child,ids,created:now()});
+                let player, initial, progressed=false, started=false, lastResume=0, playPending=false, attempted=false, lastPosition=0, lastProgress=now();
+                const valid = () => { const current=gm.get(key,null); return fresh(current)&&current.id===r.id&&current.nonce===r.nonce&&current.child===child&&current.phase==='active'&&env.location.href===childHref&&now()-current.heartbeat<180000&&current.videoEnabled!==false&&matches(r.ids,identities())&&adapter.isRecognized(); };
+                const finish = () => {
+                    if(completed || !valid() || !player?.ended || !progressed || player!==adapter.getPlayer()) return;
+                    completed=true;env.clearInterval(childTimer);const current=gm.get(key,null);save({...current,phase:'ended',seq:2});
+                    notice('回放已自然结束；课程窗口将独立核对平台信用');
+                    env.setTimeout(()=>{const terminal=gm.get(key,null);if(!fresh(terminal)||terminal.id!==r.id||terminal.child!==child||env.location.href!==childHref||!adapter.isRecognized()||adapter.getPlayer()!==player||!player.ended)return;try{gm.close();}catch(_){}env.setTimeout(()=>notice('浏览器未允许关闭，请手动关闭本回放标签页；不会重复打开'),1500);},2000);
+                };
+                const tick = () => {
+                    const current=gm.get(key,null);
+                    if(!fresh(current)||current.id!==r.id||!['pending','active'].includes(current.phase)){env.clearInterval(childTimer);return;}
+                    if(current.phase==='pending'){notice('等待课程窗口确认回放会话');return;}
+                    if(!valid()){env.clearInterval(childTimer);notice('会话身份或播放器已变化，停止自动控制');return;}
+                    const candidate=adapter.getPlayer();
+                    if(!started){
+                        if(!candidate||candidate.ended){notice('已结束或未就绪的播放器不能证明本会话播放完成');return;}
+                        player=candidate;initial=player.currentTime;started=true;player.addEventListener('ended',finish);
+                        player.addEventListener('timeupdate',()=>{if(valid()&&player.currentTime>initial)progressed=true;});
+                        env.addEventListener('pagehide',()=>{env.clearInterval(childTimer);player.removeEventListener('ended',finish);});
+                    }
+                    if(candidate!==player){env.clearInterval(childTimer);notice('播放器已替换，请手动处理');return;}
+                    player.playbackRate=1;
+                    if(player.currentTime>initial)progressed=true;
+                    if(player.currentTime!==lastPosition){lastPosition=player.currentTime;lastProgress=now();}
+                    if((player.paused||(current.background&&now()-lastProgress>7000))&&!player.ended&&!playPending&&(!attempted||current.background)&&now()-lastResume>1500){lastResume=now();attempted=true;playPending=true;Promise.resolve(player.play()).catch(()=>notice('浏览器拒绝回放播放，请点击原播放器；不会视为完成')).finally(()=>{playPending=false;});}
+                    notice('已匹配课程会话，回放正常播放（1.0x），等待自然结束');
+                };
+                env.__xuexitongLiveChild={gmSession:true,dispose(){env.clearInterval(childTimer);if(player)player.removeEventListener('ended',finish);}};
+                childTimer=env.setInterval(tick,1000);tick();
+            },
+        };
+    }
+})(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);

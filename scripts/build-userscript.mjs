@@ -14,7 +14,14 @@ const metadata = `// ==UserScript==
 // @match        *://*.chaoxing.com/mooc2-ans/mycourse/studentstudy*
 // @match        https://zhibo.chaoxing.com/*
 // @run-at       document-idle
-// @grant        none
+// @sandbox      raw
+// @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        window.close
 // ==/UserScript==
 
 `;

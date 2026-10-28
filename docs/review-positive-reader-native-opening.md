@@ -48,3 +48,51 @@ integration. No GM APIs, grants, claim/ack protocol, close confirmation or refre
 path were added or simulated. This is a partial delivery, not completion of task B.
 A verified single-userscript sandbox integration is still needed before claiming
 no-opener session playback/closing/return works. Existing evidence is preserved.
+
+## GM native replay lifecycle implementation (baseline 0c07d13)
+
+The previous unimplemented status remains historical; this iteration adds the
+main-script lifecycle. One generated userscript now requests @sandbox raw,
+unsafeWindow, GM value/listener APIs and window.close. Official semantics checked:
+https://www.tampermonkey.net/documentation.php?locale=zh.+CN&q=sandbox
+https://www.tampermonkey.net/documentation.php?ext=dhdg&q=grant&version=5.1.0
+The wrapper explicitly uses unsafeWindow for page globals and the page jQuery
+function. GM operations remain lexical capabilities; no general message-to-GM
+RPC or global window.open interception was added. Missing GM capabilities retain
+ordinary app initialization/manual fallback. Real Tampermonkey raw/sandbox behavior
+and userscript-manager closing permission still require authenticated testing.
+
+One pending GM record precedes native clicking. Random session/nonce, generation,
+course/lesson identifiers, optional class, 120-second claim deadline and four-hour
+safe expiry govern claim/parent-ack. Strictly equal course AND chapter/knowledge
+URL identifiers are required on both pages; missing identifiers do not permit
+pairing by domain or proximity alone. One claim is acknowledged; duplicates,
+unrelated URLs, stale generations and expired sessions cannot become completion.
+Only whitelisted URL identifiers are stored, never cookies/full/signed URLs.
+
+Positively recognized recorded Video.js pages can initialize without opener.
+After ack: native 1.0x play, pause/stall recovery according to background settings,
+actual progress plus a subsequent native ended event are required. Already-ended
+players, pagehide and early closing are not completion. Parent heartbeats guard
+orphaned sessions; lost communication stops control instead of inventing success.
+The optional companion protocol is not used or modified by this workflow.
+
+One ended result precedes a delayed self-close attempt. A surviving replay shows
+manual-close instructions; neither calling close nor pagehide proves closure.
+The parent independently checks credit after settling, permits one persisted
+session-bound refresh, restores verification only and never reopens that session.
+Absent credit after refresh stays on the lesson; actual credit enters the existing
+completion-first/five-second navigation pipeline. No server progress is fabricated.
+
+Checks: node tests/gm-live-v3.mjs: four focused mocked-GM scenarios pass (no opener,
+claim/ack, duplicate/expired/unrelated rejection, ended, early exit, denied close,
+credit gating and single refresh). Six filtered Chrome navigation cases pass,
+including GM-capability/page-global initialization and frozen audio/document/video
+behavior. Build, verify-v3, customization-v3, syntax/diff checks pass. A direct source
+comparison confirms frozen reader/audio/recovery/credit/rebinding/navigation method
+bodies unchanged. No full historical suite run or authenticated PASS claimed.
+
+Retest real URL identifier availability, Tampermonkey GM raw integration, popup
+policy, Video.js recognition, natural end/credit propagation, self-close permission,
+background throttling and guarded reload. Closure cannot be independently proven
+without a retained child reference; the course relies on ended plus platform credit.
