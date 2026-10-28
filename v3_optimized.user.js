@@ -1214,9 +1214,9 @@
                 if (gmLive && !gmLive.begin(this, task, scope, manual)) return;
                 if (!manual) {
                     this._nativeOpenAttempts ||= new WeakSet();
-                    if (!this._nativeOpenAttempts.has(task.element)) { this._nativeOpenAttempts.add(task.element); task.element.click(); }
+                    if (gmLive || !this._nativeOpenAttempts.has(task.element)) { this._nativeOpenAttempts.add(task.element); task.element.click(); }
                     this._manualBusy = false;
-                    this._notify(gmLive ? '已请求打开原生回放，等待 GM 子页配对；如未打开，请点击尝试执行重试。配对后将自动核对平台信用' : '已识别原生直播卡片并请求打开；弹窗结果未验证。如未打开，请点击尝试执行；本环境需手动返回核对信用', '已识别，等待就绪'); return;
+                    this._notify(gmLive ? gmLive.openingNotice() : '已识别原生直播卡片并请求打开；弹窗结果未验证。如未打开，请点击尝试执行；本环境需手动返回核对信用', '已识别，等待就绪'); return;
                 }
                 this._manualBusy = true;
                 task.element.click(); // Native handler/target/URL remain untouched; no unowned window.close().
@@ -2607,6 +2607,7 @@
     function createGMLive(env, gm) {
         const key = 'xtx-v34-native-session-v1', now = () => Date.now();
         const random = () => env.crypto.randomUUID();
+        const instance = random();
         const identities = () => {
             const params = new URL(env.location.href).searchParams, result = {};
             for (const [name, aliases] of Object.entries({ course: ['courseId','courseid'], clazz: ['clazzid','classId','classid'], lesson: ['chapterId','knowledgeId','chapterid','knowledgeid'] })) {
@@ -2641,7 +2642,7 @@
         const arm = app => {
             env.clearInterval(parentTimer);
             const tick = () => {
-                const r = gm.get(key,null); if (!fresh(r) || r.id !== owned || r.nonce !== parentNonce) { env.clearInterval(parentTimer); app._manualBusy=false; app._notify('回放会话过期或身份已变化，停止自动续课'); return; }
+                const r = gm.get(key,null); if (r?.parentToken && r.parentToken !== instance) { env.clearInterval(parentTimer); if(listener != null){gm.unlisten(listener);listener=null;} return; } if (!fresh(r) || r.id !== owned || r.nonce !== parentNonce) { env.clearInterval(parentTimer); app._manualBusy=false; app._notify('回放会话过期或身份已变化，停止自动续课'); return; }
                 if (!validParent(app,r)) { if (listener != null) { gm.unlisten(listener); listener=null; } if (!['ended','verify','done','cancelled'].includes(r.phase)) save({ ...r,phase:'cancelled' }); env.clearInterval(parentTimer); return; }
                 if (r.phase === 'cancelled') { env.clearInterval(parentTimer); if(listener != null){gm.unlisten(listener);listener=null;} return; }
                 if (r.phase === 'active') {
@@ -2650,7 +2651,7 @@
                     if (!Number.isFinite(last)||now()-last>180000) { save({...r,phase:'cancelled',reason:'child-inactive'}); app._manualBusy=false; app._notify('回放子页已失联，未认定完成；可明确点击尝试执行重试'); return; }
                 }
                 if (r.phase === 'active' && now()-r.heartbeat>10000) { save({...r,heartbeat:now(),background:app.settings.features.background}); return; }
-                if (r.phase === 'pending' && now()-r.created>120000) { save({...r,phase:'cancelled'}); app._manualBusy=false; app._notify('回放未在两分钟内配对；请手动检查弹窗和页面标识，不会重复打开'); return; }
+                if (r.phase === 'pending' && now()-r.created>120000) { save({...r,phase:'cancelled'}); app._manualBusy=false; app._notify('回放配对超时；可能是弹窗限制或页面标识不匹配，尚不能确认原因；可重试'); return; }
                 if (r.phase === 'pending') {
                     const claim = gm.get(key+':claim',null);
                     if (claim && claim.id === r.id && claim.nonce === r.nonce && claim.created >= r.created && now()-claim.created < 120000 && matches(r.ids,claim.ids)) { acceptedChild=claim.child; save({ ...r,phase:'active',child:claim.child,childBoundAt:now(),seq:1 }); }
@@ -2660,7 +2661,9 @@
             if (listener != null) gm.unlisten(listener);
             listener = gm.listen(key, tick); parentTimer=env.setInterval(tick,1000); tick();
         };
+        const adopt = (app,r) => { owned=r.id;parentNonce=r.nonce;acceptedChild=r.child||null;save({...r,parentToken:instance,generation:app._generation});arm(app); };
         return {
+            openingNotice() { const r=gm.get(key,null); return r?.id===owned&&r.autoRecovered ? '已恢复失效会话，已请求原生打开，正在等待 GM 子页配对' : '已请求打开原生回放，等待 GM 子页配对；配对后将自动核对平台信用'; },
             restore(app) { const r=gm.get(key,null); return returnCredit(app,r); },
             retryBlocked(app) {
                 const r=gm.get(key,null); if(!fresh(r)||r.lesson!==catalog.current()?.id||!matches(r.ids,identities()))return false;
@@ -2672,8 +2675,8 @@
             begin(app,task,scope,manual = false) {
                 if (env.location.origin !== 'https://mooc1.chaoxing.com' || !scope.validateScope() || !app.settings.features.live) return false;
                 const ids=identities();
-                if (!ids?.course || (!ids.clazz && !ids.lesson)) { app._notify('回放会话缺少可匹配的课程/班级/章节标识，请手动打开和返回'); return true; }
-                let r=gm.get(key,null);
+                if (!ids?.course || (!ids.clazz && !ids.lesson)) { app._notify('回放会话缺少可匹配的课程/班级/章节标识，请手动打开和返回'); return manual; }
+                let r=gm.get(key,null), recovered=false;
                 if (r && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
                     if (['ended','verify','done'].includes(r.phase)) {
                         if (!returnCredit(app,r)) app._notify('已结束会话的信用确认已过期，请手动核对；不会重新播放');
@@ -2683,10 +2686,22 @@
                     const childLast=pulse?.id===r.id&&pulse.nonce===r.nonce&&pulse.child===r.child ? pulse.at : r.childBoundAt;
                     const abandoned=r.phase==='active'&&(!Number.isFinite(childLast)||now()-childLast>180000);
                     const recoverable=!fresh(r)||r.phase==='cancelled'||(r.phase==='pending'&&(now()-r.created>120000||!gm.get(key+':claim',null)))||abandoned;
-                    if (recoverable && manual) { save({...r,phase:'cancelled'}); gm.remove(key+':claim'); gm.remove(key+':child'); r=null; }
-                    else if (recoverable) { app._notify('旧回放尝试已失效或尚未配对；请明确点击尝试执行重试，不会自动重复打开'); return false; }
+                    const stale = !fresh(r) || r.phase === 'cancelled' || abandoned || (r.phase === 'pending' && now()-r.created>120000);
+                    const claim=gm.get(key+':claim',null);
+                    const viableClaim=fresh(r)&&r.phase==='pending'&&now()-r.created<=120000&&claim?.id===r.id&&claim.nonce===r.nonce&&now()-claim.created<=120000;
+                    if (recoverable && !manual && stale && !viableClaim) {
+                        const guards=(gm.get(key+':recovery',[]) || []).filter(item=>item.until>now());
+                        if (guards.some(item=>item.lesson===r.lesson&&matches(item.ids,ids))) {
+                            app._notify('本轮自动恢复额度已用完；请明确点击尝试执行重试'); return false;
+                        }
+                        gm.set(key+':recovery',[...guards,{lesson:r.lesson,ids,until:now()+600000}]);
+                        save({...r,phase:'cancelled'});gm.remove(key+':claim');gm.remove(key+':child');r=null;
+                        recovered=true; app._notify('已恢复失效回放会话，将请求原生打开并等待子页配对');
+                    } else if (recoverable && manual && !viableClaim) { save({...r,phase:'cancelled'}); gm.remove(key+':claim'); gm.remove(key+':child'); r=null; }
+                    else if (recoverable) { if(fresh(r)&&r.phase==='pending'&&!stale)adopt(app,r); app._notify('原生打开已请求，正在等待子页配对；新鲜会话不会被提前重置'); return false; }
                 }
                 if (fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
+                    if (!manual && ['pending','active'].includes(r.phase)) { adopt(app,r); app._notify('保留现有回放会话，等待配对或播放结束；不会重复打开'); return false; }
                     if (['ended','verify','done'].includes(r.phase)) { returnCredit(app,r); return false; }
                     if (manual && owned === r.id && r.phase === 'pending' && !r.manualRetried) { save({...r,generation:app._generation,manualRetried:true}); arm(app); return true; }
                     if (r.phase !== 'pending' || r.generation !== app._generation) { app._notify('该回放会话已打开或取消，请手动核对，禁止重复打开'); return false; }
@@ -2694,7 +2709,7 @@
                     app._notify('已有待处理回放会话；请直接使用平台卡片，自动重复打开已禁用'); return false;
                 }
                 if (fresh(r) && ['pending','active'].includes(r.phase)) { app._notify('另一个回放会话仍有效，拒绝并行打开'); return false; }
-                r={version:1,id:random(),nonce:random(),ids,lesson:catalog.current().id,title:app._nodeTitle(catalog.current()),generation:app._generation,videoEnabled:app.settings.features.videoPlayback,background:app.settings.features.background,created:now(),heartbeat:now(),expires:now()+14400000,phase:'pending',seq:0,refreshUsed:false};
+                r={version:1,id:random(),nonce:random(),parentToken:instance,autoRecovered:recovered,ids,lesson:catalog.current().id,title:app._nodeTitle(catalog.current()),generation:app._generation,videoEnabled:app.settings.features.videoPlayback,background:app.settings.features.background,created:now(),heartbeat:now(),expires:now()+14400000,phase:'pending',seq:0,refreshUsed:false};
                 owned=r.id; parentNonce=r.nonce; acceptedChild=null;
                 env.addEventListener('pagehide',()=>{const current=gm.get(key,null);if(current?.id===owned&&['pending','active'].includes(current.phase))save({...current,phase:'cancelled'});});
                 gm.remove(key+':claim'); gm.remove(key+':child'); save(r); arm(app); return true;

@@ -118,3 +118,29 @@ not prove real tab closure or Tampermonkey background heartbeat behavior. Browse
 throttling beyond the liveness bound can cause a conservative cancellation, never
 successful completion. No reader/audio/video/catalog/navigation implementation was
 changed; only the live retry guard and live notices accompany the GM state changes.
+
+## Bounded unattended startup recovery (baseline 9fa73c7)
+
+Authenticated passes now include native opening, no-opener GM pairing, 1.0x replay,
+ended detection, self-close and parent refresh. The end test used manual seeking;
+it proves technical lifecycle only, not full-duration credit. No seeking was added.
+
+Parent startup now replaces only safely stale cancelled/expired/abandoned attempts
+automatically, with one durable GM recovery allowance per course/lesson in a
+10-minute startup cycle. Fresh pending/claims and active children are retained.
+Repeated run/reload may adopt the same parent session identity without reopening;
+a parent-instance token retires old watchers instead of cancelling the adopted
+session. Manual retry remains possible after the allowance is spent. Completed,
+verify and done records retain existing terminal and refreshUsed protections.
+
+GM-authorized opening is once per new session rather than blocked by the old
+per-DOM-element open cache. Missing matching identifiers still requires explicit
+manual action. Notices distinguish recovery, requested opening, pending pairing,
+claim timeout and possible popup restrictions without asserting a popup was blocked.
+
+Eight focused GM scenarios pass, including reinjection/generation adoption,
+first startup, single automatic stale recovery, pending/active preservation,
+manual fallback, terminals and existing natural-end/credit/refresh paths. Build,
+verify/customization/syntax/diff checks pass. Replay controller, claim/ack matching,
+closing, return-credit/refresh, audio/document/video/navigation bodies are frozen.
+Authenticated unattended startup and Chrome popup policy still need retesting.

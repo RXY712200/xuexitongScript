@@ -38,10 +38,10 @@ check('premature lifecycle exit and disabled settings never create success',()=>
  const h=setup();factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true});factory(h.child,{...h.gm,close:()=>h.child.close()}).child(h.adapter);h.parent.tick();h.child.tick();h.app.settings.features.live=false;h.parent.tick();h.child.tick();assert.equal(h.gm.get(key).phase,'cancelled');assert.equal(h.app.runs,undefined);assert.equal(h.child.closeAttempts,undefined);
  const early=setup();factory(early.parent,early.gm).begin(early.app,{}, {validateScope:()=>true});factory(early.child,{...early.gm,close:()=>early.child.close()}).child(early.adapter);early.parent.tick();early.child.tick();early.child.dispatch('pagehide');early.player.currentTime=30;early.player.ended=true;early.player.dispatchEvent(new Event('ended'));assert.equal(early.gm.get(key).phase,'active');assert.equal(early.child.closeAttempts,undefined);
 });
-check('pending timeout and cancelled attempts need explicit retry with fresh identity',()=>{
+check('pending timeout recovers automatically once, then explicit retry remains available',()=>{
  const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});const first=h.gm.get(key);
  h.gm.set(key,{...first,created:Date.now()-121000});h.parent.tick();assert.equal(h.gm.get(key).phase,'cancelled');
- assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),false);assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),true);assert.notEqual(h.gm.get(key).id,first.id);
+ assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),true);assert.notEqual(h.gm.get(key).id,first.id);const second=h.gm.get(key);h.gm.set(key,{...second,phase:'cancelled'});assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),false);assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),true);
 });
 check('missing child expires separately from parent heartbeat; active child remains protected',()=>{
  const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});factory(h.child,{...h.gm,close:()=>h.child.close()}).child(h.adapter);h.parent.tick();h.child.tick();
@@ -50,8 +50,17 @@ check('missing child expires separately from parent heartbeat; active child rema
  assert.equal(h.gm.get(key).phase,'cancelled');assert.equal(p.retryBlocked(h.app),false);assert.equal(h.app.runs,undefined);assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),true);
 });
 check('expired same lesson may retry, while completed and refresh guards never reopen',()=>{
- const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});let r=h.gm.get(key);h.gm.set(key,{...r,expires:0});assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),false);assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),true);
+ const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});let r=h.gm.get(key);h.gm.set(key,{...r,expires:0});assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),true);assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),false);
  r=h.gm.get(key);h.gm.set(key,{...r,phase:'verify',refreshUsed:true});assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),false);assert.equal(h.parent.location.reloads,undefined);
  h.gm.set(key,{...r,phase:'done',expires:0});assert.equal(p.begin(h.app,{}, {validateScope:()=>true},true),false);
+});
+check('fresh pending and fresh claim are preserved; stale auto allowance survives reinjection',()=>{
+ const h=setup(),p=factory(h.parent,h.gm);assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),true);let r=h.gm.get(key);
+ h.app._generation++;assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),false);h.parent.tick();assert.equal(h.gm.get(key).id,r.id);assert.equal(h.gm.get(key).phase,'pending');
+ h.gm.set(key+':claim',{id:r.id,nonce:r.nonce,child:'claiming',ids:r.ids,created:Date.now()});assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),false);
+ h.gm.remove(key+':claim');h.gm.set(key,{...r,phase:'cancelled'});assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),true);r=h.gm.get(key);
+ h.gm.set(key,{...r,phase:'cancelled'});assert.equal(factory(h.parent,h.gm).begin(h.app,{}, {validateScope:()=>true}),false);
+ for(const phase of ['ended','verify','done']){h.gm.set(key,{...r,phase,refreshUsed:true});assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),false);}
+ assert.equal(h.app.runs,undefined);
 });
 console.log(`RESULT: ${passed} focused GM lifecycle checks passed; mocked GM/tabs, not Tampermonkey acceptance.`);
