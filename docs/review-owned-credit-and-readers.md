@@ -27,3 +27,19 @@ password challenge, harmless authentication words, manual replay once, source-id
 selected video, empty-leaf/nested reading/credit, and existing route/audio checks.
 Build/verify/customization, syntax and diff checks pass. No full historical suite
 or authenticated compatibility PASS is claimed; private snapshots are excluded.
+
+## Document continuity follow-up (baseline 1dea94d)
+
+Authenticated post-failure evidence: detached old catalog node, same unique ID/title,
+unchanged card/step and connected boundary/reader. Timing is unproven; the later
+2150/2150 zero-range measurement does not establish the reader's earlier state.
+Document records now capture catalog/chapter topology and owned task/viewer order.
+Only detached-node replacements with matching unique identity may rebind. A fresh
+scope must retain all original boundaries/viewers; completion-node references follow
+the verified node. Task callbacks, document actions, delayed scheduling, completion
+verification and external navigation use the same document-only validation path.
+Video rebinding and reader topology/scrolling are unchanged. Changed/duplicate IDs
+cannot complete the old document record; normal sidebar cancellation remains intact.
+Five focused simulated cases pass (three continuity cases, existing document credit
+boundary, owned-video credit). Build/verify/customization/syntax/diff checks pass.
+Authenticated reading extent, callback timing and platform credit still need retest.

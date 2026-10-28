@@ -1038,7 +1038,7 @@
                 const href = window.location.href, content = videoAdapter.cardDocument();
                 const valid = () => navigationActions.has(category) && key === 'navigation' ?
                     !this._destroyed && generation === this._generation && this._actionEnabled(category) && !!options.isValid?.() :
-                    !this._destroyed && generation === this._generation && this._sameVideoTaskNode(node) &&
+                    !this._destroyed && generation === this._generation && this._sameTaskNode(node) &&
                     title === this._currentStepTitle() && href === window.location.href && content === videoAdapter.cardDocument() &&
                     this._actionEnabled(category) && (!options.isValid || options.isValid());
                 return this._actions.run(category, key, callback, { ...options, isValid: valid,
@@ -1390,7 +1390,34 @@
             _mediaAction(element, next = false) {
                 return element?.tagName === 'AUDIO' ? (next ? 'nextAudio' : 'audioStart') : (next ? 'nextVideo' : 'videoStart');
             },
+            _documentContextValid(record) {
+                if (record?.kind !== 'document' || !record.identity) return false;
+                const initial = record.identity, node = catalog.current(), chapter = node && this._chapterOf(node);
+                const unique = id => id && [...document.querySelectorAll('[id]')].filter(el => el.id === id).length === 1;
+                if (this._destroyed || record.generation !== this._generation || record.href !== location.href ||
+                    record.document !== videoAdapter.cardDocument() || record.title !== this._currentStepTitle() ||
+                    record.adapter !== this.taskAdapter || !node || node.id !== initial.id || !unique(initial.id) ||
+                    this._nodeTitle(node) !== initial.name || this._catalogTopology() !== initial.topology ||
+                    !chapter || (initial.chapterId && (chapter.id !== initial.chapterId || !unique(initial.chapterId))) ||
+                    (chapter !== initial.chapter && initial.chapter.isConnected)) return false;
+                if (node !== record.node && record.node.isConnected) return false;
+                const fresh = this._taskSet();
+                if (!fresh || fresh.invalid || fresh.tasks.length !== initial.tasks.length || !fresh.validateScope() ||
+                    !fresh.tasks.every((task,i) => task.kind === initial.tasks[i].kind && task.element === initial.tasks[i].element &&
+                        task.element.isConnected && task.viewer === initial.tasks[i].viewer)) return false;
+                if (this._verificationPresent()) return false;
+                const old = record.node;
+                record.scope = fresh; record.node = node; initial.nodes.add(node);
+                if (this._completionNode === old) this._completionNode = node;
+                return true;
+            },
+            _sameTaskNode(node) {
+                const record = this._externalCompletion;
+                if (record?.kind === 'document' && record.identity?.nodes.has(node)) return this._documentContextValid(record);
+                return this._sameVideoTaskNode(node);
+            },
             _taskContextValid(record) {
+                if (record?.kind === 'document' && record.identity) return this._documentContextValid(record);
                 try {
                     return !this._destroyed && record.href === window.location.href && record.generation === this._generation &&
                         record.node === catalog.current() && record.title === this._currentStepTitle() &&
@@ -1426,6 +1453,12 @@
                 const record = { node: catalog.current(), title: this._playStepTitle,
                     generation: this._generation, href: window.location.href, document: videoAdapter.cardDocument(), adapter: this.taskAdapter, scope,
                     kind: pending.kind, localDone: false };
+                if (record.kind === 'document' && record.node) {
+                    const chapter = this._chapterOf(record.node);
+                    record.identity = { id: record.node.id, name: this._nodeTitle(record.node), chapter, chapterId: chapter?.id || '',
+                        topology: this._catalogTopology(), nodes: new WeakSet([record.node]),
+                        tasks: scope.tasks.map(task => ({ kind: task.kind, element: task.element, viewer: task.viewer })) };
+                }
                 this._completionNode = record.node;
                 this._completionVideo = null;
                 this._externalCompletion = record;
@@ -1526,6 +1559,7 @@
             },
             _externalNavigationEligible(target) {
                 const record = this._externalCompletion;
+                if (record?.kind === 'document' && !this._taskContextValid(record)) return false;
                 if (!record || this._isPlaying || !record.localDone || record.node !== catalog.current() ||
                     record.title !== this._currentStepTitle() || record.href !== window.location.href || record.generation !== this._generation || this._destroyed) return false;
                 if (record.kind === 'assessment') return this._assessmentTarget(record.node) === target;
@@ -1658,7 +1692,7 @@
                 const timer = setTimeout(() => {
                     this._timers.delete(timer);
                     if (generation !== this._generation || this._destroyed) return;
-                    if (!this._sameVideoTaskNode(node)) return this._block('页面目录已变化，请执行 app.run() 重新识别');
+                    if (!this._sameTaskNode(node)) return this._block('页面目录已变化，请执行 app.run() 重新识别');
                     callback();
                 }, delay);
                 this._timers.add(timer);

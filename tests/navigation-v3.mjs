@@ -2417,6 +2417,23 @@ try {
         await page.evaluate(()=>{const d=document.querySelector('iframe[info="card"]').contentDocument;d.body.insertAdjacentHTML('beforeend','<input type="password">');});
         assert.equal(await page.evaluate(()=>app._verificationPresent()),true);
     }));
+    for(const mutation of ['same','changed','duplicate'])await check(`document continuity catalog replacement ${mutation}`,()=>using([outer(2,false,'文档'),0],async page=>{
+        await installDocument(page);await flush(page,2);
+        await page.evaluate(mutation=>{
+            window.__originalDocumentRecord=app._externalCompletion;
+            const old=document.querySelector('#node0'),replacement=old.cloneNode(true);
+            if(mutation==='changed')replacement.id='different-lesson';
+            old.replaceWith(replacement);
+            if(mutation==='duplicate'){const duplicate=replacement.cloneNode(true);duplicate.classList.remove('posCatalog_active');document.querySelector('#coursetree').append(duplicate);}
+            if(mutation==='same'){replacement.querySelector('input').value='0';replacement.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');}
+        },mutation);
+        if(mutation==='same'){
+            for(let i=0;i<35&&await state(page)==='READING_DOCUMENT';i++)await flush(page);
+            assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+            assert.equal(await page.evaluate(()=>app._externalCompletion.node===document.querySelector('#node0')),true);
+            assert.equal(await page.evaluate(()=>window.__documentScroll.scrollTop),800);
+        }else{await flush(page,3);assert.notEqual(await state(page),'NAVIGATION_COOLDOWN');assert.equal(await page.evaluate(()=>window.__originalDocumentRecord.localDone),false);}
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }
