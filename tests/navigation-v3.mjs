@@ -2384,9 +2384,21 @@ try {
             const doc=frame.contentDocument.querySelector('iframe').contentDocument;
             doc.body.innerHTML='<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct"><span class="liveBtn live_blue">可回放</span></div></div></a><a id="openUrl"></a>';
             window.__nestedOpen=0;doc.querySelector('a').onclick=()=>window.__nestedOpen++;
-            app._attemptTask('live');
-        });assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+            const settings=JSON.parse(JSON.stringify(app.settings));settings.features.live=true;app.updateSettings(settings);
+            app.run();
+        });assert.equal(await state(page),'WAITING_LIVE');assert.equal(await page.evaluate(()=>window.__nestedOpen),0);
+        assert.ok(await page.evaluate(()=>app._lastNotice.includes('需用户点击打开')));
+        assert.equal(await page.evaluate(()=>{
+            const unrelated=document.createElement('a');document.body.append(unrelated);
+            try{window.__xuexitongTaskSupport.createParent({entry:unrelated,nativeEntry:true});return false;}
+            catch(error){return error.message==='Unsupported native live entry';}
+        }),true);
+        await page.evaluate(()=>{app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;});
+        const controls=page.locator('#xuexitong-v3-settings');await controls.locator('[data-task-type]').selectOption('live');
+        await controls.locator('[data-attempt]').click();
+        assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
         assert.ok(await page.evaluate(()=>app._lastNotice.includes('无法确认新窗口')));
+        await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

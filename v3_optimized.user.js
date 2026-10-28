@@ -595,7 +595,7 @@
         };
         function createParent({ entry, nativeEntry = false, generation, threshold, isValid, onResult, onError, scheduleClose = fn => fn(), isPlatformComplete, background }) {
             if (nativeEntry) {
-                const scope = platformLiveEntry.discover({ document: entry?.ownerDocument });
+                const scope = platformLiveEntry.discover({ document: videoAdapter.cardDocument() });
                 if (!scope?.validateScope() || scope.tasks[0].element !== entry) throw new Error('Unsupported native live entry');
                 if (typeof isPlatformComplete === 'function') return createBridgeParent({ generation, isValid,
                     isPlatformComplete, onResult, onError, scheduleClose, background });
@@ -1406,7 +1406,7 @@
                 this._detectedKind = pending.kind === 'document' ? '文档' : '直播 / 回放';
                 if (!this.settings.features[pending.kind === 'document' ? 'document' : 'live'] && this._manualPermit !== pending.kind) { this._state = 'PAUSED_AUTOMATION'; this._notify('已识别任务，对应自动执行已关闭'); return true; }
                 if (pending.platformDocument && !pending.viewer) { this._waitForDocument(pending); return true; }
-                if (pending.nativeLink) { this._openNativeLink(pending, scope, this._manualPermit === 'live'); return true; }
+                if (pending.nativeLink || pending.nativeEntry) { this._openNativeLink(pending, scope, this._manualPermit === 'live'); return true; }
                 this._cancelTasks();
                 this._detachVideoEvents();
                 this._videoEl = null;
