@@ -26,3 +26,25 @@ Five targeted simulated cases pass: positive reader vs zero descendant, zero-ran
 failure, document credit gating, owned video credit, native opening/manual retry.
 Build/verify/customization/syntax/diff checks passed. Real reader geometry changes,
 programmatic scrolling credit and native popup behavior still require user retest.
+
+## Positive HTML/BODY follow-up (baseline 00ebfc5)
+
+Authenticated trace read the outer 34px shell while the nested owned reader
+remained at zero with 1789px range. Candidate elimination previously happened
+before positive-range filtering: fitting BODY could eliminate scrollable HTML.
+Require positive range before innermost selection; admit actual HTML/BODY roots
+without requiring CSS overflow:auto. Owned iframe ancestry still excludes outer
+shells. Pending src/srcdoc initialization delays commitment. New default document
+pauses are 300–1000ms; native 40–120px steps and saved custom settings remain.
+
+Five targeted simulated cases pass, including real nested HTML/BODY geometry,
+zero-range rejection, document credit gating, delayed rendering and owned credit.
+Build/verify/customization/syntax/diff checks pass. Real-site credit remains untested.
+
+GM lifecycle NOT IMPLEMENTED. The current artifact remains @grant none with its
+page globals and existing manual replay fallback intact. Its headless page-world
+harness cannot validate the required Tampermonkey isolated-world/page-global
+integration. No GM APIs, grants, claim/ack protocol, close confirmation or refresh
+path were added or simulated. This is a partial delivery, not completion of task B.
+A verified single-userscript sandbox integration is still needed before claiming
+no-opener session playback/closing/return works. Existing evidence is preserved.

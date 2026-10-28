@@ -252,7 +252,7 @@
     const ACTIONS = {
         videoStart: ['视频开始', 300, 900, 'videoPlayback'], nextVideo: ['课内下一视频', 500, 1500, 'nextVideo'],
         audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],
-        documentScroll: ['文档逐步滚动', 400, 1200, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
+        documentScroll: ['文档逐步滚动', 300, 1000, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
         nextLesson: ['下一课节', 1000, 2500, 'nextLesson'], nextChapter: ['下一章节', 1500, 3500, 'nextChapter'],
         assessment: ['测验交接', 1000, 2500, 'assessment'], liveOpen: ['打开直播窗口', 500, 1500, 'live'],
         liveReturn: ['直播关闭与返回', 500, 1500, 'live'],
@@ -402,7 +402,12 @@
             if (!doc || seen.has(doc) || depth > 4) { inaccessible = true; return; }
             seen.add(doc); documents.push(doc);
             for (const frame of doc.querySelectorAll('iframe')) {
-                try { visit(frame.contentDocument, depth + 1); } catch (_) { inaccessible = true; }
+                try {
+                    const inner = frame.contentDocument, src = frame.getAttribute('src');
+                    if ((src && /^https?:/i.test(new URL(src, doc.baseURI).href) && inner?.URL === 'about:blank') ||
+                        (frame.hasAttribute('srcdoc') && inner?.URL !== 'about:srcdoc')) loading = true;
+                    visit(inner, depth + 1);
+                } catch (_) { inaccessible = true; }
             }
         };
         if (boundary.tagName === 'IFRAME') { try { visit(boundary.contentDocument, 0); } catch (_) { inaccessible = true; } }
@@ -415,8 +420,8 @@
             if (!pages.length && doc.readyState !== 'loading' && !doc.querySelector('img,canvas') && (!doc.body?.children.length || doc.querySelector('iframe'))) continue; // A wrapper is not a second, unrendered document.
             if (doc.readyState === 'loading' || !pages.length || pages.some(el => el.tagName === 'IMG' && (!el.complete || !el.naturalHeight))) { loading = true; continue; }
             const candidates = [...new Set([doc.scrollingElement, ...doc.querySelectorAll('*')])].filter(el => el && el.clientHeight > 0 &&
-                Number.isFinite(el.scrollHeight) && el.scrollHeight >= el.clientHeight && pages.every(page => el.contains(page)) &&
-                (el === doc.scrollingElement || /auto|scroll/.test(doc.defaultView.getComputedStyle(el).overflowY)));
+                Number.isFinite(el.scrollHeight) && el.scrollHeight - el.clientHeight > 1 && pages.every(page => el.contains(page)) &&
+                (el === doc.scrollingElement || el === doc.documentElement || el === doc.body || /auto|scroll/.test(doc.defaultView.getComputedStyle(el).overflowY)));
             const inner = candidates.filter(el => !candidates.some(other => other !== el && el.contains(other)));
             if (inner.length === 1) viewers.push(inner[0]);
             else if (inner.length > 1) return { reason: '文档滚动区域不唯一' };
@@ -834,7 +839,7 @@
                     tick();
                 };
                 if (scheduleStep) scheduled = scheduleStep(step);
-                else timer = env.setTimeout(step, 400 + Math.floor(Math.random() * 801));
+                else timer = env.setTimeout(step, 300 + Math.floor(Math.random() * 701));
             };
             tick();
             return { cancel, tick };

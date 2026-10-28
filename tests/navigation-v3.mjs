@@ -2439,6 +2439,18 @@ try {
         const result=await page.evaluate(()=>{const el=document.createElement('div');el.style.cssText='height:100px';document.body.append(el);let complete=false,error='';window.__xuexitongTaskSupport.readDocument({element:el,isValid:()=>true,onComplete:()=>complete=true,onError:reason=>error=reason});return{complete,error};});
         assert.equal(result.complete,false);assert.ok(result.error.includes('无有效滚动范围'));
     }));
+    await check('knowledge map real positive HTML is not displaced by fitting BODY or outer shell',()=>using([outer(2,false,'文档'),0],async page=>{
+        await page.evaluate(()=>{
+            app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;
+            root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf" style="height:600px"></iframe>';
+            const shell=root.querySelector('iframe').contentDocument;shell.body.style.margin='0';shell.body.innerHTML='<canvas height="634" width="20"></canvas><iframe style="position:absolute;top:0;height:546px"></iframe>';
+            const inner=shell.querySelector('iframe').contentDocument;inner.body.style.margin='0';inner.body.innerHTML='<canvas height="2335" width="100"></canvas>';
+            window.__realMap=inner;app._attemptTask('document');
+        });assert.equal(await state(page),'READING_DOCUMENT');
+        assert.equal(await page.evaluate(()=>app._externalCompletion.scope.tasks[0].viewer.ownerDocument===window.__realMap),true);
+        assert.ok(await page.evaluate(()=>{const v=app._externalCompletion.scope.tasks[0].viewer;return v.scrollHeight-v.clientHeight>1000;}));
+        await flush(page,2);assert.ok(await page.evaluate(()=>app._externalCompletion.scope.tasks[0].viewer.scrollTop>0));
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }
