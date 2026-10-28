@@ -2317,7 +2317,7 @@ try {
         await controls.locator('[data-attempt]').click();assert.ok(await page.evaluate(()=>app._lastNotice.includes('未找到可识别的直播入口')));
     }));
     await check('credit marker-only text lesson advances without media; contradictory count prevents bypass',()=>using([outer(2),0],async page=>{
-        await page.evaluate(()=>{app.stopAutomation();const n=document.querySelector('#node0');n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');app.run();});
+        await page.evaluate(()=>{app.stopAutomation();const n=document.querySelector('#node0');n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='<iframe></iframe>';app._attemptTask('completed');});
         await flush(page);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
         await page.evaluate(()=>{document.querySelector('#node0').insertAdjacentHTML('beforeend','<input class="jobUnfinishCount" value="1">');});
         await flush(page);assert.equal(await state(page),'BLOCKED');
@@ -2344,13 +2344,28 @@ try {
         await flush(page,20);
         assert.equal(await state(page),incomplete?'PLAYING':'FINISHED');
         assert.equal(await page.evaluate(()=>window.__transitionClicks),2);
-        assert.equal(await page.evaluate(()=>app._completedVisits.size),incomplete?2:3);
+        assert.equal(await page.evaluate(()=>app._completedVisits.size),2);
         assert.ok(await page.evaluate(()=>!app._lastNotice.includes('0 秒')));
     }));
     await check('lifecycle startup wait accepts delayed credit without waiting for media',()=>using([outer(2),0],async page=>{
         await page.evaluate(()=>{app.stopAutomation();app.run({startup:true});});assert.equal(await state(page),'WAITING_STARTUP');
         await page.evaluate(()=>{const n=document.querySelector('#node0');n.querySelector('input').value='0';n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');});
         await flush(page,2);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+    }));
+    await check('resumption frame load keeps countdown; in-course route changes resume unfinished video',()=>using([outer(2),0,false,null,false,true],async page=>{
+        await page.evaluate(()=>{
+            app.stopAutomation();history.replaceState(null,'','?courseId=synthetic&chapterId=old');
+            const first=document.querySelector('#node0');first.querySelector('input').remove();first.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
+            window.__routeClicks=0;document.querySelector('#node1 span').onclick=()=>{
+                window.__routeClicks++;history.replaceState(null,'','?courseId=synthetic&chapterId=new');
+                first.classList.remove('posCatalog_active');document.querySelector('#node1').classList.add('posCatalog_active');
+                document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='';window.__addVideos(1);
+            };app.run();
+        });await flush(page);
+        await page.evaluate(()=>document.querySelector('iframe[info="card"]').dispatchEvent(new Event('load')));
+        assert.equal(await state(page),'NAVIGATION_COOLDOWN');assert.equal(await page.evaluate(()=>app._completedVisits.size),0);
+        await flush(page,6);assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.__routeClicks),1);
+        assert.equal(await page.evaluate(()=>app._completedVisits.size),1);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

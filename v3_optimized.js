@@ -825,7 +825,7 @@
                 this._destroyed = false;
                 this._manualPermit = null; this._manualBusy = false;
                 this._detectedKind = null; this._attemptStatus = '';
-                this._priorChecked = null; if (!transition) this._completedVisits = new Set();
+                this._priorChecked = null; this._completedVisits ||= new Set();
                 this._automaticStartup = startup;
                 this._state = 'DISCOVERING';
                 this._isPlaying = false;
@@ -1019,7 +1019,7 @@
                             observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
                             for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {
-                                listen(frame, 'load', () => { if (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid()) cancel(); });
+                                listen(frame, 'load', () => { if (navigationActions.has(category) ? !valid() : (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid())) cancel(); });
                             }
                         }
                         if (this._completionVideo) listen(this._completionVideo, 'play');
@@ -1068,7 +1068,7 @@
                 const sameCard = oldCard && card.length === oldCard.length && card.every((value, index) => value === oldCard[index]);
                 if (!node || !this._catalogTopology() || ['WAITING_CATALOG','ADVANCING'].includes(this._state) ||
                     (this._observedLessonId && node.id !== this._observedLessonId && sameCard)) return { blocked: true, reason: '安全阻断：目录与内容切换尚未确认' };
-                if (this._verificationPresent() || this._isChapterTest() || scope?.invalid || media.unsupported || media.inaccessible) return { blocked: true, reason: '安全阻断：任务归属、媒体或验证条件无法确认' };
+                if (this._verificationPresent() || this._isChapterTest() || scope?.invalid || ((!this._priorProof(node)) && (media.unsupported || media.inaccessible))) return { blocked: true, reason: '安全阻断：任务归属、媒体或验证条件无法确认' };
                 const pending = media.tasks?.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._completedVideos.has(task.element));
                 const task = scope?.tasks.find(task => !this._processedTasks.has(task.element));
                 const player = media.videos.find(el => !this._completedVideos.has(el));
@@ -1120,7 +1120,7 @@
                 this._nextUnitPending = false; this._playPending = false; this._tryTimes = 0;
                 this._state = 'READY'; this._manualBusy = true; this._manualPermit = kind; this._automaticStartup = false;
                 this._initCellData(); this._notify('已识别，尝试执行所选任务', '已识别，尝试执行');
-                if (kind === 'completed') { this._priorChecked = null; this._completedVisits = new Set(); if (!this._checkPriorCompletion()) this._block('完成证据不足，不能安全前进'); }
+                if (kind === 'completed') { this._priorChecked = null; if (!this._checkPriorCompletion()) this._block(this._priorFailure || '当前目录身份或平台完成证据尚未稳定，不能安全前进'); }
                 else if (kind === 'live' && (info.task?.nativeLink || info.task?.nativeEntry)) this._openNativeLink(info.task, info.scope, true);
                 else this.play();
             },
@@ -1779,11 +1779,12 @@
                     this._currentStepTitle() !== record.title || videoAdapter.cardDocument() !== record.doc || record.doc.readyState === 'loading' ||
                     this._nodeTitle(record.node) !== record.name || this._isChapterTest()) return false;
                 const media = this._playableMedia();
-                return (!media.pending || (!record.players.length && !record.attachments.length)) && !media.unsupported && !media.inaccessible && (media.navigationSafe !== false ||
-                    (!record.players.length && !record.attachments.length && media.documents.length === 1 && media.reasons.every(reason => reason === 'player-not-ready'))) &&
-                    record.players.length === media.videos.length && record.players.every((el, i) => el === media.videos[i] && el.isConnected && el.paused &&
-                        record.sources[i] === (el.currentSrc || el.getAttribute('src') || '')) &&
-                    record.attachments.length === (media.tasks || []).length && record.attachments.every((el, i) => el === media.tasks[i].attachment);
+                // Whole-lesson credit is authoritative; media readiness is not
+                // completion evidence. Security/active-task contradictions remain blocking.
+                if (this._verificationPresent() || media.reasons?.some(reason => /assessment|verification/.test(reason))) { this._priorFailure = '检测到测验或身份验证，不能自动前进'; return false; }
+                if (media.inaccessible) { this._priorFailure = '存在不可访问的任务框架，不能确认安全范围'; return false; }
+                if (media.reasons?.some(reason => /competing/.test(reason))) { this._priorFailure = '存在竞争播放任务，不能自动前进'; return false; }
+                this._priorFailure = ''; return true;
             },
             _checkPriorCompletion() {
                 if (this._videoContext || this._isPlaying) return false;
@@ -1799,7 +1800,7 @@
                 this._state = 'VERIFYING_PLATFORM_COMPLETION';
                 this._schedule(() => {
                     if (!this._priorCompletionValid(record)) return this._block('既有平台完成证据或课程身份已变化');
-                    this._priorChecked = { node, doc }; this._completedVisits ||= new Set(); this._completedVisits.add(node.id);
+                    this._priorChecked = { node, doc }; this._completedVisits ||= new Set();
                     this._platformCompletion = record; this._completionNode = node;
                     this._state = 'READY_TO_ADVANCE'; this.nextUnit();
                 }, 250);
@@ -2168,7 +2169,15 @@
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('当前内容尚未确认完成');
                 }
-                const destinationId = nCell.id, destinationTitle = this._nodeTitle(nCell), destinationHref = location.href;
+                const destinationId = nCell.id, destinationTitle = this._nodeTitle(nCell), destinationHref = new URL(location.href);
+                const sourceId = this._completionNode?.id;
+                const routeValid = () => {
+                    const now = new URL(location.href);
+                    if (now.origin !== destinationHref.origin || now.pathname !== destinationHref.pathname) return false;
+                    const keys = new Set([...destinationHref.searchParams.keys(), ...now.searchParams.keys()]);
+                    return [...keys].every(key => /^(chapterid|knowledgeid)$/i.test(key) ||
+                        JSON.stringify(now.searchParams.getAll(key)) === JSON.stringify(destinationHref.searchParams.getAll(key)));
+                };
                 const oldCard = this._cardIdentity();
                 const oldMarkup = videoAdapter.cardDocument()?.body?.innerHTML;
                 const oldDocument = videoAdapter.cardDocument();
@@ -2191,7 +2200,7 @@
                 let attempts = 0, previous = null;
                 const wait = () => {
                     if (generation !== this._generation || this._destroyed) return;
-                    if (location.href !== destinationHref || nCell.id !== destinationId || this._nodeTitle(nCell) !== destinationTitle) return this._block('导航期间页面或目标身份已变化');
+                    if (!routeValid() || nCell.id !== destinationId || this._nodeTitle(nCell) !== destinationTitle) return this._block('导航期间页面或目标身份已变化');
                     const contentDocument = videoAdapter.cardDocument();
                     const card = this._cardIdentity(), markup = contentDocument?.body?.innerHTML;
                     const changed = contentDocument !== oldDocument || card.length !== oldCard.length || card.some((value,i) => value !== oldCard[i]) || markup !== oldMarkup;
@@ -2203,6 +2212,9 @@
                     if (valid && previous && previous.length === snapshot.length && previous.every((value,i) => value === snapshot[i])) {
                         this._observedLessonId = nCell.id; this._observedCard = card;
                         this._nextUnitPending = false;
+                        this._completedVisits ||= new Set();
+                        if (sourceId) this._completedVisits.add(sourceId);
+                        if (this._completedVisits.has(nCell.id)) return this._block('已确认返回历史小节，阻止导航循环');
                         this._notify('目标小节已确认，重新检查平台完成状态');
                         this.run({ startup: true, transition: true });
                     } else if (++attempts >= this.configs.maxRetries) {
