@@ -1988,10 +1988,39 @@
                 el.addEventListener('volumechange', this._audioState.listener);
             },
             _audioPlayRejected(el, error) {
-                if (!this._audioState || el !== this._audioState.el || !this._refreshVideoContext() || el.ended) return;
-                this._audioState.waiting = true; this._audioState.error = error?.name || '播放失败';
+                const state = this._audioState;
+                const valid = () => state && state === this._audioState && state.generation === this._generation &&
+                    !this._destroyed && el === state.el && el.isConnected &&
+                    (this.settings.features.audioPlayback || this._manualPermit === 'audio') && this._refreshVideoContext();
+                const cancelStale = () => {
+                    if (state === this._audioState && state.generation === this._generation && this._state === 'AUDIO_STARTING')
+                        this._block('音频任务或自动播放设置已变化，静音重试已取消');
+                };
+                if (!valid() || el.ended || state.fallbackPending) return;
+                if (error?.name === 'NotAllowedError' && !state.mutedFallbackUsed) {
+                    state.mutedFallbackUsed = true; state.fallbackPending = true;
+                    this._state = 'AUDIO_STARTING'; this._isPlaying = false; this._playPending = true;
+                    this._clearCheckInterval(); el.muted = true; el.playbackRate = 1;
+                    this._notify('有声自动播放被浏览器拒绝，正在尝试一次静音播放');
+                    Promise.resolve().then(() => { if (valid() && this._state === 'AUDIO_STARTING' && !el.ended) return el.play(); })
+                        .then(() => {
+                            if (!valid() || this._state !== 'AUDIO_STARTING') { cancelStale(); return; }
+                            state.fallbackPending = false; this._playPending = false;
+                            if (el.paused && !el.ended) return this._audioPlayRejected(el, new Error('静音播放未实际启动'));
+                            state.waiting = false; this._state = 'PLAYING'; this._isPlaying = true;
+                            this._manualBusy = false; this._manualPermit = null;
+                            this._startVideoMonitoring(); this._renderAudioNotice();
+                            this._notify('音频静音播放中（1.0x）；不会自动取消静音', '正在执行');
+                            if (el.ended) this._completeVideo(el);
+                        }, failure => {
+                            if (!valid() || this._state !== 'AUDIO_STARTING') { cancelStale(); return; }
+                            state.fallbackPending = false; this._playPending = false; this._audioPlayRejected(el, failure);
+                        });
+                    return;
+                }
+                state.waiting = true; state.error = error?.name || '播放失败';
                 this._state = 'WAITING_AUDIO_GESTURE'; this._isPlaying = false; this._clearCheckInterval(); this._renderAudioNotice();
-                this._notify('音频播放被拒绝；请使用下方音频按钮手动播放', '执行失败');
+                this._notify('音频自动播放失败，已停止；可选用音频按钮手动恢复，不会跳过任务', '执行失败');
             },
             _renderAudioNotice() {
                 const state = this._audioState, el = state?.el;
@@ -2026,7 +2055,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_AUDIO_GESTURE', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_AUDIO_GESTURE', 'AUDIO_STARTING', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
@@ -2086,7 +2115,9 @@
 
                     try {
                         this._playPending = true;
+                        if (el.tagName === 'AUDIO') { this._state = 'AUDIO_STARTING'; this._isPlaying = false; }
                         await el.play();
+                        if (el.tagName === 'AUDIO' && generation === this._generation && this._state === 'AUDIO_STARTING' && this._refreshVideoContext()) { this._state = 'PLAYING'; this._isPlaying = true; }
                         if (generation === this._generation) this._playPending = false;
                         if (generation !== this._generation || !this._sameVideoTaskNode(node) ||
                             !el.isConnected || this._state !== 'PLAYING') return;
@@ -2101,7 +2132,7 @@
                     } catch (playError) {
                         if (generation === this._generation) this._playPending = false;
                         console.error("视频播放失败:", playError);
-                        if (generation === this._generation && this._sameVideoTaskNode(node) && this._state === 'PLAYING') {
+                        if (generation === this._generation && this._sameVideoTaskNode(node) && (this._state === 'PLAYING' || (el.tagName === 'AUDIO' && this._state === 'AUDIO_STARTING'))) {
                             if (el.ended) this._completeVideo(el); else this._handlePlayError(playError);
                         }
                     }

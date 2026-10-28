@@ -2215,15 +2215,15 @@ try {
         await page.evaluate(property=>{const a=window.__audio;if(property==='volume')a.volume=0;else a[property]=true;app.run();},property);await flush(page);
         assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.defaultMuted,window.__audio.volume,window.__audio.playbackRate]),['PLAYING',false,false,1,1]);
     }));
-    await check('repair C autoplay denial requires trusted audio gesture without repeated mute fallback',()=>using([outer(),1],async page=>{
+    await check('repair C autoplay denial uses one muted fallback then optional trusted gesture',()=>using([outer(),1],async page=>{
         await audioLesson(page,'',false,false);
         await page.evaluate(()=>{const a=window.__audio;a.__plays=0;a.play=()=>{a.__plays++;return Promise.reject(new DOMException('Synthetic autoplay denial','NotAllowedError'));};app.run();});await flush(page,3);
-        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays]),['WAITING_AUDIO_GESTURE',false,1]);
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays]),['WAITING_AUDIO_GESTURE',true,2]);
         await page.evaluate(()=>app._audioNotice.shadowRoot.querySelector('button').click());
-        assert.equal(await page.evaluate(()=>window.__audio.__plays),1);
+        assert.equal(await page.evaluate(()=>window.__audio.__plays),2);
         await page.evaluate(()=>{const a=window.__audio;a.play=()=>{a.__plays++;a.__paused=false;return Promise.resolve();};});
         await page.getByRole('button',{name:'有声播放',exact:true}).click();
-        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays,window.__audio.playbackRate]),['PLAYING',false,2,1]);
+        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.muted,window.__audio.__plays,window.__audio.playbackRate]),['PLAYING',false,3,1]);
         await page.evaluate(()=>{window.__audio.volume=0;window.__audio.dispatchEvent(new Event('volumechange'));});
         assert.ok(await page.evaluate(()=>app._audioNotice.shadowRoot.textContent.includes('音量为零')));
         await page.getByRole('button',{name:'本次允许静音继续',exact:true}).click();
@@ -2234,8 +2234,8 @@ try {
     await check('repair C immediate audio recovery rejection waits; video mute fallback unchanged',()=>using([outer(),1],async page=>{
         await audioLesson(page);await flush(page);
         await page.evaluate(()=>{const a=window.__audio;a.__paused=true;a.__plays=0;a.play=()=>{a.__plays++;return Promise.reject(new DOMException('denied','NotAllowedError'));};app._tryResumePlayback('synthetic focus');});
-        assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.__plays,window.__audio.muted]),['WAITING_AUDIO_GESTURE',1,false]);
-        await flush(page,5);assert.equal(await page.evaluate(()=>window.__audio.__plays),1);
+        await flush(page,2);assert.deepEqual(await page.evaluate(()=>[app._state,window.__audio.__plays,window.__audio.muted]),['WAITING_AUDIO_GESTURE',2,true]);
+        await flush(page,5);assert.equal(await page.evaluate(()=>window.__audio.__plays),2);
     }));
     await check('controls manual type hint retries BLOCKED once, respects type and stops without parallel playback',()=>using([outer(),1],async page=>{
         await page.evaluate(()=>{app.stopAutomation();app._block('synthetic prior failure');const s=JSON.parse(JSON.stringify(app.settings));s.features.videoPlayback=false;app.updateSettings(s);app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-task-controls]').open=true;});
@@ -2450,6 +2450,19 @@ try {
         assert.equal(await page.evaluate(()=>app._externalCompletion.scope.tasks[0].viewer.ownerDocument===window.__realMap),true);
         assert.ok(await page.evaluate(()=>{const v=app._externalCompletion.scope.tasks[0].viewer;return v.scrollHeight-v.clientHeight>1000;}));
         await flush(page,2);assert.ok(await page.evaluate(()=>app._externalCompletion.scope.tasks[0].viewer.scrollTop>0));
+    }));
+    for(const stopped of [false,true])await check(`audio bounded fallback promise and stale stop=${stopped}`,()=>using([outer(2),1],async page=>{
+        await audioLesson(page,'',false,false);
+        await page.evaluate(()=>{const a=window.__audio;a.__plays=0;a.play=()=>{a.__plays++;return a.__plays===1?Promise.reject(new DOMException('denied','NotAllowedError')):new Promise(resolve=>window.__mutedResolve=()=>{a.__paused=false;resolve();});};app.run();});
+        assert.equal(await state(page),'AUDIO_STARTING');assert.equal(await page.evaluate(()=>app._isPlaying),false);
+        if(stopped)await page.evaluate(()=>app.stopAutomation());
+        await page.evaluate(()=>window.__mutedResolve());await flush(page,2);
+        assert.equal(await state(page),stopped?'PAUSED_AUTOMATION':'PLAYING');assert.equal(await page.evaluate(()=>window.__audio.__plays),2);
+        if(!stopped){
+            assert.deepEqual(await page.evaluate(()=>[window.__audio.muted,window.__audio.playbackRate]),[true,1]);
+            await page.evaluate(()=>{const a=window.__audio;a.__ended=true;a.__paused=true;a.dispatchEvent(new Event('ended'));});await flush(page,2);
+            assert.equal(await state(page),'VERIFYING_COMPLETION');assert.equal(await page.evaluate(()=>app._completedVideos.has(window.__audio)),true);
+        }
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
