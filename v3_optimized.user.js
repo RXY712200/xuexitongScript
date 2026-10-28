@@ -397,7 +397,11 @@
             if (inner.length === 1) viewers.push(inner[0]);
             else if (inner.length > 1) return { reason: '文档滚动区域不唯一' };
         }
-        if (viewers.length > 1) return { reason: '存在多个文档阅读区域，无法确定顺序' };
+        if (viewers.length > 1) {
+            const scrolling = viewers.filter(el => el.scrollHeight > el.clientHeight + 1);
+            if (scrolling.length === 1) return { viewer: scrolling[0] };
+            return { reason: `存在 ${viewers.length} 个独立候选阅读区域（实际可滚动 ${scrolling.length} 个）；无可靠顺序，请手动选择原生阅读区域` };
+        }
         return viewers.length === 1 && !loading ? { viewer: viewers[0] } : { loading: true, reason: '未找到已渲染的可验证文档滚动区域（可能尚在加载或格式不受支持）' };
     }
     const platformTaskAdapter = {
@@ -1008,14 +1012,16 @@
             _runAction(category, key, callback, options = {}) {
                 const generation = this._generation, node = catalog.current(), title = this._currentStepTitle();
                 const href = window.location.href, content = videoAdapter.cardDocument();
-                const valid = () => !this._destroyed && generation === this._generation && this._sameVideoTaskNode(node) &&
+                const valid = () => navigationActions.has(category) && key === 'navigation' ?
+                    !this._destroyed && generation === this._generation && this._actionEnabled(category) && !!options.isValid?.() :
+                    !this._destroyed && generation === this._generation && this._sameVideoTaskNode(node) &&
                     title === this._currentStepTitle() && href === window.location.href && content === videoAdapter.cardDocument() &&
                     this._actionEnabled(category) && (!options.isValid || options.isValid());
                 return this._actions.run(category, key, callback, { ...options, isValid: valid,
                     onCancel: reason => {
                         options.onCancel?.(reason);
                         if (this._destroyed || ['BLOCKED', 'ADVANCING'].includes(this._state)) return;
-                        if (['user', 'stale'].includes(reason)) this._block('自动动作上下文已变化');
+                        if (['user', 'stale'].includes(reason)) this._block(key === 'navigation' ? (this._navigationFailure || '导航已被用户操作或页面切换取消') : '自动动作上下文已变化');
                         else {
                             if (this._isPlaying) return;
                             this._documentController?.cancel(); this._documentController = null;
@@ -1030,7 +1036,7 @@
                         const listen = (el, type, handler = cancel) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
                         const click = event => { if (!event.composedPath().includes(this._settingsPanel) && !event.composedPath().includes(this._noticePanel)) cancel(); };
                         for (const doc of new Set([document, ...this._playableMedia().documents])) {
-                            observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
+                            if (key !== 'navigation') observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
                             for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {
                                 listen(frame, 'load', () => { if (navigationActions.has(category) ? !valid() : (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid())) cancel(); });
@@ -1515,6 +1521,9 @@
                 const targetId = uniqueId(target), targetTitle = this._nodeTitle(target), targetChapter = this._chapterOf(target);
                 const chapterId = uniqueId(targetChapter);
                 const topology = this._catalogTopology();
+                this._navigationIntent = Object.freeze({ sourceId: this._completionNode.id, sourceTitle: this._nodeTitle(this._completionNode),
+                    targetId, targetTitle, topology, href: location.href, generation: this._generation,
+                    evidence: this._platformCompletion ? 'platform-credit' : this._externalCompletion?.kind || 'natural-ended' });
                 const resolveTarget = () => {
                     if (!target.isConnected) {
                         if (!targetId) return false;
@@ -1537,7 +1546,13 @@
                     if (this._state !== 'NAVIGATION_COOLDOWN' || !resolveTarget() || !this._navigationEligible(target)) return this._block('冷却后导航条件失效');
                     this._liveReturnPendingNavigation = false;
                     this._state = 'READY_TO_ADVANCE'; this.playCurrentIndex(target);
-                }, { delayMs: 5000, isValid: () => resolveTarget() && this._navigationEligible(target), onCancel: () => this._clearNavigationPreview() });
+                }, { delayMs: 5000, isValid: () => {
+                    this._navigationFailure = '';
+                    if (location.href !== this._navigationIntent.href) this._navigationFailure = '导航预告期间路由已变化';
+                    else if (!resolveTarget()) this._navigationFailure = '授权目标缺失或身份不唯一';
+                    else if (!this._navigationEligible(target)) this._navigationFailure = '来源身份、平台完成证据或任务归属已失效';
+                    return !this._navigationFailure;
+                }, onCancel: () => this._clearNavigationPreview() });
             },
             _cooldownCleanup: null,
             _state: 'DISCOVERING',
@@ -1787,10 +1802,17 @@
                 return catalog.status(node) === 'completed';
             },
             _priorCompletionValid(record) {
+                const active = catalog.current();
+                if (record.node !== active && !record.node.isConnected && active?.id === record.id &&
+                    this._nodeTitle(active) === record.name && this._catalogTopology() === record.topology &&
+                    [...document.querySelectorAll('[id]')].filter(el => el.id === record.id).length === 1) {
+                    if (this._completionNode === record.node) this._completionNode = active;
+                    record = { ...record, node: active, chapter: this._chapterOf(active), doc: videoAdapter.cardDocument() };
+                }
                 if (this._destroyed || record.generation !== this._generation || record.href !== location.href ||
                     catalog.current() !== record.node || record.node.id !== record.id || !record.node.isConnected || !this._priorProof(record.node) ||
                     this._catalogTopology() !== record.topology || this._chapterOf(record.node) !== record.chapter ||
-                    this._currentStepTitle() !== record.title || videoAdapter.cardDocument() !== record.doc || record.doc.readyState === 'loading' ||
+                    this._currentStepTitle() !== record.title || !videoAdapter.cardDocument() ||
                     this._nodeTitle(record.node) !== record.name || this._isChapterTest()) return false;
                 const media = this._playableMedia();
                 // Whole-lesson credit is authoritative; media readiness is not
@@ -2183,6 +2205,7 @@
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('当前内容尚未确认完成');
                 }
+                const destinationChapter = this._chapterOf(nCell), destinationTopology = this._catalogTopology();
                 const destinationId = nCell.id, destinationTitle = this._nodeTitle(nCell), destinationHref = new URL(location.href);
                 const sourceId = this._completionNode?.id;
                 const routeValid = () => {
@@ -2214,6 +2237,15 @@
                 let attempts = 0, previous = null;
                 const wait = () => {
                     if (generation !== this._generation || this._destroyed) return;
+                    if (!nCell.isConnected) {
+                        const matches = catalog.entries().filter(el => el.id === destinationId);
+                        if (matches.length !== 1) {
+                            if (++attempts >= this.configs.maxRetries) return this._block('目标目录重建未能唯一确认');
+                            const timer = setTimeout(() => { this._timers.delete(timer); wait(); }, 250); this._timers.add(timer); return;
+                        }
+                        if (this._catalogTopology() !== destinationTopology || this._nodeTitle(matches[0]) !== destinationTitle) return this._block('重建目标的章节关系或标题不符');
+                        nCell = matches[0];
+                    }
                     if (!routeValid() || nCell.id !== destinationId || this._nodeTitle(nCell) !== destinationTitle) return this._block('导航期间页面或目标身份已变化');
                     const contentDocument = videoAdapter.cardDocument();
                     const card = this._cardIdentity(), markup = contentDocument?.body?.innerHTML;

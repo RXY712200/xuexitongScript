@@ -2271,6 +2271,7 @@ try {
             root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';
             const wrapper=root.querySelector('iframe').contentDocument;wrapper.body.innerHTML='<iframe title="owned document wrapper"></iframe>';
             const doc=wrapper.querySelector('iframe').contentDocument;
+            const shell=wrapper.createElement('iframe');wrapper.body.append(shell);shell.contentDocument.body.innerHTML='<canvas width=10 height=10></canvas>'; // Fitting shell is not a second scrolling reader.
             doc.body.innerHTML='<div style="height:100px;overflow-y:auto;width:200px" id="synthetic-scroll"><div style="height:900px"></div></div>';
             window.__documentFrame=root.querySelector('iframe');window.__documentScroll=doc.querySelector('#synthetic-scroll');
             if(!delayed)window.__documentScroll.firstChild.innerHTML='<canvas width="180" height="900"></canvas>';
@@ -2337,6 +2338,7 @@ try {
                     window.__transitionClicks++;document.querySelector('.posCatalog_active').classList.remove('posCatalog_active');node.classList.add('posCatalog_active');
                     document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='<p>Destination '+i+'</p>';
                     if(incomplete&&i===2)window.__addVideos(1);
+                    node.replaceWith(node.cloneNode(true)); // Platform sidebar re-render preserves identity, not object reference.
                 };
             }
             app.run();
@@ -2358,11 +2360,11 @@ try {
             const first=document.querySelector('#node0');first.querySelector('input').remove();first.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
             window.__routeClicks=0;document.querySelector('#node1 span').onclick=()=>{
                 window.__routeClicks++;history.replaceState(null,'','?courseId=synthetic&chapterId=new');
-                first.classList.remove('posCatalog_active');document.querySelector('#node1').classList.add('posCatalog_active');
+                document.querySelector('.posCatalog_active').classList.remove('posCatalog_active');document.querySelector('#node1').classList.add('posCatalog_active');
                 document.querySelector('iframe[info="card"]').contentDocument.body.innerHTML='';window.__addVideos(1);
             };app.run();
         });await flush(page);
-        await page.evaluate(()=>document.querySelector('iframe[info="card"]').dispatchEvent(new Event('load')));
+        await page.evaluate(()=>{const n=document.querySelector('#node0');n.replaceWith(n.cloneNode(true));document.body.append(document.createElement('aside'));document.querySelector('iframe[info="card"]').dispatchEvent(new Event('load'));});
         assert.equal(await state(page),'NAVIGATION_COOLDOWN');assert.equal(await page.evaluate(()=>app._completedVisits.size),0);
         await flush(page,6);assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.__routeClicks),1);
         assert.equal(await page.evaluate(()=>app._completedVisits.size),1);
