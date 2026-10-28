@@ -398,7 +398,7 @@
         for (const doc of documents) {
             if (doc.querySelector('video, audio, form input[type=password], input[autocomplete="one-time-code"]')) return { reason: '文档范围含媒体或验证组件，无法安全自动阅读' };
             const pages = [...doc.querySelectorAll('img, canvas')].filter(el => el.getClientRects().length && el.getBoundingClientRect().height > 0);
-            if (!pages.length && doc.querySelector('iframe') && doc.readyState !== 'loading') continue; // A wrapper is not a second, unrendered document.
+            if (!pages.length && doc.readyState !== 'loading' && !doc.querySelector('img,canvas') && (!doc.body?.children.length || doc.querySelector('iframe'))) continue; // A wrapper is not a second, unrendered document.
             if (doc.readyState === 'loading' || !pages.length || pages.some(el => el.tagName === 'IMG' && (!el.complete || !el.naturalHeight))) { loading = true; continue; }
             const candidates = [...new Set([doc.scrollingElement, ...doc.querySelectorAll('*')])].filter(el => el && el.clientHeight > 0 &&
                 Number.isFinite(el.scrollHeight) && el.scrollHeight >= el.clientHeight && pages.every(page => el.contains(page)) &&
@@ -801,7 +801,7 @@
                 if (begun && element.scrollTop >= bottom - 1) {
                     if (bottomHeight === element.scrollHeight) { cancel(); onComplete(); return; }
                     bottomHeight = element.scrollHeight;
-                    timer = env.setTimeout(tick, 0); // Verification yields, but is never randomized.
+                    timer = env.setTimeout(tick, 250); // Recheck the real extent after rendering has had time to settle.
                     return;
                 }
                 bottomHeight = -1;
@@ -1113,9 +1113,9 @@
                 if (!node || !this._catalogTopology() || ['WAITING_CATALOG','ADVANCING'].includes(this._state) ||
                     (this._observedLessonId && node.id !== this._observedLessonId && sameCard)) return { blocked: true, reason: '安全阻断：目录与内容切换尚未确认' };
                 if (this._verificationPresent() || this._isChapterTest() || scope?.invalid || ((!this._priorProof(node)) && (media.unsupported || media.inaccessible))) return { blocked: true, reason: '安全阻断：任务归属、媒体或验证条件无法确认' };
-                const pending = media.tasks?.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._completedVideos.has(task.element));
+                const pending = media.tasks?.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 const task = scope?.tasks.find(task => !this._processedTasks.has(task.element));
-                const player = media.videos.find(el => !this._completedVideos.has(el));
+                const player = media.videos.find(el => !this._mediaDone(el));
                 const kind = pending?.kind || task?.kind || (player ? player.tagName === 'AUDIO' ? 'audio' : 'video' : null);
                 return { kind, task, player, scope, media, completed: !!catalog.current() && this._priorProof(catalog.current()) };
             },
@@ -1136,7 +1136,7 @@
                 details.querySelector('[data-inspect]').onclick = () => {
                     const info = this._inspectTask();
                     const inventory = info.media?.tasks || [];
-                    details.querySelector('[data-task-status]').textContent = inventory.length ? `附件 ${inventory.length} 项：` + inventory.map((task,i) => `${i+1}.${task.kind}：平台信用未知（无已验证的附件级信号），按顺序处理`).join('；') : '未发现可验证的附件级完成信号';
+                    details.querySelector('[data-task-status]').textContent = inventory.length ? `附件 ${inventory.length} 项：` + inventory.map((task,i) => `${i+1}.${task.kind}：${task.status || 'unknown'}（唯一任务包装标记或本次自然结束；未知按顺序处理）`).join('；') : '未发现可验证的附件级完成信号';
                     details.querySelector('[data-detected]').textContent = `自动检测：${info.blocked ? info.reason : ({ video:'视频',audio:'音频',document:'文档',live:'直播 / 回放' }[info.kind] || '未识别')}${info.completed ? '；平台已有完成标记' : ''}`;
                 };
                 details.querySelector('[data-attempt]').onclick = event => { if (event.isTrusted) this._attemptTask(select.value); };
@@ -1282,11 +1282,12 @@
             _verificationPresent() {
                 const visit = (doc, depth) => {
                     if (!doc || depth > 4) return true;
-                    const body = doc.body?.cloneNode(true);
-                    body?.querySelectorAll('script, style').forEach(el => el.remove());
-                    if (verificationTitle(body?.textContent || '')) return true;
-                    for (const el of doc.querySelectorAll('[title], [aria-label], [placeholder], [alt]')) {
-                        if (['title', 'aria-label', 'placeholder', 'alt'].some(attr => verificationTitle(el.getAttribute(attr) || ''))) return true;
+                    const visible = el => el.getClientRects().length && !el.closest('[hidden], [inert], [aria-hidden="true"]');
+                    for (const el of doc.querySelectorAll('input[type=password], input[autocomplete="one-time-code"], form, button, [role=button]')) {
+                        if (!visible(el)) continue;
+                        if (el.matches('input[type=password], input[autocomplete="one-time-code"]') ||
+                            (el.matches('form') && el.querySelector('input') && /验证码|captcha|人脸识别|身份验证/i.test(el.textContent)) ||
+                            (el.matches('button,[role=button]') && /^(开始人脸识别|进行身份验证|人脸认证)$/.test(el.textContent.trim()))) return true;
                     }
                     for (const frame of doc.querySelectorAll('iframe')) {
                         try { if (visit(frame.contentDocument, depth + 1)) return true; } catch (_) { return true; }
@@ -1338,6 +1339,29 @@
                     return scope;
                 } catch (_) { return { invalid: true }; }
             },
+            _attachmentCredit(player) {
+                if (!player?.isConnected) return 'unknown';
+                let doc = player.ownerDocument, owner;
+                const root = videoAdapter.cardDocument();
+                for (let depth=0; doc && doc !== root && depth<4; depth++) {
+                    owner = doc.defaultView?.frameElement;
+                    if (!owner || owner.contentDocument !== doc) return 'unknown';
+                    if (owner.ownerDocument === root) break;
+                    doc = owner.ownerDocument;
+                }
+                if (!owner?.matches('iframe.ans-attach-online.ans-insertvideo-online')) return 'unknown';
+                const wrapper = owner.closest('.ans-attach-ct');
+                const icons = wrapper && [...wrapper.querySelectorAll('.ans-job-icon')].filter(icon => icon.closest('.ans-attach-ct') === wrapper);
+                if (!wrapper || wrapper.querySelectorAll('iframe.ans-attach-online').length !== 1 || icons.length !== 1 ||
+                    !(wrapper.classList.contains('ans-job-finished') || icons[0].classList.contains('ans-job-finished'))) return 'unknown';
+                this._creditSamples ||= new WeakMap();
+                const previous = this._creditSamples.get(player);
+                this._creditSamples.set(player, { wrapper, icon: icons[0], owner });
+                return previous?.wrapper === wrapper && previous.icon === icons[0] && previous.owner === owner ? 'platform-completed' : 'unknown';
+            },
+            _mediaDone(player) {
+                return this._completedVideos.has(player) || this._attachmentCredit(player) === 'platform-completed';
+            },
             _discoverMedia() {
                 const scope = this._taskSet();
                 if (scope?.invalid) return { videos: [], documents: [], unsupported: true, inaccessible: false };
@@ -1352,7 +1376,7 @@
                     }
                     if (!snapshot && !media.pending && !media.unsupported && !media.inaccessible) this._attachmentSnapshot = {
                         root: media.tasks[0]?.lesson.root, id: catalog.current()?.id, tasks: media.tasks };
-                    for (const task of media.tasks) task.status = this._completedVideos.has(task.element) ? 'completed' : 'pending';
+                    for (const task of media.tasks) task.status = this._completedVideos.has(task.element) ? 'locally-ended' : this._attachmentCredit(task.element);
                 }
                 return media;
             },
@@ -1381,12 +1405,13 @@
                 if (inventory?.kind === 'video') return false;
                 const scope = this._taskSet();
                 if (!scope) return false;
-                if (scope.invalid || this._verificationPresent()) { this._block('已识别的任务范围已失效或需要验证'); return true; }
+                if (scope.invalid) { this._block('任务范围无效：入口不唯一、框架归属变化或卡片已替换'); return true; }
+                if (this._verificationPresent()) { this._block('检测到活动登录、验证码或身份验证控件'); return true; }
                 const pending = scope.tasks.find(task => !this._processedTasks.has(task.element));
                 if (!pending) {
                     if (!scope.tasks.length) return false;
                     const media = this._playableMedia();
-                    if (media.videos.some(video => !this._completedVideos.has(video))) return false;
+                    if (media.videos.some(video => !this._mediaDone(video))) return false;
                     this._verifyExternal(0); return true;
                 }
                 this._detectedKind = pending.kind === 'document' ? '文档' : '直播 / 回放';
@@ -1466,14 +1491,14 @@
                 if (!media.tasks) return null;
                 if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
                 if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
-                const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._completedVideos.has(task.element));
+                const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 if (pending?.kind === 'document') {
                     const scope = this._taskSet();
                     if (scope?.tasks.some(task => task.kind === 'document' && task.element === pending.attachment)) return pending;
                     this._block('文档附件已保留，但缺少可验证的阅读视图，需手动处理'); return true;
                 }
                 // A playing, seeking or already-ended unprocessed sibling is not silently adopted.
-                if (media.tasks.some(task => ['video', 'audio'].includes(task.kind) && task !== pending && !this._completedVideos.has(task.element) &&
+                if (media.tasks.some(task => ['video', 'audio'].includes(task.kind) && task !== pending && !this._mediaDone(task.element) &&
                     (!task.element.paused || task.element.seeking || task.element.ended))) {
                     this._block('其他附件播放器正在活动或完成来源不明确'); return true;
                 }
@@ -1488,7 +1513,7 @@
                 const media = this._playableMedia();
                 if (media.inaccessible || media.unsupported || media.navigationSafe === false) return this._block('任务包含未知或不可访问的内容');
                 if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
-                    media.videos.some(video => !this._completedVideos.has(video))) {
+                    media.videos.some(video => !this._mediaDone(video))) {
                     this._liveReturnPendingNavigation = false;
                     this._state = 'DISCOVERING'; this.play(); return;
                 }
@@ -1508,7 +1533,7 @@
                 const media = this._playableMedia();
                 if (media.inaccessible || media.unsupported || media.navigationSafe === false || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
                 if ((record.kind === 'document' || this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') return false;
-                return media.videos.every(video => video.ended && this._completedVideos.has(video));
+                return media.videos.every(video => (this._attachmentCredit(video) === 'platform-completed' || (video.ended && this._completedVideos.has(video))));
             },
             _navigationEligible(target) {
                 if (this._platformCompletion) return this._priorCompletionValid(this._platformCompletion) && this._targetAfter(this._completionNode) === target && !this._isPlaying;
@@ -1527,9 +1552,9 @@
                         target?.textContent || '')) return false;
                 const tasks = this._playableMedia();
                 return !tasks.inaccessible && !tasks.unsupported && tasks.navigationSafe !== false &&
-                    (!tasks.tasks || tasks.tasks.every(task => ['video', 'audio'].includes(task.kind) && this._completedVideos.has(task.element))) &&
+                    (!tasks.tasks || tasks.tasks.every(task => ['video', 'audio'].includes(task.kind) && this._mediaDone(task.element))) &&
                     tasks.videos.includes(this._completionVideo) &&
-                    tasks.videos.every(video => video.ended && this._completedVideos.has(video));
+                    tasks.videos.every(video => (this._attachmentCredit(video) === 'platform-completed' || (video.ended && this._completedVideos.has(video))));
             },
             _queueNavigation(target) {
                 if (this._state !== 'READY_TO_ADVANCE') return;
@@ -1697,7 +1722,7 @@
                 if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
                 if (tasks.navigationSafe === false) return this._block('未确认的任务内容禁止自动离开课节');
                 if (!tasks.videos.includes(this._completionVideo)) return this._block('播放器已替换，完成状态不明确');
-                const next = tasks.videos.find(video => !this._completedVideos.has(video));
+                const next = tasks.videos.find(video => !this._mediaDone(video));
                 if (next) {
                     this._videoEl = next;
                     this._state = 'READY';
@@ -1988,7 +2013,7 @@
                         const category = this._mediaAction(el, this._nextVideoRequested);
                         this._state = 'ACTION_PENDING';
                         this._runAction(category, 'video-start', () => { this._state = 'READY'; this.play(true); },
-                            { isValid: () => el.isConnected && !el.ended && !this._completedVideos.has(el) && el === this._getVideoEl() });
+                            { isValid: () => el.isConnected && !el.ended && !this._mediaDone(el) && el === this._getVideoEl() });
                         return;
                     }
                     this._preparedVideoNode = null;
@@ -2333,7 +2358,7 @@
                 }
                 if (!this._videoEl?.isConnected || !tasks.videos.includes(this._videoEl)) {
                     this._detachVideoEvents();
-                    this._videoEl = tasks.videos.find(video => !this._completedVideos.has(video)) || null;
+                    this._videoEl = tasks.videos.find(video => !this._mediaDone(video)) || null;
                 }
                 return this._videoEl;
             },

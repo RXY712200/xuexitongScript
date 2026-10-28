@@ -2271,6 +2271,7 @@ try {
             root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';
             const wrapper=root.querySelector('iframe').contentDocument;wrapper.body.innerHTML='<iframe title="owned document wrapper"></iframe>';
             wrapper.documentElement.style.height='184px';wrapper.body.insertAdjacentHTML('beforeend','<canvas width=10 height=10></canvas>');
+            wrapper.body.append(wrapper.createElement('iframe')); // Empty auxiliary leaf must not poison rendered inner reader.
             const doc=wrapper.querySelector('iframe').contentDocument;
             const shell=wrapper.createElement('iframe');wrapper.body.append(shell);shell.contentDocument.body.innerHTML='<canvas width=10 height=10></canvas>'; // Fitting shell is not a second scrolling reader.
             doc.body.innerHTML='<div style="height:100px;overflow-y:auto;width:200px" id="synthetic-scroll"><div style="height:900px"></div></div>';
@@ -2383,6 +2384,7 @@ try {
             app.stopAutomation();const frame=document.querySelector('iframe[info="card"]');frame.id='iframe';frame.contentDocument.body.innerHTML='<iframe></iframe>';
             const doc=frame.contentDocument.querySelector('iframe').contentDocument;
             doc.body.innerHTML='<a class="liveHref" href="javascript:void(0);"><div class="liveCard"><div class="live-ct"><span class="liveBtn live_blue">可回放</span></div></div></a><a id="openUrl"></a>';
+            doc.body.insertAdjacentHTML('beforeend','<p>课程讨论：登录认证与验证技术</p>');
             window.__nestedOpen=0;doc.querySelector('a').onclick=()=>window.__nestedOpen++;
             const settings=JSON.parse(JSON.stringify(app.settings));settings.features.live=true;app.updateSettings(settings);
             app.run();
@@ -2399,6 +2401,21 @@ try {
         assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
         assert.ok(await page.evaluate(()=>app._lastNotice.includes('无法确认新窗口')));
         await controls.locator('[data-attempt]').click();assert.equal(await page.evaluate(()=>window.__nestedOpen),1);
+    }));
+    await check('owned credit skips only unique finished task wrappers without local ended fabrication',()=>using([outer(),1],async page=>{
+        await attachments(page,'',false);await page.evaluate(()=>{
+            const root=document.querySelector('iframe[info="card"]').contentDocument;
+            for(const [i,frame] of [...root.querySelectorAll('iframe')].entries()){
+                if(i>=4)break;const wrapper=root.createElement('div');wrapper.className='ans-attach-ct';frame.before(wrapper);const player=window.__attachmentVideos[i];wrapper.append(frame);frame.contentDocument.body.append(player);
+                wrapper.insertAdjacentHTML('beforeend','<span class="ans-job-icon '+(i<2?'ans-job-finished':'')+'"></span>');
+            }app.run();
+        });await flush(page);
+        assert.deepEqual(await page.evaluate(()=>window.__attachmentVideos.map(v=>v.__plays)),[0,0,1,0]);
+        assert.ok(await page.evaluate(()=>window.__attachmentVideos.slice(0,2).every(v=>!app._completedVideos.has(v)&&!v.ended)));
+        await page.evaluate(()=>{app.stopAutomation();const w=window.__attachmentVideos[0].ownerDocument.defaultView.frameElement.closest('.ans-attach-ct');w.insertAdjacentHTML('beforeend','<span class="ans-job-icon"></span>');});
+        assert.equal(await page.evaluate(()=>app._attachmentCredit(window.__attachmentVideos[0])),'unknown');
+        await page.evaluate(()=>{const d=document.querySelector('iframe[info="card"]').contentDocument;d.body.insertAdjacentHTML('beforeend','<input type="password">');});
+        assert.equal(await page.evaluate(()=>app._verificationPresent()),true);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
