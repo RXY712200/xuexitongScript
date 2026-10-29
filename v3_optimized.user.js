@@ -263,21 +263,33 @@
         videoStart: ['视频开始', 300, 900, 'videoPlayback'], nextVideo: ['课内下一视频', 500, 1500, 'nextVideo'],
         audioStart: ['音频开始', 300, 900, 'audioPlayback'], nextAudio: ['课内下一音频', 500, 1500, 'nextAudio'],
         documentScroll: ['文档逐步滚动', 300, 1000, 'document'], nextDocument: ['下一文档', 500, 1500, 'document'],
-        nextLesson: ['下一课节', 1000, 2500, 'nextLesson'], nextChapter: ['下一章节', 1500, 3500, 'nextChapter'],
+        nextContent: ['课内下一独立内容', 3000, 7000, 'nextLesson'],
+        nextLesson: ['下一课节', 2000, 8000, 'nextLesson'], nextChapter: ['下一章节', 3000, 8000, 'nextChapter'],
         assessment: ['测验交接', 1000, 2500, 'assessment'], liveOpen: ['打开直播窗口', 500, 1500, 'live'],
         liveReturn: ['直播关闭与返回', 500, 1500, 'live'],
     };
     const navigationActions = new Set(['nextLesson', 'nextChapter', 'assessment', 'liveReturn']);
     function defaultSettings(preset = 'short') {
-        return { version: 1, preset, collapsed: true, randomDelaysEnabled: true,
+        return { version: 1, pacingVersion: 1, rest: { enabled: true, taskTargetMin: 3, taskTargetMax: 6, restMinMs: 300000, restMaxMs: 420000 }, preset, collapsed: true, randomDelaysEnabled: true,
             features: Object.fromEntries(Object.keys(FEATURES).map(key => [key, !['document', 'live'].includes(key)])),
             delays: Object.fromEntries(Object.entries(ACTIONS).map(([key, [, minMs, maxMs]]) =>
                 [key, { enabled: true, minMs: preset === 'legacy' ? 5000 : minMs, maxMs: preset === 'legacy' ? 12000 : maxMs }])) };
     }
     function validateSettings(input) {
         const result = defaultSettings();
+        if (input && !input.pacingVersion) {
+            input = JSON.parse(JSON.stringify(input)); input.pacingVersion = 1; input.preset = 'custom';
+            input.rest = defaultSettings().rest;
+            for (const key of ['nextContent', 'nextLesson', 'nextChapter']) input.delays[key] = defaultSettings().delays[key];
+        }
         if (!input || input.version !== 1) throw new Error('设置版本无效');
         if (!['short', 'legacy', 'custom'].includes(input.preset)) throw new Error('预设无效');
+        if (input.pacingVersion !== 1) throw new Error('节奏设置版本无效');
+        const rest = input.rest;
+        if (!rest || typeof rest.enabled !== 'boolean' ||
+            !['taskTargetMin','taskTargetMax','restMinMs','restMaxMs'].every(k => Number.isSafeInteger(rest[k]) && rest[k] > 0) ||
+            rest.taskTargetMax < rest.taskTargetMin || rest.restMaxMs < rest.restMinMs || rest.restMaxMs > 2147483647) throw new Error('休息参数须为正整数且范围有序');
+        result.rest = { ...rest };
         result.preset = input.preset;
         for (const field of ['collapsed', 'randomDelaysEnabled']) {
             if (typeof input[field] !== 'boolean') throw new Error('开关值无效');
@@ -302,7 +314,8 @@
         return result;
     }
     function loadSettings(env) {
-        try { const raw = env.localStorage.getItem(SETTINGS_KEY); return raw ? validateSettings(JSON.parse(raw)) : defaultSettings(); }
+        try { const raw = env.localStorage.getItem(SETTINGS_KEY); const settings = raw ? validateSettings(JSON.parse(raw)) : defaultSettings();
+            if (raw && !JSON.parse(raw).pacingVersion) env.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); return settings; }
         catch (_) { return defaultSettings(); }
     }
     // The same scheduler serves parent actions, document steps and child-player startup.
@@ -317,9 +330,9 @@
             }
             if (!enabled(category)) { options.onCancel?.('feature'); return null; }
             if (options.isValid && !options.isValid()) { options.onCancel?.('stale'); return null; }
-            const delay = Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 && options.delayMs <= 2147483647 ? options.delayMs :
+            const delay = Number.isSafeInteger(options.deadline) ? Math.max(0, options.deadline - Date.now()) : Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 && options.delayMs <= 2147483647 ? options.delayMs :
                 range.enabled ? range.minMs + Math.floor(Math.random() * (range.maxMs - range.minMs + 1)) : 0;
-            const action = { category, key, done: false, timer: null, cleanup: null, cancel(reason = 'cancel') {
+            const action = { category, key, deadline: options.deadline ?? Date.now() + delay, delayMs: delay, done: false, timer: null, cleanup: null, cancel(reason = 'cancel') {
                 if (action.done) return;
                 action.done = true; pending.delete(key);
                 if (action.timer !== null) { env.clearTimeout(action.timer); onDone(action.timer); }
@@ -332,7 +345,7 @@
                 if (action.timer !== null) onDone(action.timer);
                 callback();
             };
-            pending.set(key, action);
+            pending.set(key, action); options.onScheduled?.(action);
             if (range.enabled) console.log(`${navigationActions.has(category) ? '导航冷却' : '自动动作 ' + ACTIONS[category][0]} ${(delay / 1000).toFixed(3)}s`);
             if (delay || options.defer) {
                 action.cleanup = options.watch?.(() => action.cancel('user')) || null;
@@ -342,6 +355,88 @@
         };
         return { run, pending, cancelAll(reason = 'cancel') { for (const action of [...pending.values()]) action.cancel(reason); },
             cancelWhere(test, reason = 'settings') { for (const action of [...pending.values()]) if (test(action.category)) action.cancel(reason); } };
+    }
+
+    function pacingCourse(env) {
+        try { const url = new URL(env.location.href); return url.searchParams.get('courseId') || url.searchParams.get('courseid'); } catch (_) { return null; }
+    }
+
+    // Course-local accounting only: no playback or platform-credit decisions live here.
+    function createTaskPacingCoordinator(env, settings, now = () => Date.now(), random = () => Math.random()) {
+        const course = pacingCourse(env);
+        const key = 'xuexitong.v3.task-pacing.v1:' + encodeURIComponent(course || 'unidentified');
+        const draw = (min, max) => min + Math.floor(random() * (max - min + 1));
+        const target = () => draw(settings().rest.taskTargetMin, settings().rest.taskTargetMax);
+        let state = { version: 1, target: 3, count: 0, ledger: [], restEndsAt: 0, pending: null, consumed: '', last: null }, fault = '';
+        const save = () => { try { env.localStorage.setItem(key, JSON.stringify(state)); } catch (_) { fault = '节奏记录无法持久保存，停止新的自动切换'; } };
+        const restore = () => {
+            try {
+                const raw = env.localStorage.getItem(key); if (!raw) { state.target = target(); if (course) save(); return; }
+                const r = JSON.parse(raw);
+                if (r.version !== 1 || !Number.isSafeInteger(r.target) || r.target < 1 || !Number.isSafeInteger(r.count) || r.count < 0 ||
+                    !Array.isArray(r.ledger) || r.ledger.length > 4096 || new Set(r.ledger).size !== r.ledger.length ||
+                    !r.ledger.every(x => typeof x === 'string' && x.length < 4096 && typeof JSON.parse(x)?.lesson === 'string') || r.count > r.ledger.length ||
+                    !Number.isSafeInteger(r.restEndsAt) || r.restEndsAt < 0 || r.restEndsAt > now() + 2147483647 ||
+                    (r.pending && (typeof r.pending.key !== 'string' || !Number.isSafeInteger(r.pending.deadline) || r.pending.deadline < 0 || r.pending.deadline > now() + 2147483647)) ||
+                    typeof r.consumed !== 'string' || (r.last && (typeof r.last.lesson !== 'string' || typeof r.last.id !== 'string'))) throw Error();
+                state = r;
+            } catch (_) { fault = '节奏记录损坏或不兼容，请核对后清除本课程节奏记录'; }
+        };
+        restore();
+        const cycle = () => { state.count = 0; state.target = target(); state.restEndsAt = 0; };
+        return {
+            restore,
+            recordCompletion(identity, evidence) {
+                if (fault || !course || !identity || identity.course !== course || pacingCourse(env) !== course || !['natural-ended','verified-bottom','platform-live-ended'].includes(evidence)) return false;
+                const id = JSON.stringify(identity);
+                if (state.ledger.includes(id)) return false;
+                if (state.ledger.some(raw => { const old = JSON.parse(raw); return old.lesson === identity.lesson && old.inventory && identity.inventory && old.inventory !== identity.inventory; })) { fault = '本课附件清单已变化，节奏计数需手动核对'; return false; }
+                // Never evict dedupe entries and then count a replay twice. Explicit cleanup at the cap.
+                if (state.ledger.length >= 4096) { fault = '本课程节奏记录已达上限，请手动核对并清理'; return false; }
+                state.ledger.push(id); state.count++; state.last = { id, lesson: identity.lesson }; save(); return true;
+            },
+            needsContent(lesson, id) {
+                return !!(state.restEndsAt || (settings().rest.enabled && state.count >= state.target) ||
+                    (state.last?.lesson === lesson && state.last.id !== id));
+            },
+            beforeNextContent(kind, boundary, rule) {
+                if (fault) throw Error(fault);
+                if (pacingCourse(env) !== course) throw Error('课程身份已变化，请重新检测');
+                const token = JSON.stringify([state.last?.id || '', boundary]);
+                if (state.consumed === token) return { key: token, deadline: now(), delayMs: 0 };
+                if (state.pending?.key === token) {
+                    if (!settings().rest.enabled && state.restEndsAt) { cycle(); state.pending.deadline = now(); save(); }
+                    else if (!state.restEndsAt && !rule.enabled) { state.pending.deadline = now(); save(); }
+                    return { ...state.pending, delayMs: Math.max(0, state.pending.deadline - now()) };
+                }
+                // A persisted rest survives changed DOM and rediscovery, with no reroll.
+                let deadline = state.restEndsAt;
+                if (!settings().rest.enabled && deadline) { state.restEndsAt = 0; deadline = now(); cycle(); }
+                else if (deadline && deadline <= now()) { cycle(); deadline = now(); }
+                else if (!deadline && settings().rest.enabled && state.count >= state.target) {
+                    deadline = state.restEndsAt = now() + draw(settings().rest.restMinMs, settings().rest.restMaxMs);
+                }
+                if (!deadline) deadline = now() + (rule.enabled ? draw(rule.minMs, rule.maxMs) : 0);
+                state.pending = { key: token, deadline, kind }; save();
+                if (fault) throw Error(fault);
+                return { ...state.pending, delayMs: Math.max(0, deadline - now()) };
+            },
+            consume(token) {
+                if (state.consumed === token) return true;
+                if (state.pending?.key !== token || state.pending.deadline > now()) return false;
+                if (state.restEndsAt) cycle();
+                state.consumed = token; state.pending = null; save(); return !fault;
+            },
+            cancelPending() { /* Timers belong to the action scheduler; retain the absolute deadline on Stop/reload. */ },
+            dispose() { this.cancelPending(); },
+            clearHistory() { state = { version: 1, target: target(), count: 0, ledger: [], restEndsAt: 0, pending: null, consumed: '', last: null }; fault = ''; save(); },
+            getStatus() { return { ...state, course, fault }; },
+            statusText() {
+                const ms = Math.max(0, state.restEndsAt - now());
+                return state.restEndsAt ? `本轮已完成 ${state.count}/${state.target} 项，正在休息，剩余 ${String(Math.floor(ms / 60000)).padStart(2,'0')}:${(ms % 60000 / 1000).toFixed(3).padStart(6,'0')}` :
+                    `本轮已完成 ${state.count}/${state.target} 项`;
+            },
+        };
     }
 
     // The native card is evidenced; its closure URL and native popup handle are not exposed.
@@ -902,6 +997,7 @@
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
+                if (this._pacing && this._pacing.getStatus().course !== pacingCourse(window)) this._pacing = createTaskPacingCoordinator(window, () => this.settings);
                 this._manualPermit = null; this._manualBusy = false;
                 this._detectedKind = null; this._attemptStatus = '';
                 this._priorChecked = null; this._completedVisits ||= new Set();
@@ -1038,7 +1134,8 @@
                 if (previous.preset !== next.preset && next.preset === 'legacy') {
                     this.configs.randomCooldownMinMs = 5000; this.configs.randomCooldownMaxMs = 12000;
                 }
-                this._actions.cancelWhere(category => !this._actionEnabled(category) ||
+                if (JSON.stringify(previous.rest) !== JSON.stringify(next.rest)) { this._pacing?.cancelPending(); this._actions.cancelAll('settings'); }
+                this._actions.cancelWhere(category => (category === 'nextContent' && JSON.stringify(previous.features) !== JSON.stringify(next.features)) || !this._actionEnabled(category) ||
                     previous.randomDelaysEnabled !== next.randomDelaysEnabled ||
                     JSON.stringify(previous.delays[category]) !== JSON.stringify(next.delays[category]));
                 if ((!next.features.document && this._documentController) ||
@@ -1056,14 +1153,15 @@
                 const manual = (this._manualPermit === 'video' && category === 'videoStart') ||
                     (this._manualPermit === 'audio' && category === 'audioStart') ||
                     (this._manualPermit === 'document' && category === 'documentScroll');
-                return !this._destroyed && (manual || this.settings.features[ACTIONS[category][3]]) &&
+                return !this._destroyed && (manual || category === 'nextContent' || this.settings.features[ACTIONS[category][3]]) &&
                     (category !== 'nextAudio' || this.settings.features.audioPlayback) &&
                     (category !== 'nextVideo' || this.settings.features.videoPlayback) &&
                     (category !== 'assessment' || this.settings.features.nextChapter) &&
                     (manual || !['videoStart', 'nextVideo'].includes(category) || this.configs.autoplay);
             },
             _actionRule(category) {
-                const value = { ...this.settings.delays[category] };
+                const canonical = ['nextVideo','nextAudio','nextDocument'].includes(category) ? 'nextContent' : category;
+                const value = { ...this.settings.delays[canonical] };
                 if (this.settings.preset === 'legacy' && navigationActions.has(category)) {
                     value.minMs = this.configs.randomCooldownMinMs; value.maxMs = this.configs.randomCooldownMaxMs;
                 }
@@ -1078,7 +1176,20 @@
                     !this._destroyed && generation === this._generation && this._sameTaskNode(node) &&
                     title === this._currentStepTitle() && href === window.location.href && content === videoAdapter.cardDocument() &&
                     this._actionEnabled(category) && (!options.isValid || options.isValid());
-                return this._actions.run(category, key, callback, { ...options, isValid: valid,
+                let pace = null;
+                if (key === 'navigation' || options.pacingBoundary) {
+                    if (this._actions.pending.has(key)) return this._actions.pending.get(key);
+                    if (!valid()) return null;
+                    try { pace = this._pacing.beforeNextContent(category, options.pacingBoundary || JSON.stringify(['navigation', this._navigationIntent.sourceId, this._navigationIntent.targetId]), this._actionRule(category)); }
+                    catch (error) { this._block(error.message); return null; }
+                }
+                return this._actions.run(category, key, () => {
+                    this._clearNavigationPreview();
+                    const wasResting = !!this._pacing?.getStatus().restEndsAt;
+                    if (pace && !this._pacing.consume(pace.key)) return this._block('节奏状态未满足或持久存储不可用');
+                    if (pace && wasResting) this._notify(`休息结束，本轮目标：${this._pacing.getStatus().target} 项，继续自动学习`);
+                    callback();
+                }, { ...options, ...(pace ? { deadline: pace.deadline } : {}), isValid: valid,
                     onCancel: reason => {
                         options.onCancel?.(reason);
                         if (this._destroyed || ['BLOCKED', 'ADVANCING'].includes(this._state)) return;
@@ -1249,10 +1360,10 @@
             _clearNavigationPreview() {
                 clearInterval(this._previewInterval); this._previewInterval = null;
             },
-            _navigationPreview() {
-                this._clearNavigationPreview(); const deadline = Date.now() + 5000;
+            _navigationPreview(deadline, within = false) {
+                this._clearNavigationPreview();
                 const prefix = this._platformCompletion ? '当前小节已经学习完成' : this._externalCompletion?.kind === 'assessment' ? '已确认可安全前往下一学习项（测验保持未完成）' : '当前小节已完成并通过平台验证';
-                const tick = () => this._notify(`${prefix}，${Math.max(0, Math.ceil((deadline - Date.now()) / 1000))} 秒后进入下一节。可点击“停止自动操作”。`, '已完成');
+                const tick = () => this._notify(this._pacing?.getStatus().restEndsAt ? this._pacing.statusText() : within ? `${this._pacing.statusText()}，下一内容等待 ${(Math.max(0, deadline - Date.now()) / 1000).toFixed(3)} 秒` : `${prefix}，${(Math.max(0, deadline - Date.now()) / 1000).toFixed(3)} 秒后进入下一节。可点击“停止自动操作”。`, '已完成');
                 tick(); this._previewInterval = setInterval(tick, 250);
             },
             _mountSettingsPanel() {
@@ -1264,16 +1375,23 @@
                 const render = () => {
                     const previousControls = root.querySelector('[data-task-controls]');
                     if (previousControls) this._taskControlsOpen = previousControls.open;
-                    root.innerHTML = '<style>:host{font:12px/1.5 sans-serif;color:#222}details{pointer-events:auto;background:#fff;border:1px solid #aaa;border-radius:6px;box-shadow:0 2px 8px #0002}summary{padding:5px 9px;cursor:pointer}section{width:264px;max-height:65vh;overflow:auto;padding:8px;box-sizing:border-box}label{display:block;margin:3px 0}input[type=number]{width:65px;font:inherit}fieldset{margin:5px 0;padding:4px;border:1px solid #ddd}button,select{font:inherit}p{margin:5px 0}</style><details><summary>学习设置</summary><section><label><input type="checkbox" data-global>随机延迟总开关</label><label>预设 <select data-preset><option value="short">短延迟</option><option value="legacy">旧版长延迟</option><option value="custom">自定义</option></select></label><div data-features></div><div data-delays></div><button type="button" data-reset>恢复默认</button><p>文档、直播仍需已验证适配器。更改设置不会重启已完成任务。</p><p role="status" data-status></p></section></details>';
+                    root.innerHTML = '<style>:host{font:12px/1.5 sans-serif;color:#222}details{pointer-events:auto;background:#fff;border:1px solid #aaa;border-radius:6px;box-shadow:0 2px 8px #0002}summary{padding:5px 9px;cursor:pointer}section{width:264px;max-height:65vh;overflow:auto;padding:8px;box-sizing:border-box}label{display:block;margin:3px 0}input[type=number]{width:65px;font:inherit}fieldset{margin:5px 0;padding:4px;border:1px solid #ddd}button,select{font:inherit}p{margin:5px 0}</style><details><summary>学习设置</summary><section><label><input type="checkbox" data-global>短随机延迟（不控制周期休息）</label><label>预设 <select data-preset><option value="short">短延迟</option><option value="legacy">旧版长延迟</option><option value="custom">自定义</option></select></label><fieldset data-rest><legend>周期休息（独立开关）</legend></fieldset><div data-features></div><div data-delays></div><button type="button" data-reset>恢复默认</button> <button type="button" data-clear-pacing>清理本课程节奏记录</button><p>修改范围下次生效；切换开关取消当前动作，重新检测后继续。活动休息不重抽；关闭休息后重新检测可继续。</p><p>文档、直播仍需已验证适配器。更改设置不会重启已完成任务。</p><p role="status" data-status></p></section></details>';
                     root.querySelector('details').open = !this.settings.collapsed;
                     root.querySelector('[data-global]').checked = this.settings.randomDelaysEnabled;
                     root.querySelector('[data-preset]').value = this.settings.preset;
+                    for (const [key, label] of Object.entries({ enabled:'启用周期休息', taskTargetMin:'任务数最小', taskTargetMax:'任务数最大', restMinMs:'休息最小毫秒', restMaxMs:'休息最大毫秒' })) {
+                        const row = document.createElement('label'), input = document.createElement('input');
+                        input.dataset.rest = key; input.type = key === 'enabled' ? 'checkbox' : 'number'; input.step = '1'; input.min = '1';
+                        if (key === 'enabled') input.checked = this.settings.rest.enabled; else input.value = this.settings.rest[key];
+                        row.append(label, input); root.querySelector('[data-rest]').append(row);
+                    }
                     for (const [key, label] of Object.entries(FEATURES)) {
                         const row = document.createElement('label'); const input = document.createElement('input');
                         input.type = 'checkbox'; input.dataset.feature = key; input.checked = this.settings.features[key];
                         row.append(input, label); root.querySelector('[data-features]').append(row);
                     }
                     for (const [key, [label]] of Object.entries(ACTIONS)) {
+                        if (['nextVideo','nextAudio','nextDocument','assessment','liveReturn'].includes(key)) continue;
                         const row = document.createElement('fieldset'); row.dataset.category = key;
                         const legend = document.createElement('legend'); const check = document.createElement('input');
                         check.type = 'checkbox'; check.dataset.enable = key; check.checked = this.settings.delays[key].enabled; legend.append(check, label); row.append(legend);
@@ -1284,7 +1402,7 @@
                         }
                         row.append(' ms'); root.querySelector('[data-delays]').append(row);
                     }
-                    root.querySelector('[data-status]').textContent = this._settingsMessage || '仅保存功能和延迟设置，不保存账号或课程信息';
+                    root.querySelector('[data-status]').textContent = this._settingsMessage || '设置仅存本机；节奏记录使用课程与附件标识，不保存账号或媒体链接';
                     this._appendTaskControls(root.querySelector('section'));
                     root.querySelector('details').addEventListener('toggle', event => {
                         this.settings.collapsed = !event.target.open;
@@ -1294,7 +1412,8 @@
                 const change = event => {
                     const input = event.target, next = JSON.parse(JSON.stringify(this.settings));
                     if (input.hasAttribute('data-task-type')) return;
-                    if (input.dataset.feature) next.features[input.dataset.feature] = input.checked;
+                    if (input.dataset.rest) next.rest[input.dataset.rest] = input.dataset.rest === 'enabled' ? input.checked : input.value.trim() === '' ? NaN : Number(input.value);
+                    else if (input.dataset.feature) next.features[input.dataset.feature] = input.checked;
                     else if (input.hasAttribute('data-global')) next.randomDelaysEnabled = input.checked;
                     else if (input.hasAttribute('data-preset')) {
                         if (input.value !== 'custom') next.delays = defaultSettings(input.value).delays;
@@ -1306,7 +1425,7 @@
                     if (!this.updateSettings(next)) root.querySelector('[data-status]').textContent = this._settingsMessage;
                 };
                 root.addEventListener('change', change);
-                root.addEventListener('click', event => { if (event.target.hasAttribute('data-reset')) { this.updateSettings(defaultSettings()); render(); } });
+                root.addEventListener('click', event => { if (event.target.hasAttribute('data-clear-pacing')) { this.stopAutomation(); this._pacing.clearHistory(); this._notify('本课程节奏记录已清理，请明确重新检测'); } if (event.target.hasAttribute('data-reset')) { this.updateSettings(defaultSettings()); render(); } });
                 this._settingsStorage = event => { if (event.key === SETTINGS_KEY) { this.updateSettings(loadSettings(window), false); render(); } };
                 window.addEventListener('storage', this._settingsStorage);
                 this._renderSettings = render;
@@ -1431,6 +1550,44 @@
                 const players = media.tasks ? media.tasks.filter(task => ['video', 'audio'].includes(task.kind) && task.element).map(task => task.element) : [...media.videos, ...(media.audios || [])];
                 return { ...media, videos: players };
             },
+            _pacedIdentity(element, kind) {
+                const node = catalog.current();
+                const course = pacingCourse(window);
+                if (!course || !node?.id || [...document.querySelectorAll('[id]')].filter(el => el.id === node.id).length !== 1) return null;
+                const media = this._discoverMedia();
+                if (media.unsupported || media.inaccessible || media.pending) return null;
+                const items = media.tasks?.length ? media.tasks.map(t => ({ kind: t.kind, element: t.element, attachment: t.attachment })) :
+                    [...(media.videos || []).map(element => ({ kind: 'video', element })), ...(media.audios || []).map(element => ({ kind: 'audio', element })),
+                    ...(this._taskSet()?.tasks || [])];
+                const indexes = items.map((t,i) => (t.element === element || t.attachment === element) && t.kind === kind ? i : -1).filter(i => i >= 0);
+                if (indexes.length !== 1) return null;
+                return { course, lesson: node.id, kind, inventory: items.map(t => t.kind).join(','), ordinal: indexes[0] };
+            },
+            _recordPacedCompletion(element, kind, evidence) {
+                const id = this._pacedIdentity(element, kind);
+                if (!id) { this._notify('内容已完成，但缺少稳定附件身份，未计入休息任务数'); return; }
+                this._pacing.recordCompletion(id, evidence);
+            },
+            _recordPacedLive(r) {
+                this._pacing.recordCompletion({ course: r.ids.course, lesson: r.lesson, kind: 'live', session: r.id }, 'platform-live-ended');
+            },
+            _paceContent(element, kind, resume) {
+                if (!this._pacing) return false;
+                const identity = this._pacedIdentity(element, kind), lesson = catalog.current()?.id;
+                const id = identity && JSON.stringify(identity);
+                if (!this._pacing.needsContent(lesson, id)) return false;
+                if (['video','audio'].includes(kind) && !element.paused && !element.ended) { this._notify('平台已自行播放当前内容，脚本未对本次切换实施等待；保留后续休息状态'); return false; }
+                if (!identity) { this._block('切换内容缺少稳定附件身份，不能安全恢复节奏'); return true; }
+                const boundary = 'content:' + id + ':' + (this._pacing.getStatus().last?.id || '');
+                if (this._pacedReady === boundary && !this._pacing.getStatus().restEndsAt && !(this.settings.rest.enabled && this._pacing.getStatus().count >= this._pacing.getStatus().target)) return false;
+                this._state = 'ACTION_PENDING';
+                this._runAction('nextContent', 'content-pacing', () => { this._pacedReady = boundary; resume(); }, {
+                    pacingBoundary: boundary,
+                    isValid: () => element.isConnected && JSON.stringify(this._pacedIdentity(element, kind)) === id,
+                    onScheduled: action => this._navigationPreview(action.deadline, true),
+                });
+                return true;
+            },
             _mediaAction(element, next = false) {
                 return element?.tagName === 'AUDIO' ? (next ? 'nextAudio' : 'audioStart') : (next ? 'nextVideo' : 'videoStart');
             },
@@ -1488,6 +1645,7 @@
                 this._detectedKind = pending.kind === 'document' ? '文档' : '直播 / 回放';
                 if (!this.settings.features[pending.kind === 'document' ? 'document' : 'live'] && this._manualPermit !== pending.kind) { this._state = 'PAUSED_AUTOMATION'; this._notify('已识别任务，对应自动执行已关闭'); return true; }
                 if (pending.platformDocument && !pending.viewer) { this._waitForDocument(pending); return true; }
+                if (this._paceContent(pending.element, pending.kind, () => this._processSupportedTask())) return true;
                 if (pending.nativeLink || pending.nativeEntry) { this._openNativeLink(pending, scope, this._manualPermit === 'live'); return true; }
                 this._cancelTasks();
                 this._detachVideoEvents();
@@ -1514,6 +1672,7 @@
                     this._processedTasks.add(pending.element);
                     this._lastProcessedKind = pending.kind;
                     record.localDone = true; record.result = result;
+                    if (pending.kind === 'document') this._recordPacedCompletion(pending.element, 'document', 'verified-bottom');
                     this._manualPermit = null; this._manualBusy = false;
                     this._notify(record.kind === 'document' ? '文档本地阅读已完成，正在核对平台完成标记' : '直播会话已结束，正在核对平台完成标记', '已完成');
                     console.log(record.kind === 'document' ? '文档已到可验证底部，仅记为本地操作完成。' : '直播窗口已关闭；本地结束信号不代表平台已计入完成。');
@@ -1536,7 +1695,7 @@
                         let first = true;
                         this._documentController = window.__xuexitongTaskSupport.readDocument({ element: pending.viewer || pending.element,
                             scheduleStep: tick => {
-                                const category = first && this._lastProcessedKind === 'document' ? 'nextDocument' : 'documentScroll'; first = false;
+                                const category = 'documentScroll'; first = false;
                                 return this._runAction(category, 'document-step', tick, { defer: true, isValid: () => this._taskContextValid(record) && (pending.viewer || pending.element).clientHeight > 0 });
                             },
                             isValid: () => this._taskContextValid(record) && (!pending.platformDocument || documentViewer(pending.element).viewer === pending.viewer),
@@ -1641,12 +1800,14 @@
                 const entries = catalog.entries(), adjacent = entries[entries.indexOf(this._completionNode) + 1];
                 const assessment = this._externalCompletion?.kind === 'assessment' || adjacent !== target;
                 const chapter = this._chapterOf(target) !== this._chapterOf(this._completionNode);
-                const category = assessment ? 'assessment' : this._liveReturnPendingNavigation ? 'liveReturn' : chapter ? 'nextChapter' : 'nextLesson';
+                const category = chapter ? 'nextChapter' : 'nextLesson';
+                if (assessment && !this.settings.features.assessment) { this._state = 'PAUSED_AUTOMATION'; return; }
                 if (!this.settings.features[chapter ? 'nextChapter' : 'nextLesson'] || !this._actionEnabled(category)) {
                     this._state = 'PAUSED_AUTOMATION'; return;
                 }
                 const uniqueId = element => element?.id && Array.from(document.querySelectorAll('[id]')).filter(other => other.id === element.id).length === 1 ? element.id : '';
                 const targetId = uniqueId(target), targetTitle = this._nodeTitle(target), targetChapter = this._chapterOf(target);
+                if (!targetId || !this._completionNode?.id) return this._block('导航节奏缺少稳定目录标识');
                 const chapterId = uniqueId(targetChapter);
                 const topology = this._catalogTopology();
                 this._navigationIntent = Object.freeze({ sourceId: this._completionNode.id, sourceTitle: this._nodeTitle(this._completionNode),
@@ -1668,13 +1829,12 @@
                 };
                 this._state = 'NAVIGATION_COOLDOWN';
                 this._manualBusy = false; this._manualPermit = null;
-                this._navigationPreview();
                 this._runAction(category, 'navigation', () => {
                     this._clearNavigationPreview();
                     if (this._state !== 'NAVIGATION_COOLDOWN' || !resolveTarget() || !this._navigationEligible(target)) return this._block('冷却后导航条件失效');
                     this._liveReturnPendingNavigation = false;
                     this._state = 'READY_TO_ADVANCE'; this.playCurrentIndex(target);
-                }, { delayMs: 5000, isValid: () => {
+                }, { onScheduled: action => this._navigationPreview(action.deadline), isValid: () => {
                     this._navigationFailure = '';
                     if (location.href !== this._navigationIntent.href) this._navigationFailure = '导航预告期间路由已变化';
                     else if (!resolveTarget()) this._navigationFailure = '授权目标缺失或身份不唯一';
@@ -1743,6 +1903,7 @@
                 return timer;
             },
             _cancelTasks() {
+                this._pacing?.cancelPending();
                 this._documentWaitCancel?.(); this._clearNavigationPreview();
                 this._mediaReadyCancel?.(); this._clearAudioNotice?.();
                 this._platformCompletion = null;
@@ -1778,6 +1939,7 @@
                     return this._block('播放器完成事件属于已离开的页面');
                 }
                 console.log('视频自然播放结束，等待内容发现及平台完成确认。');
+                this._recordPacedCompletion(video, video.tagName === 'AUDIO' ? 'audio' : 'video', 'natural-ended');
                 this._completedVideos.add(video);
                 this._completionVideo = video;
                 this._completionNode = catalog.current();
@@ -2114,9 +2276,10 @@
                     if (this._completedVideos.has(el)) return;
                     if (this._isPlaying && !el.paused && !el.ended) { this._state = 'PLAYING'; return; }
                     if (!this._actionEnabled(this._mediaAction(el, this._nextVideoRequested))) { this._state = 'PAUSED_AUTOMATION'; return; }
+                    if (!actionReady && this._paceContent(el, el.tagName === 'AUDIO' ? 'audio' : 'video', () => { this._state = 'READY'; this.play(true); })) return;
                     const sourcePresent = !!(el.currentSrc || el.getAttribute('src') || el.querySelector('source[src]'));
                     if (el.readyState < 2 && !sourcePresent) { this._waitForMediaReady(el, actionReady); return; }
-                    if (!actionReady && this._preparedVideoNode !== catalog.current()) {
+                    if (!actionReady && !this._pacedReady?.startsWith('content:' + JSON.stringify(this._pacedIdentity(el, el.tagName === 'AUDIO' ? 'audio' : 'video')) + ':') && this._preparedVideoNode !== catalog.current()) {
                         const category = this._mediaAction(el, this._nextVideoRequested);
                         this._state = 'ACTION_PENDING';
                         this._runAction(category, 'video-start', () => { this._state = 'READY'; this.play(true); },
@@ -2578,6 +2741,7 @@
             set: () => {},
         });
         app.settings = loadSettings(window);
+        app._pacing = createTaskPacingCoordinator(window, () => app.settings);
         app._actions = createActionScheduler(window, {
             rule: category => app._actionRule(category), enabled: category => app._actionEnabled(category),
             onQueued: timer => app._timers.add(timer), onDone: timer => app._timers.delete(timer), onError: reason => app._block(reason),
@@ -2635,7 +2799,7 @@
             if (!['ended','verify','done'].includes(r.phase)) return false;
             app.stopAutomation();
             if (r.phase === 'done') { app._notify('回放会话已处理；不会重复打开或刷新'); return true; }
-            if (app._priorProof(catalog.current())) { save({ ...r, phase:'done' }); app.run(); return true; }
+            if (app._priorProof(catalog.current())) { app._recordPacedLive?.(r); save({ ...r, phase:'done' }); app.run(); return true; }
             if (!r.refreshUsed) { save({ ...r, phase:'verify', refreshUsed:true }); env.location.reload(); return true; }
             app._notify('回放自然结束，但平台仍未确认完成；已停止，刷新不会重复执行'); return true;
         };

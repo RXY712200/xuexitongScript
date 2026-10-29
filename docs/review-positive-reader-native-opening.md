@@ -144,3 +144,57 @@ manual fallback, terminals and existing natural-end/credit/refresh paths. Build,
 verify/customization/syntax/diff checks pass. Replay controller, claim/ack matching,
 closing, return-credit/refresh, audio/document/video/navigation bodies are frozen.
 Authenticated unattended startup and Chrome popup policy still need retesting.
+
+
+## Randomized task pacing and periodic rest (2026-10-29)
+
+Baseline: `4a12681af987e1d73ae57c219835db98949a2443`. Overall status remains **PARTIAL** pending authenticated testing.
+
+### Stage 1 — Configuration and scheduling
+
+- Canonical `nextContent`: 3000–7000ms; `nextLesson`: 2000–8000ms; `nextChapter`: 3000–8000ms, inclusive integer samples.
+- Removed fixed 5000ms navigation override. Preview receives the scheduler's exact absolute deadline; no separate preview wait. Assessment deferral uses actual chapter routing once; verified GM return uses the same lesson/chapter route.
+- `nextVideo`/`nextAudio`/`nextDocument` delay aliases resolve to `nextContent`; their duplicate range fields are hidden. Their existing feature switches remain. Document scroll intervals remain unchanged and are reading operations, not another transition delay.
+- Settings key remains `xuexitong.v3.action-settings.v1`. One-time `pacingVersion:1` migration updates the three approved ranges, adds independently enabled rest defaults, preserves unrelated feature/range preferences and selects `custom` so the old legacy override cannot defeat migration. Users may explicitly select legacy afterward.
+- Rest settings: enabled; task target 3–6; duration 300000–420000ms. Changes cancel affected pending execution; explicit rediscovery resumes. Active deadlines are not rerolled when ranges change. Disabling short delays removes remaining ordinary waiting after rediscovery but leaves rest intact. Disabling rest ends that pending rest and resets the work cycle on explicit resumption. Restore Defaults resets preferences, not completion history/deadlines.
+
+### Stage 2 — Isolated coordinator
+
+`createTaskPacingCoordinator` owns count, quota, course-local completion ledger, pending boundary, consumed marker and absolute rest deadline. Execution, cancellation, page watches and revalidation remain in the existing action scheduler. Completed deadlines have one-shot consumption; Stop does not delete accounting or schedule automatic resumption.
+
+Storage is namespaced by course ID. It contains course/lesson IDs, content kind and verified inventory ordinal, or GM session ID; no titles, full URLs, signed media URLs, cookies or account information. Owned inventory recognition is reused, without changing player selection. Unidentifiable content is not counted; changed recorded inventory stops pacing for manual review. Ledger is capped at 4096 entries with explicit local cleanup, rather than eviction that could recount replayed content. Corrupt storage or failed writes stop automatic paced transitions with a diagnostic. Cleanup is an explicit stopped-user action and intentionally removes deduplication history.
+
+### Stage 3 — Minimal hooks
+
+- Owned, context-validated natural video/audio ended: records once before existing verification.
+- Owned document's existing verified-bottom callback: records local reading only, without inventing platform credit.
+- GM parent `returnCredit`: records session only after the existing natural-ended terminal path and positive platform proof. Child pairing/playback/close implementation is unchanged.
+- Within-lesson starts pass one content gate; navigation passes one lesson/chapter gate. Due rest replaces ordinary delay. Refresh/reinjection restores the deadline; an elapsed rest resumes without a short delay. Reconstructed identities are rediscovered and validated, not used to restore old closures.
+- Platform-controlled content already playing is not paused; notice explicitly says that transition was not delayed, with rest preserved for a later controlled boundary.
+- Existing Chinese notice shows count, exact three-decimal waiting time or absolute rest countdown. Timer throttling can delay execution; millisecond sampling does not guarantee millisecond execution accuracy.
+
+### Stage 4 — Focused evidence
+
+Commands actually executed:
+
+```text
+node scripts/build-userscript.mjs
+node tests/verify-v3.mjs
+node --check v3_optimized.js
+node --check tests/task-pacing-v3.mjs
+node tests/task-pacing-v3.mjs
+  RESULT: 6 focused synthetic pacing groups passed
+node tests/customization-v3.mjs
+  PASS: fixed 1.0x configuration, assessment detection, unknown-content safety
+node tests/gm-live-v3.mjs
+  RESULT: 8 focused GM lifecycle checks passed
+TEST_FILTER="^pacing|^GM raw|^audio bounded|^knowledge map real|^controls owned document"
+node tests/navigation-v3.mjs
+  RESULT: 8 passed, 0 failed; Chrome 156, headless, simulated media/timers, network blocked
+```
+
+Tests cover sampled bounds, five independent contents, skipped/duplicate evidence, reload/deadline recovery, no stacked rest delay, live-session deduplication, settings migration, Stop/stale timers, actual natural-ended integration and preview/action deadline agreement. The existing GM raw browser case now runs on its synthetic HTTPS origin: `crypto.randomUUID()` is unavailable on the prior insecure blank page. No GM production logic was changed to satisfy that test.
+
+Exact baseline body comparisons also passed for audio rejection/fallback, pause/stall/background guards, document-context validation, attachment credit, navigation eligibility, native opening, catalog navigation and the entire GM child implementation. Full historical suites were not run.
+
+Authenticated acceptance still needed: actual 3–6 task cycles across mixed attachments, long rest through refresh and live return, settings changes while resting and platform-controlled autoplay timing. Ordinal deduplication relies on the unchanged owned inventory; identity-ambiguous layouts fail conservatively. Pacing data is local to the course origin/browser profile, not synchronized across unrelated origins or browser profiles. Multiple simultaneously automated course tabs are not a supported pacing coordination mode.

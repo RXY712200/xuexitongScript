@@ -37,7 +37,7 @@ async function setup(html = outer(), count = 1, nested = false, scopeCase = null
         await context.route('https://zhibo.chaoxing.com/**', route => route.fulfill({ contentType: 'text/html', body: replayPopup }));
     }
     const page = await context.newPage();
-    if (syntheticOrigin) await page.goto(syntheticOrigin === 'recorded' ? 'https://mooc1.chaoxing.com/synthetic-course' : 'https://course.test/course');
+    if (syntheticOrigin) await page.goto(syntheticOrigin === 'recorded' ? 'https://mooc1.chaoxing.com/synthetic-course' : syntheticOrigin === 'pacing' ? 'https://course.test/course?courseId=synthetic' : 'https://course.test/course');
     // DOMParser is inert. Strip executable/resource-bearing content before insertion.
     const sanitized = await page.evaluate(html => {
         const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -2464,10 +2464,51 @@ try {
             assert.equal(await state(page),'VERIFYING_COMPLETION');assert.equal(await page.evaluate(()=>app._completedVideos.has(window.__audio)),true);
         }
     }));
-    await check('GM raw compatibility course still exposes page globals and starts ordinary player',()=>using([outer(),1,false,null,false,false,false,
+    await check('GM raw compatibility course still exposes page globals and starts ordinary player',()=>using([outer(),1,false,null,false,true,false,
         'const unsafeWindow=window;const GM_getValue=(k,d)=>d,GM_setValue=()=>{},GM_deleteValue=()=>{},GM_addValueChangeListener=()=>1,GM_removeValueChangeListener=()=>{};'+source],async page=>{
         assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>window.app===window.__xuexitongPlayerV3&&!!window.__xuexitongTaskSupport),true);
         assert.equal(await page.evaluate(()=>app._videoEl.playbackRate),1);
+    }));
+    await check('pacing natural ended counts once and next content uses one exact deadline',()=>using([outer(),2,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{const s=structuredClone(app.settings);s.preset='short';s.randomDelaysEnabled=true;s.delays.nextContent={enabled:true,minMs:3827,maxMs:3827};app.updateSettings(s);
+            const v=app._videoEl;v.__ended=true;v.__paused=true;v.dispatchEvent(new Event('ended'));v.dispatchEvent(new Event('ended'));});
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),1);
+        await flush(page,1);
+        assert.equal(await page.evaluate(()=>app._actions.pending.get('content-pacing')?.delayMs),3827);
+        assert.equal(await page.evaluate(()=>app._getVideoEl().__plays),0);
+        await page.evaluate(()=>{window.__clock+=3827;});await flush(page,1);
+        assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>app._videoEl.__plays),1);
+        assert.equal(await page.evaluate(()=>app._actions.pending.size),0);
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),1);
+    }));
+    await check('pacing navigation preview and random action share deadline with no fixed five seconds',()=>using([outer(2),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{const s=structuredClone(app.settings);s.preset='short';s.randomDelaysEnabled=true;s.delays.nextLesson={enabled:true,minMs:2432,maxMs:2432};app.updateSettings(s);
+            const n=document.querySelector('#node0');n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
+            const v=app._videoEl;v.__ended=true;v.__paused=true;v.dispatchEvent(new Event('ended'));});
+        await flush(page,1);
+        assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+        assert.deepEqual(await page.evaluate(()=>{const a=app._actions.pending.get('navigation');return [a.delayMs,a.deadline-window.__clock,app._lastNotice.includes('2.432')];}),[2432,2432,true]);
+        await page.evaluate(()=>app.stopAutomation());await page.evaluate(()=>{window.__clock+=9000;});await flush(page,1);
+        assert.equal(await state(page),'PAUSED_AUTOMATION');
+        assert.equal(await page.evaluate(()=>document.querySelector('#node0').classList.contains('posCatalog_active')),true);
+    }));
+    await check('pacing due rest replaces navigation delay and Stop retains deadline without restart',()=>using([outer(2),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{
+            const s=structuredClone(app.settings);s.preset='short';s.randomDelaysEnabled=true;s.rest.restMinMs=300000;s.rest.restMaxMs=300000;app.updateSettings(s);
+            const quota=app._pacing.getStatus().target;
+            for(let i=0;i<quota-1;i++)app._pacing.recordCompletion({course:'synthetic',lesson:'prior',kind:'video',ordinal:i},'natural-ended');
+            const n=document.querySelector('#node0');n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');
+            const v=app._videoEl;v.__ended=true;v.__paused=true;v.dispatchEvent(new Event('ended'));
+        });await flush(page,1);
+        assert.deepEqual(await page.evaluate(()=>{const a=app._actions.pending.get('navigation');return [a.delayMs,app._pacing.getStatus().restEndsAt===a.deadline,app._lastNotice.includes('正在休息')];}),[300000,true,true]);
+        const deadline=await page.evaluate(()=>app._pacing.getStatus().restEndsAt);
+        await page.evaluate(()=>app.stopAutomation());await page.evaluate(()=>{window.__clock+=420000;});await flush(page,2);
+        assert.equal(await state(page),'PAUSED_AUTOMATION');assert.equal(await page.evaluate(()=>app._pacing.getStatus().restEndsAt),deadline);
+        assert.equal(await page.evaluate(()=>app._actions.pending.size),0);
+        await page.evaluate(()=>app.run());await flush(page,2);
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().restEndsAt),0);
+        assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
