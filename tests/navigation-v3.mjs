@@ -2624,6 +2624,10 @@ try {
         const result=await page.evaluate(()=>{const m=app._discoverMedia();window.__additionalTask=m.tasks?.find(t=>t.executable===false);app.run();return {k:window.__additionalTask?.kind,state:app._state,notice:app._lastNotice,count:app._pacing.getStatus().count};});
         assert.equal(result.k,kind);assert.equal(result.state,'BLOCKED');assert.ok(result.notice.includes('manual-'+kind));assert.equal(result.count,0);assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
         assert.equal(await page.evaluate(()=>app._planningSnapshot().tasks.find(t=>t.kind===window.__additionalTask.kind)?.classification),'DEFERRED_RECOGNIZED');
+        const recognitionChanged=await page.evaluate(({kind,markup})=>{const plan=app._planningSnapshot(),f=window.__additionalOwner,d=f.contentDocument;const valid=plan.validateScope();
+            if(kind==='legacy-flash')f.setAttribute('data','{}');else if(kind==='book-reader')d.querySelector('#ReadWeb').remove();else if(kind==='timed-reader')d.querySelector('#pagejump').remove();else if(kind==='audio-slides')d.querySelector('.swiper-slide').remove();else d.querySelector('#hyperlink').remove();
+            const invalid=!plan.validateScope();d.body.innerHTML=markup;f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));return {valid,invalid};
+        },{kind,markup});assert.deepEqual(recognitionChanged,{valid:true,invalid:true});
         for(const known of ['video','audio','document']){
             const mixed=await page.evaluate(({known,audioFixture})=>{const root=window.__additionalOwner.ownerDocument;const f=root.createElement('iframe');f.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[known]);root.body.insertBefore(f,window.__additionalOwner);f.contentDocument.body.innerHTML=known==='audio'?audioFixture:known==='video'?'<video id="video_html5_api"></video>':'<canvas height="1200"></canvas>';
                 app._recovery.resumeExplicitly();app.run();const m=app._discoverMedia();const row={kinds:m.tasks.map(t=>t.kind),claimed:!!window.__xuexitongTaskSupport.inspectAdditionalAttachment(f,0,root),state:app._state,count:app._pacing.getStatus().count,nav:app._actions.pending.has('navigation')};app.stopAutomation();f.remove();return row;
@@ -2653,6 +2657,18 @@ try {
             return {reasons:app._discoverMedia().reasons,classes,valid,replaced,reordered,unsupported:app._discoverMedia().unsupported};
         },{audioFixture});
         assert.deepEqual(result.classes,['EXECUTABLE_KNOWN','EXECUTABLE_KNOWN','EXECUTABLE_KNOWN','DEFERRED_UNKNOWN'],JSON.stringify(result));assert.equal(result.valid,true);assert.equal(result.replaced,false);assert.equal(result.reordered,false);assert.equal(result.unsupported,true);
+    }));
+    for(const kind of ['video','audio'])await check(`planning managed ${kind} continuity and verified wrapper`,()=>using([outer(),0,false,null,false,'pacing'],async page=>{
+        const result=await page.evaluate(({kind,audioFixture})=>{
+            app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<div class="ans-attach-ct"><span class="ans-job-icon"></span><iframe class="ans-attach-online '+(kind==='video'?'ans-insertvideo-online':'ans-insertaudio')+'"></iframe></div>';
+            const owner=root.querySelector('iframe');owner.contentDocument.body.innerHTML=kind==='audio'?audioFixture:'<video id="video_html5_api"></video>';const el=owner.contentDocument.querySelector(kind==='audio'?'#audio_html5_api':'video');el.__paused=true;Object.defineProperties(el,{readyState:{get:()=>4},paused:{configurable:true,get:()=>el.__paused}});el.play=()=>{el.__paused=false;return Promise.resolve();};
+            app.run();return Promise.resolve().then(()=>{
+                const playing=app._planningSnapshot();const safety=playing.globalSafety;const valid=playing.validateScope();el.__paused=true;const paused=app._planningSnapshot();el.__paused=false;const resumed=paused.validateScope();
+                owner.setAttribute('data','{"module":"changed"}');const changed=playing.validateScope();owner.removeAttribute('data');
+                root.querySelector('.ans-attach-ct').insertAdjacentHTML('beforeend','<div>unassigned content</div>');const misleading=app._planningSnapshot().globalSafety;
+                return {safety,valid,resumed,changed,misleading};
+            });
+        },{kind,audioFixture});assert.deepEqual(result,{safety:'VERIFIED_PLANNING_ONLY',valid:true,resumed:true,changed:false,misleading:'GLOBAL_UNSAFE'});
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

@@ -109,3 +109,8 @@ assert.equal(journal.append({...event,url:'https://private.invalid'}).durable,fa
 journal=journalFactory(journalEnv);assert.equal(journal.read().length,200);const stored=JSON.parse([...journalStore.values()][0]);stored.events[0].timestamp=Date.now()-604800001;journalStore.set([...journalStore.keys()][0],JSON.stringify(stored));assert.equal(journal.read().length,199);
 assert.equal(journalFactory({...journalEnv,localStorage:{getItem(){throw Error();},setItem(){throw Error();}}}).append(event).durable,false);assert.equal(journal.clear(),true);assert.equal(journal.read().length,0);
 console.log('PASS journal allowlist, opaque refs, deduplication, reload, count/size/age pruning and explicit storage failure');
+
+assert.equal(journal.append({...event,timestamp:Date.now()}).durable,false);
+assert.equal(journal.append({...event,session:lesson}).durable,false);
+assert.equal(journal.read().length,0);
+console.log('PASS journal rejects caller overrides of generated session and timestamp');

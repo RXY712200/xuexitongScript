@@ -288,7 +288,8 @@
         return Object.freeze({
             reference(input) { if (!references.has(input)) references.set(input,ref()); return references.get(input); },
             append(event) {
-                const item={timestamp:Date.now(),session,...event};
+                if (!event || Object.hasOwn(event,'timestamp') || Object.hasOwn(event,'session')) return {durable:false,reason:'reserved-field'};
+                const item={...event,timestamp:Date.now(),session};
                 if (!valid(item)) return { durable:false,reason:'invalid-event' };
                 try { const rows=read(), last=rows.at(-1); const signature=e=>JSON.stringify([e.session,e.lesson,e.ordinal,e.type,e.kind,e.reason,e.evidence]);
                     if (!last || signature(last)!==signature(item)) rows.push(item);
@@ -309,10 +310,19 @@
         if (media.reasons?.some(reason=> !['unknown-attachment','unknown-independent-task','unassigned-task-content','player-not-ready'].includes(reason)&&!reason.startsWith('manual-'))) unsafe=true;
         const existing=app._attachmentSnapshot;
         if(existing && (existing.root!==root || existing.id!==id || existing.tasks.length!==media.tasks?.length || existing.tasks.some((t,i)=>t.attachment!==media.tasks[i]?.attachment)))unsafe=true;
-        if(root && [...root.body.children].some(el=>!el.matches('iframe.ans-attach-online,script,style')))unsafe=true;
+        const wrapperValid = el => el.matches('.ans-attach-ct') && el.querySelectorAll('iframe.ans-attach-online').length === 1 &&
+            el.querySelectorAll('.ans-job-icon').length === 1 && [...el.children].every(child=>child.matches('iframe.ans-attach-online,.ans-job-icon,script,style')) &&
+            !el.querySelector('.ans-attach-ct');
+        if(root && [...root.body.children].some(el=>!el.matches('iframe.ans-attach-online,script,style')&&!wrapperValid(el)))unsafe=true;
         const docs=[];
         const visit=(doc,depth=0)=>{if(!doc||depth>4||docs.includes(doc)){unsafe=true;return;}docs.push(doc);
-            for(const el of doc.querySelectorAll('video,audio'))if((!el.paused&&!el.ended)||el.seeking)unsafe=true;
+            for(const el of doc.querySelectorAll('video,audio'))if((!el.paused&&!el.ended)||el.seeking) {
+                const owned = media.tasks?.filter(task=>task.element===el && ['video','audio'].includes(task.kind));
+                const context=app._videoContext;
+                if(el.seeking || owned?.length!==1 || app._videoEl!==el || !app._isPlaying || app._playNode!==node ||
+                    !context || context.video!==el || context.generation!==app._generation || context.playerDocument!==el.ownerDocument ||
+                    (context.source && context.source!==(el.currentSrc||el.getAttribute('src')||'')))unsafe=true;
+            }
             for(const child of doc.querySelectorAll('iframe')){try{visit(child.contentDocument,depth+1);}catch(_){unsafe=true;}}};
         for(const owner of owners){if(owner.ownerDocument!==root||owner.parentElement.closest('iframe.ans-attach-online'))unsafe=true;try{visit(owner.contentDocument);}catch(_){unsafe=true;}}
         if(media.documents?.some(doc=>doc!==root&&!docs.includes(doc)))unsafe=true;
@@ -321,7 +331,8 @@
             const kind=known?.kind||extra?.kind||'unknown';
             const recognized=extra||known?.executable===false;
             const loading=known&&['video','audio'].includes(kind)&&!known.element;
-            return Object.freeze({kind,ordinal,owner,lineage:Object.freeze([frame,owner]),classification:unsafe?'GLOBAL_UNSAFE':loading?'LOADING':recognized?'DEFERRED_RECOGNIZED':known?'EXECUTABLE_KNOWN':'DEFERRED_UNKNOWN',
+            let metadata;try{const data=JSON.parse(owner.getAttribute('data')||'{}');metadata=JSON.stringify([data.module||null,data.type||null]);}catch(_){metadata='invalid';}
+            return Object.freeze({kind,ordinal,owner,target:known?.element||null,recognition:metadata,lineage:Object.freeze([frame,owner]),classification:unsafe?'GLOBAL_UNSAFE':loading?'LOADING':recognized?'DEFERRED_RECOGNIZED':known?'EXECUTABLE_KNOWN':'DEFERRED_UNKNOWN',
                 executable:!unsafe&&!loading&&!recognized&&!!known,reason:unsafe?'unsafe-scope':loading?'loading':recognized?'recognition-only':known?'known-owned':'isolated-unknown',completion:'not-authorized-by-plan'});
         });
         const currentDocs=docs.slice();
@@ -331,7 +342,12 @@
             const now=[...root.querySelectorAll('iframe.ans-attach-online')];if(now.length!==owners.length||now.some((o,i)=>o!==owners[i]||!o.isConnected))return false;
             const found=[];let valid=true;const check=(d,depth=0)=>{if(!d||depth>4||found.includes(d)){valid=false;return;}found.push(d);for(const f of d.querySelectorAll('iframe'))try{check(f.contentDocument,depth+1);}catch(_){valid=false;}};
             for(const o of owners)try{check(o.contentDocument);}catch(_){valid=false;}
-            return valid&&found.length===currentDocs.length&&found.every((d,i)=>d===currentDocs[i])&&createLessonPlan(app).globalSafety!=='GLOBAL_UNSAFE';
+            if(!valid||found.length!==currentDocs.length||!found.every((d,i)=>d===currentDocs[i]))return false;
+            const next=createLessonPlan(app);
+            return next.globalSafety!=='GLOBAL_UNSAFE' && next.tasks.length===tasks.length && tasks.every((task,i)=>{
+                const other=next.tasks[i];return task.owner===other.owner&&task.target===other.target&&task.kind===other.kind&&
+                    task.classification===other.classification&&task.executable===other.executable&&task.reason===other.reason&&task.recognition===other.recognition;
+            });
         };
         return Object.freeze({lesson:Object.freeze({course,id,title}),frame,document:root,tasks:Object.freeze(tasks),globalSafety:unsafe?'GLOBAL_UNSAFE':'VERIFIED_PLANNING_ONLY',validateScope});
     }
