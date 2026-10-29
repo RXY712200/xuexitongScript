@@ -1715,9 +1715,37 @@
                 }
                 return true;
             },
+            _classifyAttachmentReadiness(media) {
+                if (this._verificationPresent() || media.inaccessible || media.unsupported ||
+                    media.reasons?.some(reason => reason !== 'player-not-ready')) return 'blocked';
+                const root = videoAdapter.cardDocument();
+                const loading = root && [...root.querySelectorAll('iframe.ans-attach-online')].some(frame => {
+                    try { return frame.isConnected && frame.contentDocument &&
+                        (frame.contentDocument.readyState === 'loading' ||
+                        (frame.getAttribute('src') && frame.contentDocument.URL === 'about:blank')); }
+                    catch (_) { return false; }
+                });
+                return media.pending && loading ? 'loading' : 'ready';
+            },
+            _waitForAttachmentReadiness() {
+                if (this._attachmentReadiness) return;
+                const context = { node: catalog.current(), doc: videoAdapter.cardDocument(), href: location.href, chapter: this._chapterOf(catalog.current()), started: Date.now() };
+                this._attachmentReadiness = context;
+                const tick = () => {
+                    if (this._attachmentReadiness !== context) return;
+                    if (location.href !== context.href || catalog.current() !== context.node || videoAdapter.cardDocument() !== context.doc || this._chapterOf(catalog.current()) !== context.chapter) return this._block('附件加载等待期间课程身份已变化');
+                    const readiness = this._classifyAttachmentReadiness(this._playableMedia());
+                    if (readiness === 'blocked') return this._block('附件加载出现不可访问或不支持的任务');
+                    if (readiness === 'ready') { this._attachmentReadiness = null; this._state = 'READY'; this.play(); return; }
+                    if (Date.now() - context.started >= 10000) return this._block('已知附件加载等待超过10秒，未视为完成');
+                    this._schedule(tick, 250);
+                };
+                this._state = 'WAITING_ATTACHMENT'; this._notify('已知附件正在加载，最多等待10秒'); this._schedule(tick, 250);
+            },
             _discoverAttachmentTask() {
                 const media = this._playableMedia();
                 if (!media.tasks) return null;
+                if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
                 if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
                 if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
                 const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
@@ -1896,6 +1924,7 @@
                 return timer;
             },
             _cancelTasks() {
+                this._attachmentReadiness = null;
                 this._pacing?.cancelPending();
                 this._documentWaitCancel?.(); this._clearNavigationPreview();
                 this._mediaReadyCancel?.(); this._clearAudioNotice?.();
@@ -2115,6 +2144,7 @@
                 const node = catalog.current(), doc = videoAdapter.cardDocument();
                 if (!node || !doc || (this._priorChecked?.node === node && this._priorChecked.doc === doc) || !this._priorProof(node)) return false;
                 const media = this._playableMedia();
+                if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
                 const record = { node, doc, id: node.id, topology: this._catalogTopology(), chapter: this._chapterOf(node), generation: this._generation, href: location.href, title: this._currentStepTitle(),
                     name: this._nodeTitle(node), players: [...media.videos], sources: media.videos.map(el => el.currentSrc || el.getAttribute('src') || ''),
                     attachments: (media.tasks || []).map(task => task.attachment) };
@@ -2795,8 +2825,11 @@
         const returnCredit = (app,r) => {
             if (!fresh(r) || !matches(r.ids,identities()) || catalog.current()?.id !== r.lesson) return false;
             if (!['ended','verify','done'].includes(r.phase)) return false;
+            if (r.phase === 'done') {
+                if (app._priorProof(catalog.current())) return false;
+                app.stopAutomation(); app._notify('回放会话已处理，但平台未确认完成；请手动核对，不会重复打开或刷新'); return true;
+            }
             app.stopAutomation();
-            if (r.phase === 'done') { app._notify('回放会话已处理；不会重复打开或刷新'); return true; }
             if (app._priorProof(catalog.current())) { app._recordPacedLive?.(r); save({ ...r, phase:'done' }); app.run(); return true; }
             if (!r.refreshUsed) { save({ ...r, phase:'verify', refreshUsed:true }); env.location.reload(); return true; }
             app._notify('回放自然结束，但平台仍未确认完成；已停止，刷新不会重复执行'); return true;
@@ -2864,7 +2897,7 @@
                 }
                 if (fresh(r) && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
                     if (!manual && ['pending','active'].includes(r.phase)) { adopt(app,r); app._notify('保留现有回放会话，等待配对或播放结束；不会重复打开'); return false; }
-                    if (['ended','verify','done'].includes(r.phase)) { returnCredit(app,r); return false; }
+                    if (['ended','verify','done'].includes(r.phase)) { if (!returnCredit(app,r) && r.phase === 'done' && app._priorProof(catalog.current())) app._checkPriorCompletion?.(); return false; }
                     if (manual && owned === r.id && r.phase === 'pending' && !r.manualRetried) { save({...r,generation:app._generation,manualRetried:true}); arm(app); return true; }
                     if (r.phase !== 'pending' || r.generation !== app._generation) { app._notify('该回放会话已打开或取消，请手动核对，禁止重复打开'); return false; }
                     if (owned === r.id) { app._notify('原生回放已请求打开；自动重复打开已取消，请使用手动重试'); return false; }

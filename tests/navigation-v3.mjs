@@ -2526,6 +2526,12 @@ try {
             assert.equal(await page.evaluate(()=>app._actions.pending.get('navigation').deadline),deadline);
         }else{assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>JSON.stringify(app._pacing.getStatus())),before);}
     }));
+    await check('attachment readiness requires positive owned loading and rejects contradictions',()=>using([outer(),0],async page=>{
+        const result=await page.evaluate(()=>{app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online" src="about:blank"></iframe>';
+            const frame=root.querySelector('iframe');Object.defineProperty(frame.contentDocument,'readyState',{get:()=> 'loading'});
+            const m={pending:true,reasons:['player-not-ready']};return [app._classifyAttachmentReadiness(m),app._classifyAttachmentReadiness({...m,inaccessible:true}),app._classifyAttachmentReadiness({...m,unsupported:true}),app._classifyAttachmentReadiness({...m,reasons:['competing-player']})];});
+        assert.deepEqual(result,['loading','blocked','blocked','blocked']);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

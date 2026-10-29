@@ -98,4 +98,8 @@ check('distinct terminal GM attempts count one owned live content; different les
  old.recordCompletion({course:'synthetic',lesson:'lesson',kind:'live',session:'legacy-attempt'},'platform-live-ended');
  a.app._pacing=old;assert.equal(a.app._recordPacedLive(a.gm.get(key)),false);assert.equal(old.getStatus().count,1);
 });
+check('done credit permits ordinary startup without stopping or counting; missing credit blocks',()=>{
+ const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});h.gm.set(key,{...h.gm.get(key),phase:'done'});
+ assert.equal(p.restore(h.app),true);const stops=h.app.stops;h.credit();assert.equal(p.restore(h.app),false);assert.equal(h.app.stops,stops);assert.equal(h.app.runs,undefined);assert.equal(h.parent.location.reloads,undefined);
+});
 console.log(`RESULT: ${passed} focused GM lifecycle checks passed; mocked GM/tabs, not Tampermonkey acceptance.`);
