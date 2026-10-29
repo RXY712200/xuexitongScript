@@ -100,6 +100,6 @@ check('distinct terminal GM attempts count one owned live content; different les
 });
 check('done credit permits ordinary startup without stopping or counting; missing credit blocks',()=>{
  const h=setup(),p=factory(h.parent,h.gm);p.begin(h.app,{}, {validateScope:()=>true});h.gm.set(key,{...h.gm.get(key),phase:'done'});
- assert.equal(p.restore(h.app),true);const stops=h.app.stops;h.credit();assert.equal(p.restore(h.app),false);assert.equal(h.app.stops,stops);assert.equal(h.app.runs,undefined);assert.equal(h.parent.location.reloads,undefined);
+ assert.equal(p.restore(h.app),true);const stops=h.app.stops;h.credit();assert.equal(p.restore(h.app),false);assert.equal(h.app.stops,stops);h.app._checkPriorCompletion=()=>{h.app.priorChecks=(h.app.priorChecks||0)+1;return true;};assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),false);assert.equal(h.app.priorChecks,1);assert.ok(!h.app.notice.includes('过期'));assert.equal(h.app.runs,undefined);assert.equal(h.parent.location.reloads,undefined);
 });
 console.log(`RESULT: ${passed} focused GM lifecycle checks passed; mocked GM/tabs, not Tampermonkey acceptance.`);

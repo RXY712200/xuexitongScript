@@ -2527,10 +2527,17 @@ try {
         }else{assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>JSON.stringify(app._pacing.getStatus())),before);}
     }));
     await check('attachment readiness requires positive owned loading and rejects contradictions',()=>using([outer(),0],async page=>{
-        const result=await page.evaluate(()=>{app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online" src="about:blank"></iframe>';
-            const frame=root.querySelector('iframe');Object.defineProperty(frame.contentDocument,'readyState',{get:()=> 'loading'});
-            const m={pending:true,reasons:['player-not-ready']};return [app._classifyAttachmentReadiness(m),app._classifyAttachmentReadiness({...m,inaccessible:true}),app._classifyAttachmentReadiness({...m,unsupported:true}),app._classifyAttachmentReadiness({...m,reasons:['competing-player']})];});
+        const result=await page.evaluate(()=>{app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf" src="about:blank"></iframe>';
+            const frame=root.querySelector('iframe');frame.contentDocument.body.innerHTML='<img src="pending.png">';Object.defineProperty(frame.contentDocument,'readyState',{get:()=> 'loading'});
+            const m={pending:false,reasons:[]};return [app._classifyAttachmentReadiness(m),app._classifyAttachmentReadiness({...m,inaccessible:true}),app._classifyAttachmentReadiness({...m,unsupported:true}),app._classifyAttachmentReadiness({...m,reasons:['competing-player']})];});
         assert.deepEqual(result,['loading','blocked','blocked','blocked']);
+    }));
+    for(const mode of ['stop','route','timeout'])await check(`owned document readiness cancellation ${mode}`,()=>using([outer(),0,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online insertdoc-online-pdf"></iframe>';const inner=root.querySelector('iframe').contentDocument;inner.body.innerHTML='<img src="pending.png">';Object.defineProperty(inner,'readyState',{get:()=> 'loading'});app._state='READY';app._waitForAttachmentReadiness();});
+        assert.equal(await state(page),'WAITING_ATTACHMENT');
+        await page.evaluate(mode=>{app.play();if(mode==='stop')app.stopAutomation();if(mode==='route')history.pushState({},'','?courseId=different');if(mode==='timeout')window.__clock+=10001;},mode);
+        await flush(page,1);assert.equal(await state(page),mode==='stop'?'PAUSED_AUTOMATION':'BLOCKED');
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

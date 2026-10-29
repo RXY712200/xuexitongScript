@@ -1740,10 +1740,12 @@
                 if (this._verificationPresent() || media.inaccessible || media.unsupported ||
                     media.reasons?.some(reason => reason !== 'player-not-ready')) return 'blocked';
                 const root = videoAdapter.cardDocument();
-                const loading = root && [...root.querySelectorAll('iframe.ans-attach-online')].some(frame => {
-                    try { return frame.isConnected && frame.contentDocument &&
-                        (frame.contentDocument.readyState === 'loading' ||
-                        (frame.getAttribute('src') && frame.contentDocument.URL === 'about:blank')); }
+                const scope = platformTaskAdapter.discover({ document: root, node: catalog.current() });
+                if (!scope?.validateScope()) return 'ready';
+                const documents = scope.tasks.filter(task => task.kind === 'document' && task.platformDocument);
+                if (documents.some(task => documentViewer(task.element).loading === true)) return 'loading';
+                const loading = root && [...root.querySelectorAll('iframe.ans-attach-online.ans-insertvideo-online, iframe.ans-attach-online.ans-insertaudio')].some(frame => {
+                    try { return frame.isConnected && frame.contentDocument && frame.contentDocument.readyState === 'loading'; }
                     catch (_) { return false; }
                 });
                 return media.pending && loading ? 'loading' : 'ready';
@@ -1768,7 +1770,7 @@
                 if (!media.tasks) return null;
                 if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
                 if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
-                if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证'); return true; }
+                if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证：' + (media.reasons || []).filter(code => /^[a-z][a-z0-9-]{0,63}$/.test(code)).slice(0,5).join('、')); return true; }
                 const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 if (pending?.kind === 'document') {
                     const scope = this._taskSet();
@@ -2297,7 +2299,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_AUDIO_GESTURE', 'AUDIO_STARTING', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_ATTACHMENT', 'WAITING_AUDIO_GESTURE', 'AUDIO_STARTING', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
@@ -2895,7 +2897,11 @@
                 let r=gm.get(key,null), recovered=false;
                 if (r && r.lesson === catalog.current()?.id && matches(r.ids,ids)) {
                     if (['ended','verify','done'].includes(r.phase)) {
-                        if (!returnCredit(app,r)) app._notify('已结束会话的信用确认已过期，请手动核对；不会重新播放');
+                        if (!returnCredit(app,r)) {
+                            if (r.phase === 'done' && fresh(r) && app._priorProof(catalog.current())) {
+                                if (!app._checkPriorCompletion?.()) { app.stopAutomation(); app._notify('既有平台信用暂未通过上下文验证，请明确重新检测；不会重新打开回放'); }
+                            } else app._notify('已结束会话的信用确认已过期，请手动核对；不会重新播放');
+                        }
                         return false;
                     }
                     const pulse=gm.get(key+':child',null);
