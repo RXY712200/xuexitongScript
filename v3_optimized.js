@@ -271,6 +271,71 @@
             validateScope: () => owner.isConnected && owner.ownerDocument === root && owner.contentDocument === doc };
     }
 
+    function createDecisionJournal(env) {
+        const key = 'xuexitong.v3.decision-journal.v1', maxAge = 604800000;
+        const types = new Set(['LESSON_DISCOVERED','INVENTORY_CONFIRMED','TASK_RECOGNIZED','TASK_DEFERRED','TASK_STARTED','TASK_LOCAL_COMPLETED','TASK_PLATFORM_CREDITED','TASK_FAILED','EXECUTION_CONTINUED','GLOBAL_BLOCKED','MANUAL_RECHECK','CONTEXT_INVALIDATED','LESSON_WAITING_MANUAL','LESSON_NAVIGATION_AUTHORIZED','RECOVERY_EVENT']);
+        const kinds = new Set(['video','audio','document','unknown','book-reader','timed-reader','audio-slides','hyperlink','legacy-flash']);
+        const reasons = new Set(['known-owned','isolated-unknown','recognition-only','loading','unsafe-scope','competing-media','inaccessible','context-changed']);
+        const evidence = new Set(['owned-inventory','observed-dom','local-operation','platform-marker','none']);
+        const ref = () => 'ref-' + env.crypto.randomUUID();
+        const session = ref(), references = new Map();
+        const valid = e => e && Object.keys(e).every(k => ['timestamp','session','lesson','ordinal','type','kind','reason','evidence'].includes(k)) &&
+            Number.isSafeInteger(e.timestamp) && e.timestamp <= Date.now() && e.timestamp >= Date.now()-maxAge &&
+            [e.session,e.lesson].every(v => typeof v === 'string' && /^ref-[0-9a-f-]{36}$/.test(v)) &&
+            Number.isSafeInteger(e.ordinal) && e.ordinal >= 0 && e.ordinal < 10000 && types.has(e.type) && kinds.has(e.kind) && reasons.has(e.reason) && evidence.has(e.evidence);
+        const prune = rows => { const clean = rows.filter(valid).slice(-200); while(JSON.stringify({version:1,events:clean}).length*2 > 131072) clean.shift(); return clean; };
+        const read = () => { try { const raw=JSON.parse(env.localStorage.getItem(key)||'{"version":1,"events":[]}'); return raw.version===1&&Array.isArray(raw.events)?prune(raw.events):[]; } catch (_) { return []; } };
+        return Object.freeze({
+            reference(input) { if (!references.has(input)) references.set(input,ref()); return references.get(input); },
+            append(event) {
+                const item={timestamp:Date.now(),session,...event};
+                if (!valid(item)) return { durable:false,reason:'invalid-event' };
+                try { const rows=read(), last=rows.at(-1); const signature=e=>JSON.stringify([e.session,e.lesson,e.ordinal,e.type,e.kind,e.reason,e.evidence]);
+                    if (!last || signature(last)!==signature(item)) rows.push(item);
+                    const serialized=JSON.stringify({version:1,events:prune(rows)}); env.localStorage.setItem(key,serialized);
+                    return {durable:env.localStorage.getItem(key)===serialized};
+                } catch (_) { return {durable:false,reason:'storage-unavailable'}; }
+            }, read, clear() { try { env.localStorage.removeItem(key); return true; } catch (_) { return false; } },
+        });
+    }
+
+    function createLessonPlan(app) {
+        const node=catalog.current(), frame=videoAdapter.cardFrame(), root=videoAdapter.cardDocument();
+        const course=pacingCourse(window), id=node?.id, title=node && app._nodeTitle(node), chapter=node&&app._chapterOf(node), href=location.href;
+        const owners=root?[...root.querySelectorAll('iframe.ans-attach-online')]:[];
+        const media=videoAdapter.discover();
+        let unsafe=!course||!id||!root||!frame||!owners.length||!node.isConnected||
+            [...document.querySelectorAll('[id]')].filter(el=>el.id===id).length!==1||app._verificationPresent()||app._isChapterTest()||media.inaccessible;
+        if (media.reasons?.some(reason=> !['unknown-attachment','unknown-independent-task','unassigned-task-content','player-not-ready'].includes(reason)&&!reason.startsWith('manual-'))) unsafe=true;
+        const existing=app._attachmentSnapshot;
+        if(existing && (existing.root!==root || existing.id!==id || existing.tasks.length!==media.tasks?.length || existing.tasks.some((t,i)=>t.attachment!==media.tasks[i]?.attachment)))unsafe=true;
+        if(root && [...root.body.children].some(el=>!el.matches('iframe.ans-attach-online,script,style')))unsafe=true;
+        const docs=[];
+        const visit=(doc,depth=0)=>{if(!doc||depth>4||docs.includes(doc)){unsafe=true;return;}docs.push(doc);
+            for(const el of doc.querySelectorAll('video,audio'))if((!el.paused&&!el.ended)||el.seeking)unsafe=true;
+            for(const child of doc.querySelectorAll('iframe')){try{visit(child.contentDocument,depth+1);}catch(_){unsafe=true;}}};
+        for(const owner of owners){if(owner.ownerDocument!==root||owner.parentElement.closest('iframe.ans-attach-online'))unsafe=true;try{visit(owner.contentDocument);}catch(_){unsafe=true;}}
+        if(media.documents?.some(doc=>doc!==root&&!docs.includes(doc)))unsafe=true;
+        const tasks=owners.map((owner,ordinal)=>{
+            const known=media.tasks?.find(t=>t.attachment===owner), extra=inspectAdditionalAttachment(owner,ordinal,root);
+            const kind=known?.kind||extra?.kind||'unknown';
+            const recognized=extra||known?.executable===false;
+            const loading=known&&['video','audio'].includes(kind)&&!known.element;
+            return Object.freeze({kind,ordinal,owner,lineage:Object.freeze([frame,owner]),classification:unsafe?'GLOBAL_UNSAFE':loading?'LOADING':recognized?'DEFERRED_RECOGNIZED':known?'EXECUTABLE_KNOWN':'DEFERRED_UNKNOWN',
+                executable:!unsafe&&!loading&&!recognized&&!!known,reason:unsafe?'unsafe-scope':loading?'loading':recognized?'recognition-only':known?'known-owned':'isolated-unknown',completion:'not-authorized-by-plan'});
+        });
+        const currentDocs=docs.slice();
+        const validateScope=()=>{
+            if(!node||catalog.current()!==node||!node.isConnected||node.id!==id||pacingCourse(window)!==course||location.href!==href||app._nodeTitle(node)!==title||app._chapterOf(node)!==chapter||frame!==videoAdapter.cardFrame()||root!==videoAdapter.cardDocument())return false;
+            if([...document.querySelectorAll('[id]')].filter(el=>el.id===id).length!==1)return false;
+            const now=[...root.querySelectorAll('iframe.ans-attach-online')];if(now.length!==owners.length||now.some((o,i)=>o!==owners[i]||!o.isConnected))return false;
+            const found=[];let valid=true;const check=(d,depth=0)=>{if(!d||depth>4||found.includes(d)){valid=false;return;}found.push(d);for(const f of d.querySelectorAll('iframe'))try{check(f.contentDocument,depth+1);}catch(_){valid=false;}};
+            for(const o of owners)try{check(o.contentDocument);}catch(_){valid=false;}
+            return valid&&found.length===currentDocs.length&&found.every((d,i)=>d===currentDocs[i])&&createLessonPlan(app).globalSafety!=='GLOBAL_UNSAFE';
+        };
+        return Object.freeze({lesson:Object.freeze({course,id,title}),frame,document:root,tasks:Object.freeze(tasks),globalSafety:unsafe?'GLOBAL_UNSAFE':'VERIFIED_PLANNING_ONLY',validateScope});
+    }
+
     const SETTINGS_KEY = 'xuexitong.v3.action-settings.v1';
     const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', audioPlayback: '自动播放音频', nextAudio: '自动下一音频', nextLesson: '自动下一课节',
         nextChapter: '自动下一章节', assessment: '暂缓章节测验并继续学习', document: '文档阅读', live: '直播窗口协调', background: '后台播放保护' };
@@ -2899,6 +2964,9 @@
             get: () => 1.0,
             set: () => {},
         });
+        app._planningSnapshot = () => createLessonPlan(app);
+        app._decisionJournal = null;
+        try { app._decisionJournal = createDecisionJournal(window); } catch (_) { /* Diagnostics never gate existing playback. */ }
         app.settings = loadSettings(window);
         app._pacing = createTaskPacingCoordinator(window, () => app.settings);
         app._actions = createActionScheduler(window, {

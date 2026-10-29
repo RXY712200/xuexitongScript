@@ -2619,10 +2619,11 @@ try {
         const fixtures=readFileSync(new URL('../fixtures/synthetic/additional-readers.html',import.meta.url),'utf8');
         const markup=await page.evaluate(({fixtures,kind})=>new DOMParser().parseFromString(fixtures,'text/html').querySelector('#'+kind).innerHTML,{fixtures,kind});
         await page.context().route('https://mooc1.chaoxing.com/readsvr/book/mooc**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html>'+markup}));
-        await page.evaluate(kind=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';const f=root.createElement('iframe');f.className='ans-attach-online';f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));f.src='https://mooc1.chaoxing.com/readsvr/book/mooc?timing=60';root.body.append(f);window.__additionalOwner=f;},kind);
+        await page.evaluate(kind=>{history.replaceState({},'','?courseId=synthetic');app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';const f=root.createElement('iframe');f.className='ans-attach-online';f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));f.src='https://mooc1.chaoxing.com/readsvr/book/mooc?timing=60';root.body.append(f);window.__additionalOwner=f;},kind);
         await page.waitForFunction(()=>window.__additionalOwner.contentDocument?.URL.includes('/readsvr/book/mooc'));
         const result=await page.evaluate(()=>{const m=app._discoverMedia();window.__additionalTask=m.tasks?.find(t=>t.executable===false);app.run();return {k:window.__additionalTask?.kind,state:app._state,notice:app._lastNotice,count:app._pacing.getStatus().count};});
         assert.equal(result.k,kind);assert.equal(result.state,'BLOCKED');assert.ok(result.notice.includes('manual-'+kind));assert.equal(result.count,0);assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
+        assert.equal(await page.evaluate(()=>app._planningSnapshot().tasks.find(t=>t.kind===window.__additionalTask.kind)?.classification),'DEFERRED_RECOGNIZED');
         for(const known of ['video','audio','document']){
             const mixed=await page.evaluate(({known,audioFixture})=>{const root=window.__additionalOwner.ownerDocument;const f=root.createElement('iframe');f.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[known]);root.body.insertBefore(f,window.__additionalOwner);f.contentDocument.body.innerHTML=known==='audio'?audioFixture:known==='video'?'<video id="video_html5_api"></video>':'<canvas height="1200"></canvas>';
                 app._recovery.resumeExplicitly();app.run();const m=app._discoverMedia();const row={kinds:m.tasks.map(t=>t.kind),claimed:!!window.__xuexitongTaskSupport.inspectAdditionalAttachment(f,0,root),state:app._state,count:app._pacing.getStatus().count,nav:app._actions.pending.has('navigation')};app.stopAutomation();f.remove();return row;
@@ -2640,6 +2641,18 @@ try {
             },{variant,kind,markup});assert.equal(matched,false);
         }
         await page.evaluate(()=>{window.__additionalOwner.remove();});assert.equal(await page.evaluate(()=>window.__additionalTask.validateScope()),false);
+    }));
+    await check('read-only lesson plan classifies owned modules and invalidates stale inventory',()=>using([outer(),0,false,null,false,'pacing'],async page=>{
+        const result=await page.evaluate(({audioFixture})=>{
+            app.stopAutomation();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';
+            for(const kind of ['video','audio','document','unknown']){const f=root.createElement('iframe');f.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf',unknown:''}[kind]);root.body.append(f);f.contentDocument.body.innerHTML=kind==='audio'?audioFixture:kind==='video'?'<video id="video_html5_api"></video>':kind==='document'?'<canvas height="1200"></canvas>':'<p>Unsupported independent item</p>';}
+            for(const f of root.querySelectorAll('iframe'))for(const el of f.contentDocument.querySelectorAll('video,audio'))Object.defineProperty(el,'readyState',{configurable:true,get:()=>4});app._attachmentSnapshot=null;const plan=app._planningSnapshot();const classes=plan.tasks.map(t=>t.classification);const valid=plan.validateScope();
+            const player=root.querySelector('iframe').contentDocument.querySelector('video');Object.defineProperty(player,'paused',{configurable:true,get:()=>false});if(app._planningSnapshot().globalSafety!=='GLOBAL_UNSAFE')throw Error('active media accepted');delete player.paused;
+            const hidden=root.querySelectorAll('iframe')[3];Object.defineProperty(hidden,'contentDocument',{configurable:true,get:()=>null});if(app._planningSnapshot().globalSafety!=='GLOBAL_UNSAFE')throw Error('inaccessible accepted');delete hidden.contentDocument;
+            const lesson=document.querySelector('.posCatalog_active'),oldId=lesson.id;lesson.id='changed';if(plan.validateScope())throw Error('stale lesson valid');lesson.id=oldId;const first=root.querySelector('iframe');first.after(first.cloneNode());const replaced=plan.validateScope();root.querySelectorAll('iframe')[1].remove();root.body.append(first);const reordered=plan.validateScope();
+            return {reasons:app._discoverMedia().reasons,classes,valid,replaced,reordered,unsupported:app._discoverMedia().unsupported};
+        },{audioFixture});
+        assert.deepEqual(result.classes,['EXECUTABLE_KNOWN','EXECUTABLE_KNOWN','EXECUTABLE_KNOWN','DEFERRED_UNKNOWN'],JSON.stringify(result));assert.equal(result.valid,true);assert.equal(result.replaced,false);assert.equal(result.reordered,false);assert.equal(result.unsupported,true);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

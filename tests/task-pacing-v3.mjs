@@ -98,3 +98,14 @@ for(const mode of ['grow','stop','stale','stuck']){
  if(mode==='grow'){assert.equal(done,true);assert.equal(el.scrollTop,8000);}else{assert.equal(done,false);if(mode!=='stop')assert.ok(error);}
 }
 console.log('PASS dynamic extent, cancellation, stale context and blocked scrolling never completing on timer alone');
+
+const journalSource=source.slice(source.indexOf('    function createDecisionJournal('),source.indexOf('    function createLessonPlan('));
+let journalCounter=0;const journalStore=new Map();const journalEnv={crypto:{randomUUID:()=> '00000000-0000-4000-8000-'+String(++journalCounter).padStart(12,'0')},localStorage:{getItem:k=>journalStore.get(k)??null,setItem:(k,v)=>journalStore.set(k,v),removeItem:k=>journalStore.delete(k)}};
+const journalFactory=Function(journalSource+';return createDecisionJournal;')();let journal=journalFactory(journalEnv);const lesson=journal.reference('private-course-lesson');
+const event={lesson,ordinal:0,type:'TASK_DEFERRED',kind:'unknown',reason:'isolated-unknown',evidence:'owned-inventory'};
+assert.equal(journal.append(event).durable,true);for(let i=0;i<20;i++)journal.append(event);assert.equal(journal.read().length,1);
+for(let i=0;i<230;i++)journal.append({...event,ordinal:i});assert.equal(journal.read().length,200);assert.ok([...journalStore.values()][0].length*2<=131072);assert.ok(![...journalStore.values()][0].includes('private-course'));
+assert.equal(journal.append({...event,url:'https://private.invalid'}).durable,false);assert.equal(journal.append({...event,reason:'secret text'}).durable,false);
+journal=journalFactory(journalEnv);assert.equal(journal.read().length,200);const stored=JSON.parse([...journalStore.values()][0]);stored.events[0].timestamp=Date.now()-604800001;journalStore.set([...journalStore.keys()][0],JSON.stringify(stored));assert.equal(journal.read().length,199);
+assert.equal(journalFactory({...journalEnv,localStorage:{getItem(){throw Error();},setItem(){throw Error();}}}).append(event).durable,false);assert.equal(journal.clear(),true);assert.equal(journal.read().length,0);
+console.log('PASS journal allowlist, opaque refs, deduplication, reload, count/size/age pruning and explicit storage failure');
