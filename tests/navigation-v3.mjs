@@ -2510,6 +2510,22 @@ try {
         assert.equal(await page.evaluate(()=>app._pacing.getStatus().restEndsAt),0);
         assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
     }));
+    for (const mode of ['same','different','duplicate']) await check(`prior completion detached document catalog rebind ${mode}`,()=>using([outer(2,true,'文档'),0,false,null,false,'pacing'],async page=>{
+        assert.equal(await state(page),'VERIFYING_PLATFORM_COMPLETION');
+        const before=await page.evaluate(()=>JSON.stringify(app._pacing.getStatus()));
+        await page.evaluate(mode=>{app.settings.randomDelaysEnabled=true;app.settings.preset='short';app.settings.delays.nextLesson.enabled=true;const timer=[...window.__timeoutDelays].find(([,delay])=>delay===250)?.[0];if(!timer)throw Error('missing verification callback');const verify=window.__timeouts.get(timer);window.__timeouts.delete(timer);const n=document.querySelector('#node0'),copy=n.cloneNode(true);window.__replacement=copy;
+            if(mode==='different')copy.id='unrelated';
+            if(mode==='duplicate')n.after(copy);else n.replaceWith(copy);verify();
+        },mode);
+        if(mode==='same'){
+            assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+            assert.equal(await page.evaluate(()=>app._platformCompletion.node===window.__replacement&&app._completionNode===window.__replacement),true);
+            assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
+            const deadline=await page.evaluate(()=>app._actions.pending.get('navigation').deadline);
+            await page.evaluate(()=>app._priorCompletionValid(app._platformCompletion));
+            assert.equal(await page.evaluate(()=>app._actions.pending.get('navigation').deadline),deadline);
+        }else{assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>JSON.stringify(app._pacing.getStatus())),before);}
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

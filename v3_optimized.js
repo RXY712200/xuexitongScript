@@ -1883,13 +1883,13 @@
                 return node === catalog.current() || (!!node && !node.isConnected &&
                     this._videoContext?.nodes.has(node) && this._refreshVideoContext());
             },
-            _schedule(callback, delay) {
+            _schedule(callback, delay, validateContext = null) {
                 const generation = this._generation;
                 const node = catalog.current();
                 const timer = setTimeout(() => {
                     this._timers.delete(timer);
                     if (generation !== this._generation || this._destroyed) return;
-                    if (!this._sameTaskNode(node)) return this._block('页面目录已变化，请执行 app.run() 重新识别');
+                    if (!(validateContext ? validateContext() : this._sameTaskNode(node))) return this._block('页面目录已变化，请执行 app.run() 重新识别');
                     callback();
                 }, delay);
                 this._timers.add(timer);
@@ -2087,10 +2087,15 @@
             _priorCompletionValid(record) {
                 const active = catalog.current();
                 if (record.node !== active && !record.node.isConnected && active?.id === record.id &&
-                    this._nodeTitle(active) === record.name && this._catalogTopology() === record.topology &&
+                    this._nodeTitle(active) === record.name && record.topology && this._catalogTopology() === record.topology &&
                     [...document.querySelectorAll('[id]')].filter(el => el.id === record.id).length === 1) {
+                    const chapter = this._chapterOf(active);
+                    if (chapter !== record.chapter && record.chapter?.isConnected) return false;
+                    if (record.doc !== videoAdapter.cardDocument()) return false;
+                    const candidate = { ...record, node: active, chapter };
+                    if (!this._priorCompletionValid(candidate)) return false;
                     if (this._completionNode === record.node) this._completionNode = active;
-                    record = { ...record, node: active, chapter: this._chapterOf(active), doc: videoAdapter.cardDocument() };
+                    Object.assign(record, candidate);
                 }
                 if (this._destroyed || record.generation !== this._generation || record.href !== location.href ||
                     catalog.current() !== record.node || record.node.id !== record.id || !record.node.isConnected || !this._priorProof(record.node) ||
@@ -2119,10 +2124,10 @@
                 this._state = 'VERIFYING_PLATFORM_COMPLETION';
                 this._schedule(() => {
                     if (!this._priorCompletionValid(record)) return this._block('既有平台完成证据或课程身份已变化');
-                    this._priorChecked = { node, doc }; this._completedVisits ||= new Set();
-                    this._platformCompletion = record; this._completionNode = node;
+                    this._priorChecked = { node: record.node, doc: record.doc }; this._completedVisits ||= new Set();
+                    this._platformCompletion = record; this._completionNode = record.node;
                     this._state = 'READY_TO_ADVANCE'; this.nextUnit();
-                }, 250);
+                }, 250, () => this._priorCompletionValid(record));
                 return true;
             },
             _waitForMediaReady(el, actionReady) {
