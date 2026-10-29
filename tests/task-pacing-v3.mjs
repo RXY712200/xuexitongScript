@@ -55,3 +55,17 @@ let valid=true;const stale=scheduler.run('nextLesson','nav2',()=>fired++,{deadli
 assert.ok(!source.includes('delayMs: 5000'));assert.match(source,/_navigationPreview\(action.deadline\)/);
 console.log('PASS scheduler deadline/preview agreement, duplicate suppression, Stop and stale callback cancellation');
 console.log('RESULT: 6 focused synthetic pacing groups passed; not authenticated browser acceptance.');
+
+// Isolated recovery budget: no media engine or real reload in this simulation.
+const recoveryBody=source.slice(source.indexOf('    function createUnattendedRecoveryCoordinator('),source.indexOf('    function pacingCourse('));
+const makeRecovery=Function(recoveryBody+';return createUnattendedRecoveryCoordinator;')();
+const recoveryStore=new Map(),recoveryTimers=new Map();let timerID=0,retries=0,reloads=0,failed='',allowed=true;
+const recoveryEnv={sessionStorage:{getItem:k=>recoveryStore.get(k)??null,setItem:(k,v)=>recoveryStore.set(k,v)},setTimeout:fn=>{recoveryTimers.set(++timerID,fn);return timerID;},clearTimeout:id=>recoveryTimers.delete(id),location:{reload:()=>reloads++}};
+const hooks={identity:()=> 'course-class-lesson',safe:()=>allowed,canReload:()=>true,notice(){},fail:r=>failed=r,retry:()=>retries++,progress:()=>false};
+const tickRecovery=()=>{const callbacks=[...recoveryTimers.values()];recoveryTimers.clear();callbacks.forEach(fn=>fn());};
+let recovery=makeRecovery(recoveryEnv,hooks);assert.equal(recovery.requestRecovery('user-interaction'),false);
+assert.equal(recovery.requestRecovery('context-stale'),true);tickRecovery();assert.equal(retries,1);tickRecovery();tickRecovery();assert.equal(retries,2);tickRecovery();tickRecovery();assert.equal(reloads,1);
+recovery=makeRecovery(recoveryEnv,hooks);assert.equal(recovery.getStatus().attempts,3);recovery.observe();tickRecovery();assert.equal(recovery.getStatus().stage,'terminal');assert.equal(reloads,1);
+recovery.resumeExplicitly();recovery.requestRecovery('readiness');recovery.markExplicitStop();tickRecovery();assert.equal(reloads,1);assert.equal(makeRecovery(recoveryEnv,hooks).getStatus().stopped,true);
+recovery.resumeExplicitly();recovery.requestRecovery('readiness');recovery.confirmProgress();assert.equal(recovery.getStatus().attempts,0);allowed=false;assert.equal(recovery.requestRecovery('frame-replaced'),false);
+console.log('PASS recovery three-attempt budget, one reload, reinjection persistence, Stop/Resume and progress reset (simulated)');

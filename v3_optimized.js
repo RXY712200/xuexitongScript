@@ -307,11 +307,11 @@
                 range.minMs < 0 || range.maxMs < range.minMs || range.maxMs > 2147483647) {
                 onError('自动动作延迟配置无效'); return null;
             }
-            if (!enabled(category)) { options.onCancel?.('feature'); return null; }
+            if (!enabled(category)) { options.onCancel?.('feature-disabled'); return null; }
             if (options.isValid && !options.isValid()) { options.onCancel?.('stale'); return null; }
             const delay = Number.isSafeInteger(options.deadline) ? Math.max(0, options.deadline - Date.now()) : Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 && options.delayMs <= 2147483647 ? options.delayMs :
                 range.enabled ? range.minMs + Math.floor(Math.random() * (range.maxMs - range.minMs + 1)) : 0;
-            const action = { category, key, deadline: options.deadline ?? Date.now() + delay, delayMs: delay, done: false, timer: null, cleanup: null, cancel(reason = 'cancel') {
+            const action = { category, key, deadline: options.deadline ?? Date.now() + delay, delayMs: delay, done: false, timer: null, cleanup: null, cancel(reason = 'internal-cancel') {
                 if (action.done) return;
                 action.done = true; pending.delete(key);
                 if (action.timer !== null) { env.clearTimeout(action.timer); onDone(action.timer); }
@@ -319,7 +319,7 @@
             } };
             const fire = () => {
                 if (action.done) return;
-                if (options.isValid && !options.isValid()) return action.cancel('stale');
+                if (options.isValid && !options.isValid()) return action.cancel('context-stale');
                 action.done = true; pending.delete(key); action.cleanup?.();
                 if (action.timer !== null) onDone(action.timer);
                 callback();
@@ -327,13 +327,67 @@
             pending.set(key, action); options.onScheduled?.(action);
             if (range.enabled) console.log(`${navigationActions.has(category) ? '导航冷却' : '自动动作 ' + ACTIONS[category][0]} ${(delay / 1000).toFixed(3)}s`);
             if (delay || options.defer) {
-                action.cleanup = options.watch?.(() => action.cancel('user')) || null;
+                action.cleanup = options.watch?.((reason = 'internal-cancel') => action.cancel(reason)) || null;
                 action.timer = env.setTimeout(fire, delay); onQueued(action.timer);
             } else fire();
             return action;
         };
-        return { run, pending, cancelAll(reason = 'cancel') { for (const action of [...pending.values()]) action.cancel(reason); },
+        return { run, pending, cancelAll(reason = 'internal-cancel') { for (const action of [...pending.values()]) action.cancel(reason); },
             cancelWhere(test, reason = 'settings') { for (const action of [...pending.values()]) if (test(action.category)) action.cancel(reason); } };
+    }
+
+    function createUnattendedRecoveryCoordinator(env, hooks) {
+        const key = 'xuexitong.v3.unattended-recovery.v1';
+        let state, timer = null, disposed = false;
+        const identity = () => hooks.identity();
+        const persist = () => { try { env.sessionStorage.setItem(key, JSON.stringify(state)); return true; } catch (_) { hooks.fail('恢复预算无法持久保存'); return false; } };
+        const fresh = id => ({ version: 1, identity: id, attempts: 0, stage: 'idle', reloadUsed: false, reason: '', stopped: false, cycle: Date.now() });
+        const restore = () => {
+            const id = identity();
+            try {
+                const raw = env.sessionStorage.getItem(key); state = raw ? JSON.parse(raw) : fresh(id);
+                if (state.version !== 1 || !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > 3 ||
+                    typeof state.stopped !== 'boolean' || typeof state.reloadUsed !== 'boolean' ||
+                    !['idle','waiting','observing','reload','terminal'].includes(state.stage)) throw Error();
+                if (state.identity !== id) state = { ...fresh(id), stopped: state.stopped };
+                if (state.stage === 'waiting') state.stage = 'observing';
+            } catch (_) { state = { ...fresh(id), stopped: true, stage: 'terminal' }; }
+            return state;
+        };
+        restore();
+        const cancel = () => { if (timer !== null) env.clearTimeout(timer); timer = null; };
+        const finish = reason => { cancel(); state.stage = 'terminal'; state.reason = reason; persist(); hooks.fail(reason); };
+        const requestRecovery = reason => {
+            if (disposed || timer !== null || state.stopped || state.stage === 'terminal') return false;
+            if (!identity() || identity() !== state.identity || !['context-stale','frame-replaced','readiness'].includes(reason) || !hooks.safe()) return false;
+            if (state.attempts >= 3) { finish('当前小节连续恢复失败，已停止；不会继续刷新'); return true; }
+            state.attempts++; state.stage = 'waiting'; state.reason = reason;
+            if (!persist()) return false;
+            hooks.notice(`自动恢复 ${state.attempts}/3：${['','重新检测当前任务','重新初始化当前小节','安全刷新当前页面'][state.attempts]}`);
+            timer = env.setTimeout(() => {
+                timer = null;
+                if (disposed || state.stopped || identity() !== state.identity || !hooks.safe()) return finish('恢复上下文或安全条件已变化');
+                state.stage = 'observing';
+                if (state.attempts === 3) {
+                    if (state.reloadUsed || !hooks.canReload()) return finish('当前状态不允许安全刷新，已停止');
+                    state.reloadUsed = true; state.stage = 'reload'; if (persist()) env.location.reload(); return;
+                }
+                persist(); hooks.retry(state.attempts);
+                observe();
+            }, 1000);
+            return true;
+        };
+        const observe = () => {
+            if (disposed || state.stopped || !state.attempts || timer !== null) return;
+            timer = env.setTimeout(() => { timer = null; if (identity() !== state.identity) return cancel(); if (!hooks.progress()) requestRecovery('readiness'); }, 15000);
+        };
+        return { restore, requestRecovery, classifyFailure: reason => ['context-stale','frame-replaced','readiness'].includes(reason) && hooks.safe(),
+            cancel, dispose() { disposed = true; cancel(); }, getStatus: () => ({ ...state }),
+            confirmProgress() { if (!state.stopped && state.attempts) { cancel(); state = fresh(identity()); persist(); } },
+            markExplicitStop() { cancel(); state.stopped = true; persist(); },
+            resumeExplicitly() { cancel(); state = fresh(identity()); persist(); },
+            observe,
+        };
     }
 
     function pacingCourse(env) {
@@ -976,6 +1030,7 @@
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
+                this._recovery?.restore();
                 if (this._pacing && this._pacing.getStatus().course !== pacingCourse(window)) this._pacing = createTaskPacingCoordinator(window, () => this.settings);
                 this._manualPermit = null; this._manualBusy = false;
                 this._detectedKind = null; this._attemptStatus = '';
@@ -1171,8 +1226,10 @@
                 }, { ...options, ...(pace ? { deadline: pace.deadline } : {}), isValid: valid,
                     onCancel: reason => {
                         options.onCancel?.(reason);
+                        if (['user-interaction','navigation','page-unload','feature-disabled','explicit-stop'].includes(reason)) this._recovery?.cancel(reason);
                         if (this._destroyed || ['BLOCKED', 'ADVANCING'].includes(this._state)) return;
-                        if (['user', 'stale'].includes(reason)) this._block(key === 'navigation' ? (this._navigationFailure || '导航已被用户操作或页面切换取消') : '自动动作上下文已变化');
+                        if (['context-stale','frame-replaced'].includes(reason) && this._recovery?.requestRecovery(reason)) { this._state = 'RECOVERING'; return; }
+                        if (['user', 'stale','user-interaction','context-stale','frame-replaced','navigation','page-unload'].includes(reason)) this._block(key === 'navigation' ? (this._navigationFailure || '导航已被用户操作或页面切换取消') : '自动动作上下文已变化');
                         else {
                             if (this._isPlaying) return;
                             this._documentController?.cancel(); this._documentController = null;
@@ -1182,19 +1239,19 @@
                         }
                     },
                     watch: cancel => {
-                        const observer = new MutationObserver(() => { if (!valid()) cancel(); });
+                        const observer = new MutationObserver(() => { if (!valid()) cancel('context-stale'); });
                         const listeners = [];
-                        const listen = (el, type, handler = cancel) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
-                        const click = event => { if (event.isTrusted && !event.composedPath().includes(this._settingsPanel) && !event.composedPath().includes(this._noticePanel)) cancel(); };
+                        const listen = (el, type, handler = () => cancel('navigation')) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
+                        const click = event => { if (event.isTrusted && !event.composedPath().includes(this._settingsPanel) && !event.composedPath().includes(this._noticePanel)) cancel('user-interaction'); };
                         for (const doc of new Set([document, ...this._playableMedia().documents])) {
                             if (key !== 'navigation') observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
                             for (const frame of doc.querySelectorAll('iframe')) if (doc !== document || frame === videoAdapter.cardFrame()) {
-                                listen(frame, 'load', () => { if (navigationActions.has(category) ? !valid() : (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid())) cancel(); });
+                                listen(frame, 'load', () => { if (navigationActions.has(category) ? !valid() : (!this._automaticStartup || !['videoStart', 'audioStart'].includes(category) || !valid())) cancel('frame-replaced'); });
                             }
                         }
                         if (this._completionVideo) listen(this._completionVideo, 'play');
-                        for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) listen(window, type);
+                        for (const type of ['pagehide', 'beforeunload', 'popstate', 'hashchange']) listen(window, type, () => cancel(['pagehide','beforeunload'].includes(type) ? 'page-unload' : 'navigation'));
                         return () => { observer.disconnect(); for (const [el, type, fn] of listeners) el.removeEventListener(type, fn, true); this._cooldownCleanup = null; };
                     },
                 });
@@ -1228,8 +1285,8 @@
                 const host = document.createElement('div'); host.id = 'xuexitong-v3-notice';
                 host.style.cssText = 'position:fixed;right:8px;bottom:86px;max-width:290px;z-index:2147483646';
                 host.attachShadow({ mode: 'open' }).innerHTML = '<style>:host{font:12px/1.5 sans-serif;color:#222}div{background:#fff;border:1px solid #aaa;border-radius:5px;padding:7px}p{margin:0 0 5px}button{font:inherit}</style><div><p role="status" aria-live="polite">正在检测当前小节</p><button data-stop>停止自动操作</button> <button data-resume>重新自动检测</button></div>';
-                host.shadowRoot.querySelector('[data-stop]').onclick = () => this.stopAutomation();
-                host.shadowRoot.querySelector('[data-resume]').onclick = () => { if (!this._destroyed) this.run({ startup: true }); };
+                host.shadowRoot.querySelector('[data-stop]').onclick = () => { this._recovery?.markExplicitStop(); this.stopAutomation(); };
+                host.shadowRoot.querySelector('[data-resume]').onclick = () => { if (!this._destroyed) { this._recovery?.resumeExplicitly(); this.run({ startup: true }); } };
                 this._noticePanel = host; document.body.append(host);
             },
             _inspectTask() {
@@ -1267,7 +1324,7 @@
                     details.querySelector('[data-detected]').textContent = `自动检测：${info.blocked ? info.reason : ({ video:'视频',audio:'音频',document:'文档',live:'直播 / 回放' }[info.kind] || '未识别')}${info.completed ? '；平台已有完成标记' : ''}`;
                 };
                 details.querySelector('[data-attempt]').onclick = event => { if (event.isTrusted) this._attemptTask(select.value); };
-                details.querySelector('[data-stop-task]').onclick = () => this.stopAutomation();
+                details.querySelector('[data-stop-task]').onclick = () => { this._recovery?.markExplicitStop(); this.stopAutomation(); };
                 section.prepend(details);
                 details.querySelector('[data-task-status]').textContent = this._lastNotice || '尚未手动执行';
             },
@@ -1662,6 +1719,7 @@
                     if (!this._taskContextValid(record)) return this._block('任务完成回调已失效');
                     this._documentController = null;
                     this._liveController = null;
+                    this._recovery?.confirmProgress();
                     this._processedTasks.add(pending.element);
                     this._lastProcessedKind = pending.kind;
                     record.localDone = true; record.result = result;
@@ -1692,7 +1750,7 @@
                                 return this._runAction(category, 'document-step', tick, { defer: true, isValid: () => this._taskContextValid(record) && (pending.viewer || pending.element).clientHeight > 0 });
                             },
                             isValid: () => this._taskContextValid(record) && (!pending.platformDocument || documentViewer(pending.element).viewer === pending.viewer),
-                            onProgress: value => this._notify(`文档本地阅读 ${value}%（不代表平台已计入完成）`, '正在执行'),
+                            onProgress: value => { if (value > (record.recoveryProgress || 0) && this._taskContextValid(record)) this._recovery?.confirmProgress(); record.recoveryProgress = value; this._notify(`文档本地阅读 ${value}%（不代表平台已计入完成）`, '正在执行'); },
                             onComplete: () => completed('local-bottom'), onError: failed });
                     } catch (_) { failed('文档视图不支持可验证的滚动'); }
                 } else {
@@ -1964,6 +2022,7 @@
                 }
                 console.log('视频自然播放结束，等待内容发现及平台完成确认。');
                 this._recordPacedCompletion(video, video.tagName === 'AUDIO' ? 'audio' : 'video', 'natural-ended');
+                this._recovery?.confirmProgress();
                 this._completedVideos.add(video);
                 this._completionVideo = video;
                 this._completionNode = catalog.current();
@@ -2759,6 +2818,7 @@
                 document.removeEventListener?.('click', this._catalogClick, true);
                 this._destroyed = true;
                 this._settingsPanel?.remove();
+                this._recovery?.dispose(); clearInterval(this._recoveryProgressTimer);
                 this._noticePanel?.remove(); this._noticePanel = null;
                 this._renderSettings = null;
                 window.removeEventListener('storage', this._settingsStorage);
@@ -2801,12 +2861,44 @@
             enumerable: true, get: () => app.settings.features.videoPlayback,
             set: value => { const next = JSON.parse(JSON.stringify(app.settings)); next.features.videoPlayback = !!value; app.updateSettings(next); },
         });
+        const recoveryIdentity = () => {
+            try { const url = new URL(location.href), node = catalog.current();
+                if (!pacingCourse(window) || !node?.id || [...document.querySelectorAll('[id]')].filter(el => el.id === node.id).length !== 1) return null;
+                return JSON.stringify([pacingCourse(window),url.searchParams.get('clazzid') || url.searchParams.get('classId') || '',node.id,app._nodeTitle(node),app._catalogTopology(),url.origin,url.pathname]);
+            } catch (_) { return null; }
+        };
+        let recoverySample = null;
+        const recoverySafe = () => {
+            const media = app._playableMedia();
+            return !!recoveryIdentity() && !app._destroyed && !app._isPlaying && !app._documentController && !app._liveController &&
+                !['WAITING_LIVE','READING_DOCUMENT','VERIFYING_COMPLETION','VERIFYING_PLATFORM_COMPLETION','NAVIGATION_COOLDOWN','ADVANCING','FINISHED'].includes(app._state) &&
+                !app._pacing.getStatus().restEndsAt && !media.unsupported && !media.inaccessible && media.navigationSafe !== false &&
+                !app._verificationPresent() && !app._isChapterTest() && !gmLive?.retryBlocked(app) &&
+                media.videos.every(el => el.paused && !el.seeking && !el.ended);
+        };
+        app._recovery = createUnattendedRecoveryCoordinator(window, {
+            identity: recoveryIdentity, safe: recoverySafe,
+            canReload: () => recoverySafe() && !app._entryCredit && !app._externalCompletion && !app._platformCompletion,
+            notice: text => app._notify(text), fail: reason => app._block(reason),
+            retry: stage => { if (stage === 1) { app._state = 'READY'; app.play(); } else app.run({ startup: true }); },
+            progress: () => !app._recovery.getStatus().attempts,
+        });
+        app._recoveryProgressTimer = setInterval(() => {
+            const el = app._videoEl, now = Date.now();
+            if (el && el === app._getVideoEl() && app._isPlaying && !el.paused && !el.seeking && !el.ended) {
+                if (recoverySample?.el === el && now - recoverySample.at >= 3000 && now - recoverySample.at <= 10000 &&
+                    el.currentTime > recoverySample.time && el.currentTime - recoverySample.time <= (now - recoverySample.at) / 1000 + 1) app._recovery.confirmProgress();
+                if (!recoverySample || recoverySample.el !== el || now - recoverySample.at >= 3000) recoverySample = { el, at: now, time: el.currentTime };
+            } else recoverySample = null;
+        }, 1000);
+        for (const type of ['pagehide','popstate','hashchange']) window.addEventListener(type, () => app._recovery.cancel(type));
         app._mountNoticePanel(); app._mountSettingsPanel();
         window.app = app;
         window[APP_KEY] = app;
 
         try {
-            if (!gmLive?.restore(app)) app.run({ startup: true });
+            if (app._recovery.getStatus().stopped) { app.stopAutomation(); app._notify('用户已停止自动操作，请明确重新自动检测'); }
+            else { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);
