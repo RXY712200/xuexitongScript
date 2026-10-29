@@ -1569,7 +1569,21 @@
                 this._pacing.recordCompletion(id, evidence);
             },
             _recordPacedLive(r) {
-                this._pacing.recordCompletion({ course: r.ids.course, lesson: r.lesson, kind: 'live', session: r.id }, 'platform-live-ended');
+                // Called only by the parent's positive platform-credit branch, never by child messages.
+                const node = catalog.current(), course = pacingCourse(window);
+                const scope = platformLiveEntry.discover({ document: videoAdapter.cardDocument() });
+                if (!course || course !== r.ids?.course || !node?.id || node.id !== r.lesson ||
+                    [...document.querySelectorAll('[id]')].filter(el => el.id === node.id).length !== 1 ||
+                    !scope?.validateScope() || scope.tasks.length !== 1 || scope.tasks[0].kind !== 'live' || !scope.tasks[0].nativeEntry) {
+                    this._notify('回放已核实平台完成，但直播内容身份不唯一，未计入休息任务数'); return false;
+                }
+                // Earlier pacing versions stored execution IDs. A previously counted live item
+                // in this now-verified single-card lesson must not be counted again after upgrade.
+                if (this._pacing.getStatus().ledger.some(raw => {
+                    const old = JSON.parse(raw);
+                    return old.course === course && old.lesson === node.id && old.kind === 'live' && typeof old.session === 'string';
+                })) return false;
+                return this._pacing.recordCompletion({ course, lesson: node.id, kind: 'live', inventory: 'live', ordinal: 0 }, 'platform-live-ended');
             },
             _paceContent(element, kind, resume) {
                 if (!this._pacing) return false;

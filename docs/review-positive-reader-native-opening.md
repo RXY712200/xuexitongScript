@@ -198,3 +198,12 @@ Tests cover sampled bounds, five independent contents, skipped/duplicate evidenc
 Exact baseline body comparisons also passed for audio rejection/fallback, pause/stall/background guards, document-context validation, attachment credit, navigation eligibility, native opening, catalog navigation and the entire GM child implementation. Full historical suites were not run.
 
 Authenticated acceptance still needed: actual 3–6 task cycles across mixed attachments, long rest through refresh and live return, settings changes while resting and platform-controlled autoplay timing. Ordinal deduplication relies on the unchanged owned inventory; identity-ambiguous layouts fail conservatively. Pacing data is local to the course origin/browser profile, not synchronized across unrelated origins or browser profiles. Multiple simultaneously automated course tabs are not a supported pacing coordination mode.
+
+
+### Stable native-live pacing identity correction (2026-10-29)
+
+Baseline: `7faceb2858e0e08cd674ddf6cb079f7d23dea3a9`. `_recordPacedLive` now reuses the existing native-card discovery/ownership validator on the current course-card document. Counting requires matching course and unique catalog lesson, a valid owned scope and exactly one native-live task. Its persistent content key is `{course, lesson, kind:"live", inventory:"live", ordinal:0}`; random GM attempt IDs remain exclusively in the unchanged lifecycle protocol. Multiple or unverifiable cards do not contribute a task. If the platform removes the card before credit verification, accounting conservatively omits the item and reports that limitation rather than guessing.
+
+The hook remains exclusively inside the existing positive platform-credit branch after the terminal replay lifecycle. No pairing, playback, close, refresh, popup, delay or navigation logic changed. Previously counted legacy live/session entries in the same now-verified unique-card lesson suppress recounting after upgrade; historical overcounts are not retroactively subtracted.
+
+Focused verification: `node tests/gm-live-v3.mjs` — 9 passed, including two distinct naturally ended/credited GM sessions counting once, a different unique lesson counting separately, media-kind separation, ambiguous/invalid scope rejection and legacy-record suppression. `node tests/task-pacing-v3.mjs` — 6 groups passed. Build and `node tests/verify-v3.mjs` passed with synchronized generated payload. These are synthetic/mocked results, not authenticated platform acceptance. Overall status remains PARTIAL pending user testing.

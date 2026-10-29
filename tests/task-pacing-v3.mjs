@@ -38,7 +38,7 @@ console.log('PASS quota upper bound, rest upper bound and expired-rest reload wi
 draw=0;({coordinator:c,settings}=setup());for(let n=0;n<3;n++)record(c,n);p=c.beforeNextContent('nextContent','next',settings.delays.nextContent);settings.rest.enabled=false;
 assert.equal(c.beforeNextContent('nextContent','next',settings.delays.nextContent).delayMs,0);assert.equal(c.consume(p.key),true);
 ({coordinator:c,settings}=setup());p=c.beforeNextContent('nextLesson','next',settings.delays.nextLesson);settings.delays.nextLesson.enabled=false;assert.equal(c.beforeNextContent('nextLesson','next',settings.delays.nextLesson).delayMs,0);
-const live={course:'synthetic',lesson:'live',kind:'live',session:'session'};assert.equal(c.recordCompletion(live,'platform-live-ended'),true);assert.equal(c.recordCompletion(live,'platform-live-ended'),false);
+const live={course:'synthetic',lesson:'live',kind:'live',inventory:'live',ordinal:0};assert.equal(c.recordCompletion(live,'platform-live-ended'),true);assert.equal(c.recordCompletion(live,'platform-live-ended'),false);
 console.log('PASS explicit settings cancellation/resume behavior and live-return persistent deduplication');
 const legacy=defaultSettings();delete legacy.pacingVersion;delete legacy.rest;delete legacy.delays.nextContent;legacy.features.background=false;legacy.features.audioPlayback=false;legacy.delays.documentScroll.minMs=413;
 const migrated=validateSettings(legacy);assert.equal(migrated.delays.nextContent.minMs,3000);assert.equal(migrated.delays.nextLesson.maxMs,8000);assert.equal(migrated.delays.nextChapter.minMs,3000);assert.equal(migrated.features.background,false);assert.equal(migrated.features.audioPlayback,false);assert.equal(migrated.delays.documentScroll.minMs,413);

@@ -63,4 +63,39 @@ check('fresh pending and fresh claim are preserved; stale auto allowance survive
  for(const phase of ['ended','verify','done']){h.gm.set(key,{...r,phase,refreshUsed:true});assert.equal(p.begin(h.app,{}, {validateScope:()=>true}),false);}
  assert.equal(h.app.runs,undefined);
 });
+check('distinct terminal GM attempts count one owned live content; different lesson counts separately',()=>{
+ const pacingSource=source.slice(source.indexOf('    function pacingCourse('),source.indexOf('    // The native card is evidenced;'));
+ const pacingFactory=Function('URL',pacingSource+';return createTaskPacingCoordinator;')(URL);
+ const method=source.slice(source.indexOf('            _recordPacedLive(r) {'),source.indexOf('            _paceContent('));
+ const ledger=new Map(),storage={getItem:k=>ledger.get(k)??null,setItem:(k,v)=>ledger.set(k,v)};
+ let scope={tasks:[{kind:'live',nativeEntry:true}],validateScope:()=>true};
+ const bind=h=>Function('catalog','pacingCourse','window','platformLiveEntry','videoAdapter','document',
+  'return ({'+method+'})._recordPacedLive;')(catalog,()=> 'synthetic',h.parent,{discover:()=>scope},{cardDocument:()=>({})},{querySelectorAll:()=>[node]});
+ const first=setup();first.parent.localStorage=storage;
+ const pacing=pacingFactory(first.parent,()=>({rest:{taskTargetMin:3,taskTargetMax:6}}));
+ const run=()=>{
+  const h=setup();h.parent.localStorage=storage;h.app._pacing=pacing;h.app._recordPacedLive=bind(h);
+  h.parent.location.href=h.parent.location.href.replace('chapterId=lesson','chapterId='+node.id);
+  h.child.location.href=h.child.location.href.replace('chapterId=lesson','chapterId='+node.id);
+  const parent=factory(h.parent,h.gm);assert.equal(parent.begin(h.app,{}, {validateScope:()=>true}),true);
+  factory(h.child,{...h.gm,close:()=>h.child.close()}).child(h.adapter);h.parent.tick();h.child.tick();
+  h.player.currentTime=10;h.player.dispatchEvent(new Event('timeupdate'));h.player.ended=true;h.player.dispatchEvent(new Event('ended'));
+  assert.equal(h.gm.get(key).phase,'ended');assert.equal(h.gm.get(key).seq,2);
+  const before=pacing.getStatus().count;h.parent.flush();assert.equal(pacing.getStatus().count,before); // No platform proof yet.
+  h.credit();parent.restore(h.app);assert.equal(h.gm.get(key).phase,'done');
+  return h;
+ };
+ const a=run();assert.equal(pacing.getStatus().count,1);
+ const b=run();assert.notEqual(a.gm.get(key).id,b.gm.get(key).id);assert.equal(pacing.getStatus().count,1);
+ assert.equal(pacing.getStatus().ledger.some(raw=>Object.hasOwn(JSON.parse(raw),'session')),false);
+ node.id='other-lesson';try{run();assert.equal(pacing.getStatus().count,2);}finally{node.id='lesson';}
+ for(const kind of ['video','audio','document'])assert.equal(pacing.recordCompletion({course:'synthetic',lesson:'lesson',kind,inventory:'live',ordinal:0},kind==='document'?'verified-bottom':'natural-ended'),true);
+ scope={tasks:[{kind:'live',nativeEntry:true},{kind:'live',nativeEntry:true}],validateScope:()=>true};
+ const before=pacing.getStatus().count;assert.equal(a.app._recordPacedLive(a.gm.get(key)),false);assert.equal(pacing.getStatus().count,before);
+ scope={tasks:[{kind:'live',nativeEntry:true}],validateScope:()=>false};assert.equal(a.app._recordPacedLive(a.gm.get(key)),false);
+ scope={tasks:[{kind:'live',nativeEntry:true}],validateScope:()=>true};
+ const old=pacingFactory({...first.parent,localStorage:{getItem:()=>null,setItem(){}}},()=>({rest:{taskTargetMin:3,taskTargetMax:6}}));
+ old.recordCompletion({course:'synthetic',lesson:'lesson',kind:'live',session:'legacy-attempt'},'platform-live-ended');
+ a.app._pacing=old;assert.equal(a.app._recordPacedLive(a.gm.get(key)),false);assert.equal(old.getStatus().count,1);
+});
 console.log(`RESULT: ${passed} focused GM lifecycle checks passed; mocked GM/tabs, not Tampermonkey acceptance.`);
