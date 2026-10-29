@@ -2092,11 +2092,21 @@
             // Prior platform credit is independent of local ended events. Require an
             // own zero-count AND own completion marker; attachment icons cannot prove a lesson.
             _observeCredit() {
-                const node = catalog.current(), doc = videoAdapter.cardDocument();
+                let node = catalog.current(); const doc = videoAdapter.cardDocument();
                 if (!node || !doc || this._videoContext || catalog.status(node) !== 'unknown' ||
                     (this._creditObserved?.node === node && this._creditObserved.doc === doc)) return false;
                 this._creditObserved = { node, doc };
                 const id = node.id, title = this._nodeTitle(node), generation = this._generation;
+                const topology = this._catalogTopology(), chapter = this._chapterOf(node), href = location.href;
+                const valid = () => {
+                    const active = catalog.current();
+                    if (generation !== this._generation || this._destroyed || location.href !== href || doc !== videoAdapter.cardDocument() ||
+                        !active || active.id !== id || this._nodeTitle(active) !== title || !topology || this._catalogTopology() !== topology ||
+                        [...document.querySelectorAll('[id]')].filter(el => el.id === id).length !== 1) return false;
+                    if (this._chapterOf(active) !== chapter && chapter?.isConnected) return false;
+                    if (node !== active) { if (node.isConnected) return false; node = active; this._creditObserved.node = active; }
+                    return true;
+                };
                 let attempts = 0;
                 const tick = () => {
                     if (generation !== this._generation || this._destroyed) return;
@@ -2107,10 +2117,10 @@
                         if (catalog.status(node) === 'unknown' && !media.videos.length && !media.tasks?.length && !this._taskSet()?.tasks.length) return this._block('平台完成状态仍未知，有限观察已结束；未跳过当前小节');
                         this._state = 'READY'; this.play(); return;
                     }
-                    this._schedule(tick, 500);
+                    this._schedule(tick, 500, valid);
                 };
                 this._state = 'WAITING_CREDIT'; this._notify('平台完成状态暂未确定，正在有限观察；超时不会视为完成');
-                this._schedule(tick, 500); return true;
+                this._schedule(tick, 500, valid); return true;
             },
             _priorProof(node) {
                 return catalog.status(node) === 'completed';
@@ -2145,6 +2155,12 @@
                 if (this._videoContext || this._isPlaying) return false;
                 const node = catalog.current(), doc = videoAdapter.cardDocument();
                 if (!node || !doc || (this._priorChecked?.node === node && this._priorChecked.doc === doc) || !this._priorProof(node)) return false;
+                const entry = this._entryCredit;
+                if (entry && entry.id === node.id && entry.name === this._nodeTitle(node) && entry.course === pacingCourse(window) &&
+                    entry.topology === this._catalogTopology() && entry.status !== 'completed') {
+                    const scope = this._taskSet();
+                    if (scope?.validateScope() && scope.tasks.some(task => task.kind === 'document' && !this._processedTasks.has(task.element))) return false;
+                }
                 const media = this._playableMedia();
                 if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
                 const record = { node, doc, id: node.id, topology: this._catalogTopology(), chapter: this._chapterOf(node), generation: this._generation, href: location.href, title: this._currentStepTitle(),
@@ -2558,6 +2574,7 @@
                     (!this._externalCompletion && catalog.status(this._completionNode) !== 'completed')) {
                     return this._block('当前内容尚未确认完成');
                 }
+                this._entryCredit = { id: nCell.id, name: this._nodeTitle(nCell), course: pacingCourse(window), status: catalog.status(nCell), topology: this._catalogTopology() };
                 const destinationChapter = this._chapterOf(nCell), destinationTopology = this._catalogTopology();
                 const destinationId = nCell.id, destinationTitle = this._nodeTitle(nCell), destinationHref = new URL(location.href);
                 const sourceId = this._completionNode?.id;

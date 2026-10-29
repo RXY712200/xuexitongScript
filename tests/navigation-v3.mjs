@@ -2539,6 +2539,15 @@ try {
         await flush(page,1);assert.equal(await state(page),mode==='stop'?'PAUSED_AUTOMATION':'BLOCKED');
         assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
     }));
+    await check('entry credit does not replace actual positive-range document reading',()=>using([outer(2,false,'文档'),0,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{const n=document.querySelector('#node0');app._entryCredit={id:n.id,name:app._nodeTitle(n),course:'synthetic',status:'incomplete',topology:app._catalogTopology()};n.querySelector('input').remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');});
+        await installDocument(page);assert.equal(await state(page),'READING_DOCUMENT');assert.equal(await page.evaluate(()=>app._externalCompletion.localDone),false);
+        await flush(page,2);assert.ok(await page.evaluate(()=>window.__documentScroll.scrollTop>0));
+    }));
+    for(const mode of ['same','different','duplicate'])await check(`credit observation reconstruction ${mode}`,()=>using([outer(2),0],async page=>{
+        await page.evaluate(mode=>{app.stopAutomation();const n=document.querySelector('#node0');n.querySelector('input')?.remove();app._state='READY';app._creditObserved=null;app._observeCredit();const id=[...window.__timeoutDelays].find(([,d])=>d===500)?.[0];const tick=window.__timeouts.get(id);window.__timeouts.delete(id);const copy=n.cloneNode(true);if(mode==='different')copy.id='other';if(mode==='duplicate')n.after(copy);else n.replaceWith(copy);copy.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');tick();},mode);
+        assert.equal(await state(page),mode==='same'?'VERIFYING_PLATFORM_COMPLETION':'BLOCKED');
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }
