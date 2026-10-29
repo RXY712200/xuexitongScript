@@ -2548,6 +2548,14 @@ try {
         await page.evaluate(mode=>{app.stopAutomation();const n=document.querySelector('#node0');n.querySelector('input')?.remove();app._state='READY';app._creditObserved=null;app._observeCredit();const id=[...window.__timeoutDelays].find(([,d])=>d===500)?.[0];const tick=window.__timeouts.get(id);window.__timeouts.delete(id);const copy=n.cloneNode(true);if(mode==='different')copy.id='other';if(mode==='duplicate')n.after(copy);else n.replaceWith(copy);copy.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');tick();},mode);
         assert.equal(await state(page),mode==='same'?'VERIFYING_PLATFORM_COMPLETION':'BLOCKED');
     }));
+    await check('generated click preserves navigation but trusted user click cancels',()=>using([outer(2,true),0,false,null,true,'pacing'],async page=>{
+        await flush(page,1);assert.equal(await state(page),'NAVIGATION_COOLDOWN');
+        const deadline=await page.evaluate(()=>app._actions.pending.get('navigation').deadline);
+        await page.evaluate(()=>document.body.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+        assert.equal(await page.evaluate(()=>app._actions.pending.get('navigation').deadline),deadline);
+        await page.mouse.click(400,400);
+        assert.equal(await state(page),'BLOCKED');
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

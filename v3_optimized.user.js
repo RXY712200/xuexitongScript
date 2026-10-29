@@ -1206,7 +1206,7 @@
                         const observer = new MutationObserver(() => { if (!valid()) cancel(); });
                         const listeners = [];
                         const listen = (el, type, handler = cancel) => { el.addEventListener(type, handler, true); listeners.push([el, type, handler]); };
-                        const click = event => { if (!event.composedPath().includes(this._settingsPanel) && !event.composedPath().includes(this._noticePanel)) cancel(); };
+                        const click = event => { if (event.isTrusted && !event.composedPath().includes(this._settingsPanel) && !event.composedPath().includes(this._noticePanel)) cancel(); };
                         for (const doc of new Set([document, ...this._playableMedia().documents])) {
                             if (key !== 'navigation') observer.observe(doc, { subtree: true, attributes: true, childList: true, characterData: true });
                             listen(doc, 'click', click);
