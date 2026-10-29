@@ -429,15 +429,6 @@ try {
     await check('diagnostic ordinary UI form does not block playback or get submitted',()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,'video','form-action',false);assert.equal(await state(page),'PLAYING');
     }));
-    await check('diagnostic mixed audio/video preserves raw media and ordered tasks but refuses unknown coordination',()=>using([outer(2),0],async page=>{
-        await diagnosticLesson(page,'audio','',false);
-        await page.evaluate(()=>{
-            const root=window.__diagnosticRoot,branch=root.createElement('iframe');branch.className='ans-attach-online ans-insertvideo-online';root.body.append(branch);
-            branch.contentDocument.body.innerHTML='<video id="video_html5_api"></video>';app.run();
-        });
-        assert.equal(await state(page),'BLOCKED');
-        assert.deepEqual(await page.evaluate(()=>{const m=app._discoverMedia();return [m.videos.length,m.audios.length,m.tasks.map(t=>t.kind),app._playableMedia().videos.length,m.reasons.includes('unsupported-mixed-attachments')];}),[1,1,['audio','video'],2,true]);
-    }));
     for(const withAuxiliaryError of [false,true])for(const kind of ['video','audio']) await check(`diagnostic ${kind} natural ended waits for platform marker then navigates once despite stale callbacks; auxiliary code4=${withAuxiliaryError}`,()=>using([outer(2),0],async page=>{
         await diagnosticLesson(page,kind,'',false);
         if(withAuxiliaryError)await auxiliaryError(page);
@@ -2587,6 +2578,30 @@ try {
         await page.evaluate(()=>{app._noticePanel.shadowRoot.querySelector('[data-resume]').click();});await flush(page,2);
         assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
         assert.notEqual(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
+    }));
+    for(const sequence of [['video','audio'],['audio','video'],['audio','document'],['document','audio'],['video','document','audio','document'],['audio','audio','video','document']])await check(`composable dispatcher ${sequence.join(' -> ')}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
+        await page.evaluate(({sequence,audioFixture})=>{
+            app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';window.__mixed=[];
+            Object.defineProperty(performance,'now',{configurable:true,value:()=>window.__clock});
+            for(const kind of sequence){const frame=root.createElement('iframe');frame.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[kind]);frame.style.height='150px';root.body.append(frame);const d=frame.contentDocument;
+                if(kind==='document'){d.body.style.margin='0';d.body.innerHTML='<canvas width="100" height="1200"></canvas>';window.__mixed.push({kind,frame});continue;}
+                d.body.innerHTML=kind==='audio'?audioFixture:'<video id="video_html5_api"></video>';const el=d.querySelector(kind==='audio'?'#audio_html5_api':'video');el.__paused=true;el.__ended=false;el.__plays=0;
+                Object.defineProperties(el,{readyState:{get:()=>4},paused:{get:()=>el.__paused},ended:{get:()=>el.__ended}});el.play=()=>{el.__paused=false;el.__plays++;return Promise.resolve();};window.__mixed.push({kind,frame,el});
+            }
+            const players=window.__mixed.filter(t=>t.el);
+            if(players.length>1){players[0].el.__paused=false;players[1].el.__paused=false;if(!app._discoverMedia().unsupported)throw Error('competing players accepted');players[0].el.__paused=true;players[1].el.__paused=true;players[1].el.autoplay=true;}
+            const s=structuredClone(app.settings);s.features.document=true;s.randomDelaysEnabled=false;s.rest.enabled=false;app.updateSettings(s);app.run();
+        },{sequence,audioFixture});
+        for(let i=0;i<sequence.length;i++){
+            if(sequence[i]==='document'){
+                assert.equal(await state(page),'READING_DOCUMENT');
+                await page.evaluate(async()=>{for(let n=0;n<90&&app._state==='READING_DOCUMENT';n++){const entry=[...window.__timeoutDelays].sort((a,b)=>a[1]-b[1])[0];if(!entry)break;const [id,delay]=entry;const fn=window.__timeouts.get(id);window.__timeouts.delete(id);window.__timeoutDelays.delete(id);window.__clock+=delay;fn();await Promise.resolve();}});
+            }else{
+                assert.equal(await page.evaluate(i=>app._videoEl===window.__mixed[i].el,i),true);
+                await page.evaluate(i=>{const el=window.__mixed[i].el;el.__paused=true;el.__ended=true;el.dispatchEvent(new Event('ended'));},i);await flush(page,2);
+            }
+            assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+        }
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

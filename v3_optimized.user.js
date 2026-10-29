@@ -205,7 +205,6 @@
                 if (!path?.every(visible)) block('inactive-player-branch');
             }
             if (selected.filter(el => !el.paused && !el.ended).length > 1) block('competing-primary-playback');
-            if (selected.length > 1 && selected.some(el => el.autoplay && !el.ended)) block('competing-primary-autoplay');
             if (attachments.length) {
                 if (!uniqueLesson) block('unverified-attachment-lesson');
                 result.tasks = [];
@@ -222,7 +221,6 @@
                         document: el?.ownerDocument || documents.at(-1), lesson: { id: node?.id, node, root, frame }, position: result.tasks.length, status: 'pending' });
                 }
                 if (selected.some(el => !attachments.includes(branches.get(el.ownerDocument)))) block('ambiguous-player-ownership');
-                if (result.tasks.some(task => task.kind === 'audio') && result.tasks.some(task => task.kind !== 'audio')) block('unsupported-mixed-attachments');
             } else if (!selection && selected.length > 1) {
                 // Preserve the existing ordered, single-document video list. Multiple
                 // branches/types need an explicit attachment inventory or selection.
@@ -1715,7 +1713,7 @@
                 if (this._isPlaying) return false;
                 const inventory = this._discoverAttachmentTask();
                 if (inventory === true) return true;
-                if (inventory?.kind === 'video') return false;
+                if (['video','audio'].includes(inventory?.kind)) return false;
                 const scope = this._taskSet();
                 if (!scope) return false;
                 if (scope.invalid) { this._block('任务范围无效：入口不唯一、框架归属变化或卡片已替换'); return true; }
