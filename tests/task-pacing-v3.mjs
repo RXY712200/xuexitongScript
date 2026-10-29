@@ -69,3 +69,8 @@ recovery=makeRecovery(recoveryEnv,hooks);assert.equal(recovery.getStatus().attem
 recovery.resumeExplicitly();recovery.requestRecovery('readiness');recovery.markExplicitStop();tickRecovery();assert.equal(reloads,1);assert.equal(makeRecovery(recoveryEnv,hooks).getStatus().stopped,true);
 recovery.resumeExplicitly();recovery.requestRecovery('readiness');recovery.confirmProgress();assert.equal(recovery.getStatus().attempts,0);allowed=false;assert.equal(recovery.requestRecovery('frame-replaced'),false);
 console.log('PASS recovery three-attempt budget, one reload, reinjection persistence, Stop/Resume and progress reset (simulated)');
+
+recovery.resumeExplicitly();allowed=true;recovery.requestRecovery('context-stale');recovery.cancel('terminal-block');const terminalAttempts=recovery.getStatus().attempts;recovery.confirmProgress();assert.equal(recovery.getStatus().stage,'terminal');
+hooks.identity=()=>null;recovery.restore();assert.equal(recovery.getStatus().attempts,terminalAttempts);assert.equal(recovery.getStatus().stage,'terminal');
+hooks.identity=()=> 'course-class-different-lesson';recovery.restore();assert.equal(recovery.getStatus().attempts,0);assert.equal(recovery.getStatus().stage,'idle');
+console.log('PASS terminal ignores late progress and missing identity; verified different lesson gets fresh budget');

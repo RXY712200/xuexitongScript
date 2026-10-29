@@ -408,7 +408,7 @@
         };
         return { restore, requestRecovery, classifyFailure: reason => ['context-stale','frame-replaced','readiness'].includes(reason) && hooks.safe(),
             cancel, dispose() { disposed = true; cancel(); }, getStatus: () => ({ ...state }),
-            confirmProgress() { if (!state.stopped && state.attempts) { cancel(); state = fresh(identity()); persist(); } },
+            confirmProgress() { if (!disposed && !state.stopped && state.stage !== 'terminal' && state.attempts && identity() && identity() === state.identity) { cancel(); state = fresh(identity()); persist(); } },
             markExplicitStop() { cancel(); state.stopped = true; persist(); },
             resumeExplicitly() { cancel(); state = fresh(identity()); persist(); },
             observe,
@@ -1051,7 +1051,16 @@
             get cellData() {
                 return this._cellData;
             },
+            _recoveryEntryAllowed() {
+                if (!this._recovery) return true;
+                const status = this._recovery.restore();
+                if (!status.stopped && status.stage !== 'terminal') return true;
+                this.stopAutomation();
+                this._notify(status.stopped ? '用户已停止自动操作，请明确重新自动检测' : '当前小节自动恢复已终止；不会再次尝试，请手动重新检测');
+                return false;
+            },
             run({ startup = false, transition = false } = {}) {
+                if (!this._recoveryEntryAllowed()) return;
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
@@ -2374,6 +2383,7 @@
                 root.append(label); document.body.append(host);
             },
             async play(actionReady = false) {
+                if (!this._recoveryEntryAllowed()) return;
                 try {
                     if (this._isChapterTest()) {
                         this._advanceChapterTest();
@@ -2924,8 +2934,7 @@
         window[APP_KEY] = app;
 
         try {
-            if (app._recovery.getStatus().stopped) { app.stopAutomation(); app._notify('用户已停止自动操作，请明确重新自动检测'); }
-            else { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
+            if (app._recoveryEntryAllowed()) { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);

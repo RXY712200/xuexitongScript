@@ -2451,9 +2451,9 @@ try {
         assert.ok(await page.evaluate(()=>{const v=app._externalCompletion.scope.tasks[0].viewer;return v.scrollHeight-v.clientHeight>1000;}));
         await flush(page,2);assert.ok(await page.evaluate(()=>app._externalCompletion.scope.tasks[0].viewer.scrollTop>0));
     }));
-    for(const stopped of [false,true])await check(`audio bounded fallback promise and stale stop=${stopped}`,()=>using([outer(2),1],async page=>{
+    for(const stopped of [false,true])await check(`audio bounded fallback promise and stale stop=${stopped}`,()=>using([outer(2),1,false,null,false,'pacing'],async page=>{
         await audioLesson(page,'',false,false);
-        await page.evaluate(()=>{const a=window.__audio;a.__plays=0;a.play=()=>{a.__plays++;return a.__plays===1?Promise.reject(new DOMException('denied','NotAllowedError')):new Promise(resolve=>window.__mutedResolve=()=>{a.__paused=false;resolve();});};app.run();});
+        await page.evaluate(()=>{const a=window.__audio;a.__plays=0;a.play=()=>{a.__plays++;return a.__plays===1?Promise.reject(new DOMException('denied','NotAllowedError')):new Promise(resolve=>window.__mutedResolve=()=>{a.__paused=false;resolve();});};app._recovery.resumeExplicitly();app.run();});
         assert.equal(await state(page),'AUDIO_STARTING');assert.equal(await page.evaluate(()=>app._isPlaying),false);
         if(stopped)await page.evaluate(()=>app.stopAutomation());
         await page.evaluate(()=>window.__mutedResolve());await flush(page,2);
@@ -2565,6 +2565,28 @@ try {
         await page.evaluate(()=>{const root=document.querySelector('#coursetree');root.replaceWith(root.cloneNode(true));app._recovery.restore();});
         assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),2);
         await page.evaluate(()=>app._block('synthetic terminal'));const attempts=await page.evaluate(()=>app._recovery.getStatus().attempts);await flush(page,2);assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),attempts);
+    }));
+    await check('terminal recovery blocks actual reinjected bootstrap until explicit Resume',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();const key='xuexitong.v3.unattended-recovery.v1';const record=app._recovery.getStatus();sessionStorage.setItem(key,JSON.stringify({...record,attempts:3,stage:'terminal',reloadUsed:true,stopped:false}));app._recovery.restore();window.__terminalPlayer=app._videoEl;window.__terminalPlays=app._videoEl.__plays;app._recovery.confirmProgress();});
+        const saved=await page.evaluate(()=>sessionStorage.getItem('xuexitong.v3.unattended-recovery.v1'));
+        const bootSource='sessionStorage.setItem("xuexitong.v3.unattended-recovery.v1",'+JSON.stringify(saved)+');'+source;
+        await using([outer(),1,false,null,false,'pacing',true,bootSource],async reloaded=>{
+            assert.equal(await reloaded.evaluate(()=>app._recovery.getStatus().stage),'terminal');
+            assert.equal(await reloaded.evaluate(()=>app._videoEl),null);
+        });
+        for(let i=0;i<2;i++){
+            await page.addScriptTag({content:source});
+            await page.evaluate(()=>{for(const fn of [...window.__intervals.values()])fn();});
+            assert.equal(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
+            assert.equal(await page.evaluate(()=>window.__terminalPlayer.__plays===window.__terminalPlays),true);
+            await page.evaluate(()=>{app.run({startup:true});app.play();app._recovery.confirmProgress();});
+            assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),3);
+        }
+        await page.evaluate(()=>{const n=document.querySelector('#node0');n.replaceWith(n.cloneNode(true));app.run({startup:true});});
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
+        await page.evaluate(()=>{app._noticePanel.shadowRoot.querySelector('[data-resume]').click();});await flush(page,2);
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
+        assert.notEqual(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
