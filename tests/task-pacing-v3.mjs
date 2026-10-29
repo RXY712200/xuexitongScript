@@ -74,3 +74,27 @@ recovery.resumeExplicitly();allowed=true;recovery.requestRecovery('context-stale
 hooks.identity=()=>null;recovery.restore();assert.equal(recovery.getStatus().attempts,terminalAttempts);assert.equal(recovery.getStatus().stage,'terminal');
 hooks.identity=()=> 'course-class-different-lesson';recovery.restore();assert.equal(recovery.getStatus().attempts,0);assert.equal(recovery.getStatus().stage,'idle');
 console.log('PASS terminal ignores late progress and missing identity; verified different lesson gets fresh budget');
+
+const readerCode=source.slice(source.indexOf('        function readDocument('),source.indexOf('        return { createParent, installChild, readDocument'));
+for(const range of [80,800,80000])for(const sample of [0,.191,.99999999]){
+ let t=0,draws=0,complete=false,error='',valid=true;const queue=[];
+ const env={performance:{now:()=>t},setTimeout:(fn,ms)=>{const job={fn,at:t+ms};queue.push(job);return job;},clearTimeout:job=>{if(job)job.cancelled=true;}};
+ const math=Object.create(Math);math.random=()=>{draws++;return sample;};
+ const read=vm.runInNewContext(readerCode+';readDocument',{env,Math:math,Date});
+ const el={isConnected:true,clientHeight:100,scrollHeight:range+100,scrollTop:0};
+ const controller=read({element:el,isValid:()=>valid,onComplete:()=>complete=true,onError:r=>error=r});
+ let midway=false;
+ while(queue.length&&!complete&&!error){queue.sort((a,b)=>a.at-b.at);const job=queue.shift();t=job.at;if(!job.cancelled)job.fn();if(t>2000&&t<4000&&el.scrollTop>0&&el.scrollTop<range)midway=true;if(t>10000)throw Error('unbounded reader');}
+ const duration=5000+Math.floor(sample*2001);assert.equal(controller.durationMs,duration);assert.equal(draws,1);assert.equal(complete,true);assert.equal(error,'');assert.equal(el.scrollTop,range);assert.equal(midway,true);assert.ok(t>=duration&&t<=duration+550);
+}
+console.log('PASS adaptive reader: 80/800/80000px, inclusive duration bounds, millisecond samples, single draw, intermediate motion and stable bottom');
+
+for(const mode of ['grow','stop','stale','stuck']){
+ let t=0,done=false,error='',valid=true;const jobs=[];const env={performance:{now:()=>t},setTimeout:(fn,ms)=>{const j={fn,at:t+ms};jobs.push(j);return j;},clearTimeout:j=>{if(j)j.cancelled=true;}};
+ const read=vm.runInNewContext(readerCode+';readDocument',{env,Math,Date});const el={isConnected:true,clientHeight:100,scrollHeight:900,scrollTop:0};
+ if(mode==='stuck')Object.defineProperty(el,'scrollTop',{get:()=>0,set(){}});
+ const c=read({element:el,isValid:()=>valid,onComplete:()=>done=true,onError:r=>error=r});let changed=false;
+ while(jobs.length&&!done&&!error){jobs.sort((a,b)=>a.at-b.at);const j=jobs.shift();t=j.at;if(!changed&&t>=2000){changed=true;if(mode==='grow')el.scrollHeight=8100;if(mode==='stop')c.cancel();if(mode==='stale')valid=false;}if(!j.cancelled)j.fn();if(t>15000)throw Error('unbounded');}
+ if(mode==='grow'){assert.equal(done,true);assert.equal(el.scrollTop,8000);}else{assert.equal(done,false);if(mode!=='stop')assert.ok(error);}
+}
+console.log('PASS dynamic extent, cancellation, stale context and blocked scrolling never completing on timer alone');

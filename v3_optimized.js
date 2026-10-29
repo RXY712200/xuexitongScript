@@ -957,7 +957,8 @@
             return env.__xuexitongLiveChild = { check, dispose, get active() { return !!session; }, get disposed() { return disposed; } };
         }
         function readDocument({ element, isValid, onComplete, onError, scheduleStep, onProgress = () => {} }) {
-            let timer, scheduled, cancelled = false, previous = -1, unchanged = 0, bottomHeight = -1, begun = false;
+            let timer, scheduled, cancelled = false, previous = -1, unchanged = 0, bottomHeight = -1, begun = false, started = null, duration = null;
+            const clock = () => env.performance?.now ? env.performance.now() : Date.now();
             const cancel = () => { cancelled = true; env.clearTimeout(timer); scheduled?.cancel(); };
             const fail = reason => { cancel(); onError(reason); };
             const tick = () => {
@@ -967,29 +968,29 @@
                 if (!Number.isFinite(bottom) || bottom <= 1) return fail('阅读区已无有效滚动范围；不能据此确认本地阅读完成');
                 onProgress(Math.min(100, Math.floor(element.scrollTop / bottom * 100)));
                 if (!Number.isFinite(bottom) || bottom < 0) return fail('Document bottom cannot be verified');
-                if (begun && element.scrollTop >= bottom - 1) {
+                if (begun && clock() - started >= duration && element.scrollTop >= bottom - 1) {
                     if (bottomHeight === element.scrollHeight) { cancel(); onComplete(); return; }
                     bottomHeight = element.scrollHeight;
                     timer = env.setTimeout(tick, 250); // Recheck the real extent after rendering has had time to settle.
                     return;
                 }
                 bottomHeight = -1;
-                if (begun && element.scrollTop === previous) unchanged++; else unchanged = 0;
+                if (begun && clock() - started >= duration && element.scrollTop === previous) unchanged++; else unchanged = 0;
                 if (unchanged >= 10) return fail('Document scrolling made no progress');
                 previous = element.scrollTop;
                 const step = () => {
                     if (cancelled) return;
                     if (!isValid() || !element.isConnected || element.clientHeight <= 0) return fail('Document viewer unavailable');
-                    if (!begun) { element.scrollTop = 0; begun = true; }
-                    element.scrollTop = Math.min(element.scrollHeight - element.clientHeight,
-                        element.scrollTop + 40 + Math.floor(Math.random() * 81));
+                    if (!begun) { element.scrollTop = 0; begun = true; started = clock(); duration = 5000 + Math.floor(Math.random() * 2001); }
+                    const progress = Math.max(0, Math.min(1, (clock() - started) / duration));
+                    element.scrollTop = progress * (element.scrollHeight - element.clientHeight);
                     tick();
                 };
                 if (scheduleStep) scheduled = scheduleStep(step);
-                else timer = env.setTimeout(step, 300 + Math.floor(Math.random() * 701));
+                else timer = env.setTimeout(step, 100);
             };
             tick();
-            return { cancel, tick };
+            return { cancel, tick, get durationMs() { return duration; } };
         }
         return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),
             dispose() { for (const parent of [...bridgeParents]) parent.dispose(); } };
@@ -1760,7 +1761,7 @@
                         this._documentController = window.__xuexitongTaskSupport.readDocument({ element: pending.viewer || pending.element,
                             scheduleStep: tick => {
                                 const category = 'documentScroll'; first = false;
-                                return this._runAction(category, 'document-step', tick, { defer: true, isValid: () => this._taskContextValid(record) && (pending.viewer || pending.element).clientHeight > 0 });
+                                return this._runAction(category, 'document-step', tick, { delayMs: 100, defer: true, isValid: () => this._taskContextValid(record) && (pending.viewer || pending.element).clientHeight > 0 });
                             },
                             isValid: () => this._taskContextValid(record) && (!pending.platformDocument || documentViewer(pending.element).viewer === pending.viewer),
                             onProgress: value => { if (value > (record.recoveryProgress || 0) && this._taskContextValid(record)) this._recovery?.confirmProgress(); record.recoveryProgress = value; this._notify(`文档本地阅读 ${value}%（不代表平台已计入完成）`, '正在执行'); },
