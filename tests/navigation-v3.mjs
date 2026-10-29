@@ -2615,6 +2615,32 @@ try {
         },fixtures);
         assert.deepEqual(result.map(r=>r.slice(0,3)),['book-reader','timed-reader','audio-slides','hyperlink','legacy-flash'].map(k=>[k,false,true]));assert.deepEqual(result[3][3],['unsafe-scheme']);
     }));
+    for(const kind of ['book-reader','timed-reader','audio-slides','hyperlink','legacy-flash'])await check(`additional actual discovery and app diagnostic ${kind}`,()=>using([outer(2),0,false,null,false,'recorded'],async page=>{
+        const fixtures=readFileSync(new URL('../fixtures/synthetic/additional-readers.html',import.meta.url),'utf8');
+        const markup=await page.evaluate(({fixtures,kind})=>new DOMParser().parseFromString(fixtures,'text/html').querySelector('#'+kind).innerHTML,{fixtures,kind});
+        await page.context().route('https://mooc1.chaoxing.com/readsvr/book/mooc**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html>'+markup}));
+        await page.evaluate(kind=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';const f=root.createElement('iframe');f.className='ans-attach-online';f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));f.src='https://mooc1.chaoxing.com/readsvr/book/mooc?timing=60';root.body.append(f);window.__additionalOwner=f;},kind);
+        await page.waitForFunction(()=>window.__additionalOwner.contentDocument?.URL.includes('/readsvr/book/mooc'));
+        const result=await page.evaluate(()=>{const m=app._discoverMedia();window.__additionalTask=m.tasks?.find(t=>t.executable===false);app.run();return {k:window.__additionalTask?.kind,state:app._state,notice:app._lastNotice,count:app._pacing.getStatus().count};});
+        assert.equal(result.k,kind);assert.equal(result.state,'BLOCKED');assert.ok(result.notice.includes('manual-'+kind));assert.equal(result.count,0);assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
+        for(const known of ['video','audio','document']){
+            const mixed=await page.evaluate(({known,audioFixture})=>{const root=window.__additionalOwner.ownerDocument;const f=root.createElement('iframe');f.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[known]);root.body.insertBefore(f,window.__additionalOwner);f.contentDocument.body.innerHTML=known==='audio'?audioFixture:known==='video'?'<video id="video_html5_api"></video>':'<canvas height="1200"></canvas>';
+                app._recovery.resumeExplicitly();app.run();const m=app._discoverMedia();const row={kinds:m.tasks.map(t=>t.kind),claimed:!!window.__xuexitongTaskSupport.inspectAdditionalAttachment(f,0,root),state:app._state,count:app._pacing.getStatus().count,nav:app._actions.pending.has('navigation')};app.stopAutomation();f.remove();return row;
+            },{known,audioFixture});assert.deepEqual(mixed.kinds,[known,kind]);assert.equal(mixed.claimed,false);assert.equal(mixed.state,'BLOCKED');assert.equal(mixed.count,0);assert.equal(mixed.nav,false);
+        }
+        const stale=await page.evaluate(()=>{const n=document.querySelector('.posCatalog_active');const old=n.id;n.id='different-lesson';const valid=window.__additionalTask.validateScope();n.id=old;return valid;});assert.equal(stale,false);
+        for(const variant of ['missing','near-match','metadata','inaccessible']){
+            const matched=await page.evaluate(({variant,kind,markup})=>{const f=window.__additionalOwner,d=f.contentDocument;d.body.innerHTML=markup;f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));
+                if(variant==='missing'||variant==='near-match'){if(kind==='legacy-flash')f.setAttribute('data','{}');else if(kind==='audio-slides')d.querySelector('.swiper-slide').className='unrelated-slide';else if(kind==='timed-reader')d.querySelector('#pagejump').id='unrelated';else d.querySelector(kind==='book-reader'?'#ReadWeb':'#hyperlink').id='unrelated';}
+                if(variant==='metadata')f.setAttribute('data','invalid-json');
+                if(variant==='inaccessible')Object.defineProperty(f,'contentDocument',{configurable:true,get:()=>null});
+                const m=app._discoverMedia();const matched=m.tasks?.some(t=>t.kind===kind)||false;
+                if(variant==='inaccessible')delete f.contentDocument;
+                return matched;
+            },{variant,kind,markup});assert.equal(matched,false);
+        }
+        await page.evaluate(()=>{window.__additionalOwner.remove();});assert.equal(await page.evaluate(()=>window.__additionalTask.validateScope()),false);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

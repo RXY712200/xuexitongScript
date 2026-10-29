@@ -212,7 +212,13 @@
                     const kind = kindOf(owner), owned = selected.filter(el => branches.get(el.ownerDocument) === owner);
                     if (!kind || !visible(owner)) {
                         const additional = visible(owner) && uniqueLesson && inspectAdditionalAttachment(owner, result.tasks.length, root);
-                        if (additional?.validateScope()) { result.tasks.push(additional); block('manual-' + additional.kind); }
+                        if (additional?.validateScope()) {
+                            const validateOwner = additional.validateScope, lessonId = node.id;
+                            additional.validateScope = () => validateOwner() && node === catalog.current() && node.id === lessonId &&
+                                frame === this.cardFrame() && root === this.cardDocument() &&
+                                [...document.querySelectorAll('[id]')].filter(el => el.id === lessonId).length === 1;
+                            result.tasks.push(additional); block('manual-' + additional.kind);
+                        }
                         else block('unknown-attachment');
                         continue;
                     }
