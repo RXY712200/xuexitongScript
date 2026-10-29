@@ -2603,6 +2603,18 @@ try {
             assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
         }
     }));
+    await check('optional adapters recognize owned public structures without execution or navigation',()=>using([outer(),0,false,null,false,'pacing'],async page=>{
+        const fixtures=readFileSync(new URL('../fixtures/synthetic/additional-readers.html',import.meta.url),'utf8');
+        const result=await page.evaluate(html=>{app.stopAutomation();const templates=new DOMParser().parseFromString(html,'text/html');const root=document.querySelector('iframe[info="card"]').contentDocument;const rows=[];
+            for(const kind of ['book-reader','timed-reader','audio-slides','hyperlink','legacy-flash']){
+                root.body.innerHTML='<iframe class="ans-attach-online"></iframe>';const owner=root.querySelector('iframe');owner.contentDocument.body.innerHTML=templates.querySelector('#'+kind).innerHTML;
+                owner.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));const get=owner.getAttribute.bind(owner);owner.getAttribute=name=>name==='src'?'https://mooc1.chaoxing.com/readsvr/book/mooc?timing=60':get(name);
+                const task=window.__xuexitongTaskSupport.inspectAdditionalAttachment(owner,0,root);rows.push([task?.kind,task?.executable,task?.validateScope(),task?.linkClassification]);
+                owner.classList.add('ans-insertaudio');if(window.__xuexitongTaskSupport.inspectAdditionalAttachment(owner,0,root))throw Error('claimed existing owner');
+            }return rows;
+        },fixtures);
+        assert.deepEqual(result.map(r=>r.slice(0,3)),['book-reader','timed-reader','audio-slides','hyperlink','legacy-flash'].map(k=>[k,false,true]));assert.deepEqual(result[3][3],['unsafe-scheme']);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

@@ -189,7 +189,12 @@
                 result.tasks = [];
                 for (const owner of attachments) {
                     const kind = kindOf(owner), owned = selected.filter(el => branches.get(el.ownerDocument) === owner);
-                    if (!kind || !visible(owner)) { block('unknown-attachment'); continue; }
+                    if (!kind || !visible(owner)) {
+                        const additional = visible(owner) && uniqueLesson && inspectAdditionalAttachment(owner, result.tasks.length, root);
+                        if (additional?.validateScope()) { result.tasks.push(additional); block('manual-' + additional.kind); }
+                        else block('unknown-attachment');
+                        continue;
+                    }
                     if (kind === 'document' && owned.length) block('media-in-document-attachment');
                     if (kind !== 'document' && (owned.length > 1 || owned.some(el => el.tagName !== (kind === 'video' ? 'VIDEO' : 'AUDIO')))) block('ambiguous-attachment-player');
                     if (kind !== 'document' && !owned.length) result.pending = true;
@@ -232,6 +237,33 @@
             return result;
         },
     };
+
+    // Publicly reported structures: recognition is deliberately not execution authority.
+    function inspectAdditionalAttachment(owner, position, root) {
+        if (!owner?.isConnected || owner.ownerDocument !== root || !owner.matches('iframe.ans-attach-online') ||
+            owner.matches('.ans-insertvideo-online,.ans-insertaudio,.insertdoc-online-pdf')) return null;
+        let doc, url, metadata;
+        try { doc = owner.contentDocument; if (!doc) return null; url = new URL(owner.getAttribute('src') || doc.URL, root.baseURI);
+            metadata = JSON.parse(owner.getAttribute('data') || '{}'); } catch (_) { return null; }
+        const module = metadata.module || metadata.type;
+        const bookRoute = url.protocol === 'https:' && /(^|\.)chaoxing.com$/.test(url.hostname) && /^\/readsvr\/book\/mooc(?:\/|$)/.test(url.pathname);
+        const candidates = [];
+        if (bookRoute && doc.querySelector('#reader .readerPager') && doc.querySelector('#pagejump')) {
+            const dwell = Number(url.searchParams.get('timing'));
+            if (Number.isSafeInteger(dwell) && dwell > 0 && dwell <= 86400) candidates.push(['timed-reader','计时阅读：原生逐页控制和完成证据尚未验证']);
+        } else if (bookRoute && module === 'insertbook' && doc.querySelector('#ReadWeb')) candidates.push(['book-reader','书籍阅读：原生翻页与完成证据尚未验证']);
+        if (doc.querySelector('.swiper-container .swiper-slide') && doc.querySelector('audio')) candidates.push(['audio-slides','音频幻灯：音频与页面归属、翻页及双重完成证据尚未验证']);
+        if (doc.querySelector('#hyperlink')) candidates.push(['hyperlink','链接任务：仅诊断，不自动访问或申报完成']);
+        if (module === 'insertflash') candidates.push(['legacy-flash','旧版动画：当前浏览器不支持，不安装运行时或申报完成']);
+        if (candidates.length !== 1) return null;
+        const [kind, reason] = candidates[0];
+        const links = kind === 'hyperlink' ? [...doc.querySelectorAll('#hyperlink[href],#hyperlink a[href]')].map(link => {
+            try { const target = new URL(link.getAttribute('href'), doc.baseURI); return ['https:','http:'].includes(target.protocol) ? 'web-manual-only' : 'unsafe-scheme'; } catch (_) { return 'invalid-url'; }
+        }) : [];
+        return { kind, attachment: owner, element: owner, target: null, lineage: [owner], documents: [doc], document: doc,
+            position, confidence: 'PUBLICLY_REPORTED_STRUCTURE', executable: false, reason, linkClassification: links,
+            validateScope: () => owner.isConnected && owner.ownerDocument === root && owner.contentDocument === doc };
+    }
 
     const SETTINGS_KEY = 'xuexitong.v3.action-settings.v1';
     const FEATURES = { videoPlayback: '自动播放视频', nextVideo: '自动下一视频', audioPlayback: '自动播放音频', nextAudio: '自动下一音频', nextLesson: '自动下一课节',
@@ -990,7 +1022,7 @@
             tick();
             return { cancel, tick, get durationMs() { return duration; } };
         }
-        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry),
+        return { createParent, installChild, readDocument, inspectPlatformEntry: entry => platformLiveEntry.inspect(entry), inspectAdditionalAttachment,
             dispose() { for (const parent of [...bridgeParents]) parent.dispose(); } };
     }
 
@@ -1819,7 +1851,7 @@
                 if (!media.tasks) return null;
                 if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
                 if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
-                if (media.unsupported || media.inaccessible) { this._block('附件清单无法验证：' + (media.reasons || []).filter(code => /^[a-z][a-z0-9-]{0,63}$/.test(code)).slice(0,5).join('、')); return true; }
+                if (media.unsupported || media.inaccessible) { this._block((media.tasks?.find(task => task.executable === false)?.reason || '附件清单无法验证') + '：' + (media.reasons || []).filter(code => /^[a-z][a-z0-9-]{0,63}$/.test(code)).slice(0,5).join('、')); return true; }
                 const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 if (pending?.kind === 'document') {
                     const scope = this._taskSet();

@@ -287,3 +287,24 @@ Baseline `1f494175915bb17285769c722d5fc44498148c79`. Removed unconditional unsup
 The obsolete mixed-audio BLOCK expectation was replaced by six actual-dispatch browser scenarios: video/audio; audio/video; audio/document; document/audio; video/document/audio/document; audio/audio/video/document. These drive natural-ended callbacks and monotonic document traversal through successive attachments, retaining the current lesson without platform credit. Scenarios also check two genuinely active players block and inactive recognized autoplay siblings do not. Eight existing selected browser regressions, six pacing groups, recovery/reader tests and ten GM tests passed; build/synchronization and syntax passed. Exact discovery-reader/recovery/pacing/GM-child bodies remained unchanged apart from the intended media inventory policy.
 
 Audio historical credit remains unknown: existing evidence establishes a video-specific wrapper adapter, not authenticated equivalent audio attachment markers. No speculative audio-credit skip was introduced. Thus an audio previously credited only through an unverified attachment icon is not skipped; same-run genuine natural-ended handling remains supported. Authenticated mixed-module acceptance and native audio historical completion evidence remain PARTIAL. No mixed-live support or panView adapter was added.
+
+
+### Optional compatibility adapters — phases A/B/C (2026-10-29)
+
+Baseline `706a8616981a006abe5ee615fb8dac9b6ebf49a9`. A1 inspected existing owned inventory, dispatcher, document viewer, scheduler, recovery and pacing contracts. A2 reference is OCS branch 5.0, commit da5c0775a9d055724149ff505eae75bd85d334f9, packages/scripts/src/projects/cx.ts (the requested master path is absent). No OCS code was imported or transplanted.
+
+Evidence matrix (all candidate matches are PUBLICLY_REPORTED_STRUCTURE, not authenticated Chaoxing proof):
+
+| Candidate | Public source evidence | Ownership requirement | Operation / completion |
+| --- | --- | --- | --- |
+| Book | cx.ts lines 81,215,414: insertbook, /readsvr/book/mooc, ReadWeb comment | accessible root-owned ans attachment, book metadata, Chaoxing HTTPS reader route, ReadWeb | Recognition only; native sequential controls and credit unknown |
+| Timed reader | lines 376–406: reader, readerPager, pagejump, timing | root-owned attachment, approved reader route, all selectors, integer timing 1–86400s | Recognition only; observed native next-page control and dwell/credit unknown |
+| Audio slideshow | lines 1619,2260–2273: swiper-container/swiper-slide and audio | one accessible owned attachment with both structures, no existing handler claim | Recognition only; association, page transition and dual completion unknown |
+| Hyperlink | lines 1620,1750: hyperlink | accessible root-owned attachment with hyperlink UI | Recognition only; destinations parsed, unsafe schemes flagged, never opened |
+| Flash | line 81: insertflash module | root-owned attachment with explicit module metadata | Unsupported legacy diagnostic; no runtime or credit |
+
+Source: https://github.com/ocsjs/ocsjs/blob/da5c0775a9d055724149ff505eae75bd85d334f9/packages/scripts/src/projects/cx.ts . CONFIRMED_STRUCTURE applies only to inspecting this public source, not live platform DOM. Discussion/interactive categories remain UNVERIFIED_ASSUMPTION and research-only.
+
+B1 adds inspectAdditionalAttachment reporting kind, exact boundary, document/lineage, position, confidence, executable=false, null operation target, diagnostic and scope validator. Existing video/audio/document handlers have priority. Multiple candidate matches return no claim. Recognized new items enter the same ordered inventory but block execution with a manual diagnostic; no new navigation/completion engine. B2–B5 are isolated recognition-only adapters because sequential native controls and platform completion are not evidenced. No guessed controls, page jumps, forced mute, APIs, arbitrary link opening or external runtimes were added. Existing accepted behavior is retained.
+
+C1: one sanitized synthetic fixture and a focused browser group cover five positive structures, existing-handler exclusion, ownership scope and unsafe URL scheme. Fourteen selected browser cases passed including all six mixed dispatcher compositions, normal video/audio, pacing and terminal recovery. Six pacing groups, reader/recovery tests and ten GM cases passed. Build/synchronization and exact frozen reader/discovery/recovery/pacing/GM-child comparisons passed. New page/slide execution is unavailable by design: no transitions or completed tasks are claimed. Negative near-match/ordering matrices and authenticated new-type layouts are not exhaustively tested. STATUS PARTIAL pending actual platform evidence; no new executable reader type is claimed.
