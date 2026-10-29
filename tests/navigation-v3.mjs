@@ -2556,6 +2556,16 @@ try {
         await page.mouse.click(400,400);
         assert.equal(await state(page),'BLOCKED');
     }));
+    await check('recovery app initial stale failure and observation failure share durable budget',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app._videoEl.__paused=true;app._state='READY';app._runAction('videoStart','recover-test',()=>{}, {isValid:()=>false});});
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),1);assert.equal(await state(page),'RECOVERING');
+        await page.evaluate(()=>{const id=[...window.__timeoutDelays].find(([,d])=>d===1000)?.[0];const fn=window.__timeouts.get(id);window.__timeouts.delete(id);fn();});
+        await page.evaluate(()=>{app._isPlaying=false;app._videoEl.__paused=true;app._state='READY';app._runAction('videoStart','recover-test-two',()=>{}, {isValid:()=>false});});
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),2);assert.equal(await state(page),'RECOVERING');
+        await page.evaluate(()=>{const root=document.querySelector('#coursetree');root.replaceWith(root.cloneNode(true));app._recovery.restore();});
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),2);
+        await page.evaluate(()=>app._block('synthetic terminal'));const attempts=await page.evaluate(()=>app._recovery.getStatus().attempts);await flush(page,2);assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),attempts);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }

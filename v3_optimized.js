@@ -308,7 +308,7 @@
                 onError('自动动作延迟配置无效'); return null;
             }
             if (!enabled(category)) { options.onCancel?.('feature-disabled'); return null; }
-            if (options.isValid && !options.isValid()) { options.onCancel?.('stale'); return null; }
+            if (options.isValid && !options.isValid()) { options.onCancel?.('context-stale'); return null; }
             const delay = Number.isSafeInteger(options.deadline) ? Math.max(0, options.deadline - Date.now()) : Number.isSafeInteger(options.delayMs) && options.delayMs >= 0 && options.delayMs <= 2147483647 ? options.delayMs :
                 range.enabled ? range.minMs + Math.floor(Math.random() * (range.maxMs - range.minMs + 1)) : 0;
             const action = { category, key, deadline: options.deadline ?? Date.now() + delay, delayMs: delay, done: false, timer: null, cleanup: null, cancel(reason = 'internal-cancel') {
@@ -338,35 +338,39 @@
 
     function createUnattendedRecoveryCoordinator(env, hooks) {
         const key = 'xuexitong.v3.unattended-recovery.v1';
-        let state, timer = null, disposed = false;
+        let state, timer = null, disposed = false, storageFailed = false;
         const identity = () => hooks.identity();
-        const persist = () => { try { env.sessionStorage.setItem(key, JSON.stringify(state)); return true; } catch (_) { hooks.fail('恢复预算无法持久保存'); return false; } };
+        const persist = () => { try { env.sessionStorage.setItem(key, JSON.stringify(state)); return true; } catch (_) { if (!storageFailed) { storageFailed = true; hooks.fail('恢复预算无法持久保存'); } return false; } };
         const fresh = id => ({ version: 1, identity: id, attempts: 0, stage: 'idle', reloadUsed: false, reason: '', stopped: false, cycle: Date.now() });
         const restore = () => {
             const id = identity();
             try {
                 const raw = env.sessionStorage.getItem(key); state = raw ? JSON.parse(raw) : fresh(id);
                 if (state.version !== 1 || !Number.isInteger(state.attempts) || state.attempts < 0 || state.attempts > 3 ||
+                    (state.identity !== null && typeof state.identity !== 'string') || !Number.isSafeInteger(state.cycle) || typeof state.reason !== 'string' ||
                     typeof state.stopped !== 'boolean' || typeof state.reloadUsed !== 'boolean' ||
                     !['idle','waiting','observing','reload','terminal'].includes(state.stage)) throw Error();
-                if (state.identity !== id) state = { ...fresh(id), stopped: state.stopped };
-                if (state.stage === 'waiting') state.stage = 'observing';
+                if (id && state.identity !== id) state = { ...fresh(id), stopped: state.stopped };
+                if (state.stage === 'waiting' && timer === null) state.stage = 'observing';
             } catch (_) { state = { ...fresh(id), stopped: true, stage: 'terminal' }; }
             return state;
         };
         restore();
-        const cancel = () => { if (timer !== null) env.clearTimeout(timer); timer = null; };
+        const cancel = reason => { if (timer !== null) env.clearTimeout(timer); timer = null; if (['terminal-block','navigation','user-interaction'].includes(reason)) { state.stage = 'terminal'; persist(); } };
         const finish = reason => { cancel(); state.stage = 'terminal'; state.reason = reason; persist(); hooks.fail(reason); };
         const requestRecovery = reason => {
-            if (disposed || timer !== null || state.stopped || state.stage === 'terminal') return false;
+            if (disposed || state.stopped || state.stage === 'terminal') return false;
             if (!identity() || identity() !== state.identity || !['context-stale','frame-replaced','readiness'].includes(reason) || !hooks.safe()) return false;
+            if (timer !== null && state.stage === 'waiting') return true;
+            cancel();
             if (state.attempts >= 3) { finish('当前小节连续恢复失败，已停止；不会继续刷新'); return true; }
             state.attempts++; state.stage = 'waiting'; state.reason = reason;
             if (!persist()) return false;
             hooks.notice(`自动恢复 ${state.attempts}/3：${['','重新检测当前任务','重新初始化当前小节','安全刷新当前页面'][state.attempts]}`);
+            const fingerprint = hooks.fingerprint?.();
             timer = env.setTimeout(() => {
                 timer = null;
-                if (disposed || state.stopped || identity() !== state.identity || !hooks.safe()) return finish('恢复上下文或安全条件已变化');
+                if (disposed || state.stopped || identity() !== state.identity || (hooks.fingerprint && hooks.fingerprint() !== fingerprint) || !hooks.safe()) return finish('恢复上下文或安全条件已变化');
                 state.stage = 'observing';
                 if (state.attempts === 3) {
                     if (state.reloadUsed || !hooks.canReload()) return finish('当前状态不允许安全刷新，已停止');
@@ -2005,6 +2009,7 @@
                 this._clearCheckInterval();
             },
             _block(reason) {
+                this._recovery?.cancel('terminal-block');
                 this._state = 'BLOCKED';
                 this._isPlaying = false;
                 this._nextUnitPending = false;
@@ -2864,7 +2869,7 @@
         const recoveryIdentity = () => {
             try { const url = new URL(location.href), node = catalog.current();
                 if (!pacingCourse(window) || !node?.id || [...document.querySelectorAll('[id]')].filter(el => el.id === node.id).length !== 1) return null;
-                return JSON.stringify([pacingCourse(window),url.searchParams.get('clazzid') || url.searchParams.get('classId') || '',node.id,app._nodeTitle(node),app._catalogTopology(),url.origin,url.pathname]);
+                return JSON.stringify([pacingCourse(window),url.searchParams.get('clazzid') || url.searchParams.get('classId') || '',node.id]);
             } catch (_) { return null; }
         };
         let recoverySample = null;
@@ -2878,6 +2883,7 @@
         };
         app._recovery = createUnattendedRecoveryCoordinator(window, {
             identity: recoveryIdentity, safe: recoverySafe,
+            fingerprint: () => JSON.stringify([location.href, app._nodeTitle(catalog.current()), app._catalogTopology(), app._chapterOf(catalog.current())?.id || '', videoAdapter.cardFrame()?.id || '']),
             canReload: () => recoverySafe() && !app._entryCredit && !app._externalCompletion && !app._platformCompletion,
             notice: text => app._notify(text), fail: reason => app._block(reason),
             retry: stage => { if (stage === 1) { app._state = 'READY'; app.play(); } else app.run({ startup: true }); },
