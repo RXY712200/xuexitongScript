@@ -340,7 +340,7 @@
             for(const el of doc.querySelectorAll('video,audio'))if((!el.paused&&!el.ended)||el.seeking) {
                 const owned = media.tasks?.filter(task=>task.element===el && ['video','audio'].includes(task.kind));
                 const context=app._videoContext;
-                if(el.seeking || owned?.length!==1 || app._videoEl!==el || !app._isPlaying || app._playNode!==node ||
+                if(el.seeking || owned?.length!==1 || app._videoEl!==el || (!app._isPlaying && app._state!=='AUDIO_STARTING') || app._playNode!==node ||
                     !context || context.video!==el || context.generation!==app._generation || context.playerDocument!==el.ownerDocument ||
                     (context.source && context.source!==(el.currentSrc||el.getAttribute('src')||'')))unsafe=true;
             }
@@ -1179,6 +1179,7 @@
             },
             run({ startup = false, transition = false } = {}) {
                 if (!this._recoveryEntryAllowed()) return;
+                this._partialSuspended=false;
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
                 if (!transition || this._state !== 'WAITING_CATALOG') this._cancelTasks();
                 this._destroyed = false;
@@ -1289,6 +1290,7 @@
                 this._state = 'WAITING_STARTUP'; tick();
             },
             nextUnit() {
+                if(this._partialSession){this._waitPartialTasks();return;}
                 if (['ADVANCING', 'NAVIGATION_COOLDOWN', 'WAITING_STARTUP', 'WAITING_LIVE', 'READING_DOCUMENT', 'ACTION_PENDING', 'PAUSED_AUTOMATION'].includes(this._state) || this._nextUnitPending) return;
                 if (this._isChapterTest()) return this._advanceChapterTest();
                 if (!this._externalCompletion && !this._platformCompletion && this._state === 'READY_TO_ADVANCE' && !this._refreshVideoContext()) return this._block('视频任务身份无法确认');
@@ -1428,6 +1430,7 @@
                 if (detected) detected.textContent = `自动检测：${this._detectedKind || '尚未识别'} · ${this._state}`;
             },
             stopAutomation() {
+                this._partialSuspended=true;this._partialSession=null;
                 this._manualPermit = null; this._manualBusy = false; this._isPlaying = false;
                 this._state = 'PAUSED_AUTOMATION'; this._cancelTasks(); this._detachVideoEvents();
                 this._notify('已停止自动操作；可点击“重新自动检测”或选择任务后重试', '安全阻断');
@@ -1448,7 +1451,7 @@
                 const sameCard = oldCard && card.length === oldCard.length && card.every((value, index) => value === oldCard[index]);
                 if (!node || !this._catalogTopology() || ['WAITING_CATALOG','ADVANCING'].includes(this._state) ||
                     (this._observedLessonId && node.id !== this._observedLessonId && sameCard)) return { blocked: true, reason: '安全阻断：目录与内容切换尚未确认' };
-                if (this._verificationPresent() || this._isChapterTest() || scope?.invalid || ((!this._priorProof(node)) && (media.unsupported || media.inaccessible))) return { blocked: true, reason: '安全阻断：任务归属、媒体或验证条件无法确认' };
+                if (this._verificationPresent() || this._isChapterTest() || scope?.invalid || ((!this._priorProof(node)) && ((media.unsupported && !media.localExecutionEligible) || media.inaccessible))) return { blocked: true, reason: '安全阻断：任务归属、媒体或验证条件无法确认' };
                 const pending = media.tasks?.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 const task = scope?.tasks.find(task => !this._processedTasks.has(task.element));
                 const player = media.videos.find(el => !this._mediaDone(el));
@@ -1507,7 +1510,7 @@
             },
             _openNativeLink(task, scope, manual) {
                 const media = this._playableMedia();
-                if (!scope.validateScope() || media.unsupported || media.inaccessible || media.videos.length || this._verificationPresent()) return this._block('直播入口与任务范围不一致');
+                if (!scope.validateScope() || (media.unsupported && !media.localExecutionEligible) || media.inaccessible || media.videos.length || this._verificationPresent()) return this._block('直播入口与任务范围不一致');
                 this._state = 'WAITING_LIVE'; this._isPlaying = false;
                 this._detectedKind = '直播 / 回放';
                 if (gmLive && !gmLive.begin(this, task, scope, manual)) return;
@@ -1731,19 +1734,80 @@
                 }
                 return media;
             },
+            _partialEvent(type, task, reason, required = false) {
+                const journal=this._decisionJournal, session=this._partialSession;
+                if(!journal||!session)return !required;
+                const result=journal.append({lesson:session.reference,ordinal:task?.ordinal||0,type,kind:task?.kind||'unknown',reason,evidence:'owned-inventory'});
+                return result.durable || !required;
+            },
+            _partialSelect(media) {
+                let session=this._partialSession;
+                if(!session && !this._partialSuspended && !this._destroyed && !this._priorProof(catalog.current())){
+                    const plan=this._planningSnapshot();
+                    if(plan.globalSafety==='VERIFIED_PLANNING_ONLY'&&plan.validateScope()&&plan.tasks.some(t=>t.classification.startsWith('DEFERRED'))){
+                        if(plan.tasks.some(t=>t.classification==='LOADING'))return {loading:true};
+                        try { sessionStorage.setItem('xuexitong.v3.partial-pause.v1',JSON.stringify([plan.lesson.course,plan.lesson.id])); } catch (_) { return {invalid:true}; }
+                        session=this._partialSession={plan,credited:new Set(),started:new Set(),decisions:new Set(),reference:this._decisionJournal?.reference(catalog.current()),selected:null};
+                        this._partialEvent('INVENTORY_CONFIRMED',null,'known-owned');
+                        for(const task of plan.tasks)this._partialEvent('TASK_RECOGNIZED',task,task.kind==='unknown'?'isolated-unknown':'known-owned');
+                    }
+                }
+                if(!session)return null;
+                if(!session.plan.validateScope()){this._partialEvent('CONTEXT_INVALIDATED',null,'context-changed');return {invalid:true};}
+                for(const task of session.plan.tasks){
+                    if(task.classification.startsWith('DEFERRED')){
+                        if(!session.decisions.has(task.ordinal)){
+                            if(!this._partialEvent('TASK_DEFERRED',task,task.kind==='unknown'?'isolated-unknown':'recognition-only',true))return {invalid:true};
+                            session.decisions.add(task.ordinal);this._partialEvent('EXECUTION_CONTINUED',task,'known-owned');
+                        }
+                        continue;
+                    }
+                    if(task.classification!=='EXECUTABLE_KNOWN')return {invalid:true};
+                    const original=media.tasks?.find(t=>t.attachment===task.owner);
+                    const done=task.kind==='document'?this._processedTasks.has(task.owner):original?.element&&this._mediaDone(original.element);
+                    if(done&&original?.element&&!this._completedVideos.has(original.element)&&!session.credited.has(task.ordinal)){session.credited.add(task.ordinal);this._partialEvent('TASK_PLATFORM_CREDITED',task,'known-owned');}
+                    if(!done){session.selected=task;return {task,original};}
+                }
+                session.selected=null;return {waiting:true};
+            },
+            _waitPartialTasks() {
+                if(!this._partialSession)return false;
+                const media=this._discoverMedia(),choice=this._partialSelect(media);
+                if(choice?.invalid){this._block('部分执行归属或日志持久化失效');return true;}
+                if(!choice?.waiting)return false;
+                this._state='WAITING_MANUAL_TASKS';this._isPlaying=false;this._clearCheckInterval();this._recovery?.cancel('manual-wait');
+                this._partialEvent('LESSON_WAITING_MANUAL',null,'recognition-only');
+                const tasks=this._partialSession.plan.tasks.filter(t=>t.classification.startsWith('DEFERRED'));
+                this._notify(`尚有 ${tasks.length} 项需人工处理：`+tasks.map(t=>`${t.ordinal+1}.${t.kind}`).join('、'));return true;
+            },
+            recheckCurrentLesson() {
+                const session=this._partialSession;
+                if(!session){const plan=this._planningSnapshot();if(plan.globalSafety!=='VERIFIED_PLANNING_ONLY'||!plan.validateScope())return this._block('人工复核上下文无法确认');sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._recovery?.resumeExplicitly();this.run({startup:true});return;}
+                if(!session.plan.validateScope())return this._block('人工复核上下文已变化');
+                this._partialEvent('MANUAL_RECHECK',null,'context-changed');
+                if(this._priorProof(catalog.current())){sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._partialSession=null;this._priorChecked=null;this._state='READY';return this._checkPriorCompletion();}
+                if(!this._waitPartialTasks()){this._state='READY';this.play();}
+            },
             _playableMedia() {
-                const media = this._discoverMedia();
+                let media = this._discoverMedia();
+                const choice=this._partialSelect(media);
+                if(choice&&!choice.invalid){const known=media.tasks?.filter(t=>['video','audio','document'].includes(t.kind))||[];media={...media,tasks:known,localExecutionEligible:!!choice.task||!!choice.waiting,localReadinessEligible:!!choice.loading,partialWaiting:!!choice.waiting};}
                 // The public inventory retains videos/audio separately; the existing
                 // completion/recovery coordinator consumes one selected native media list.
                 const players = media.tasks ? media.tasks.filter(task => ['video', 'audio'].includes(task.kind) && task.element).map(task => task.element) : [...media.videos, ...(media.audios || [])];
                 return { ...media, videos: players };
             },
             _pacedIdentity(element, kind) {
+                const session=this._partialSession;
+                if(session?.plan.validateScope()){
+                    const task=session.plan.tasks.find(t=>t.kind===kind&&(t.owner===element||t.target===element));
+                    if(task&&task.classification==='EXECUTABLE_KNOWN')return {course:session.plan.lesson.course,lesson:session.plan.lesson.id,kind,inventory:session.plan.tasks.map(t=>t.kind).join(','),ordinal:task.ordinal};
+                }
                 const node = catalog.current();
                 const course = pacingCourse(window);
                 if (!course || !node?.id || [...document.querySelectorAll('[id]')].filter(el => el.id === node.id).length !== 1) return null;
                 const media = this._discoverMedia();
-                if (media.unsupported || media.inaccessible || media.pending) return null;
+                if ((media.unsupported && !media.localExecutionEligible) || media.inaccessible || media.pending) return null;
                 const items = media.tasks?.length ? media.tasks.map(t => ({ kind: t.kind, element: t.element, attachment: t.attachment })) :
                     [...(media.videos || []).map(element => ({ kind: 'video', element })), ...(media.audios || []).map(element => ({ kind: 'audio', element })),
                     ...(this._taskSet()?.tasks || [])];
@@ -1752,6 +1816,7 @@
                 return { course, lesson: node.id, kind, inventory: items.map(t => t.kind).join(','), ordinal: indexes[0] };
             },
             _recordPacedCompletion(element, kind, evidence) {
+                if(this._partialSession)this._partialEvent('TASK_LOCAL_COMPLETED',this._partialSession.plan.tasks.find(t=>t.owner===element||t.target===element),'known-owned');
                 const id = this._pacedIdentity(element, kind);
                 if (!id) { this._notify('内容已完成，但缺少稳定附件身份，未计入休息任务数'); return; }
                 this._pacing.recordCompletion(id, evidence);
@@ -1829,6 +1894,7 @@
                 } catch (_) { return false; }
             },
             _processSupportedTask() {
+                if(this._waitPartialTasks())return true;
                 if (this._isPlaying) return false;
                 const inventory = this._discoverAttachmentTask();
                 if (inventory === true) return true;
@@ -1892,6 +1958,7 @@
                 };
                 if (pending.kind === 'document') {
                     this._state = 'READING_DOCUMENT';
+                    if(this._partialSession)this._partialEvent('TASK_STARTED',this._partialSession.selected,'known-owned');
                     const viewport = pending.viewer || pending.element;
                     this._notify(`文档阅读区已确认：页面图元 ${viewport.querySelectorAll('img,canvas').length}，滚动距离 ${viewport.scrollHeight - viewport.clientHeight}px`, '正在执行');
                     try {
@@ -1926,7 +1993,7 @@
                 return true;
             },
             _classifyAttachmentReadiness(media) {
-                if (this._verificationPresent() || media.inaccessible || media.unsupported ||
+                if (this._verificationPresent() || media.inaccessible || (media.unsupported && !media.localExecutionEligible) ||
                     media.reasons?.some(reason => reason !== 'player-not-ready')) return 'blocked';
                 const root = videoAdapter.cardDocument();
                 const scope = platformTaskAdapter.discover({ document: root, node: catalog.current() });
@@ -1956,10 +2023,11 @@
             },
             _discoverAttachmentTask() {
                 const media = this._playableMedia();
+                if(media.partialWaiting){this._waitPartialTasks();return true;}
                 if (!media.tasks) return null;
                 if (this._classifyAttachmentReadiness(media) === 'loading') { this._waitForAttachmentReadiness(); return true; }
-                if (media.pending && !media.unsupported && !media.inaccessible) { this._waitForStartup(); return true; }
-                if (media.unsupported || media.inaccessible) { this._block((media.tasks?.find(task => task.executable === false)?.reason || '附件清单无法验证') + '：' + (media.reasons || []).filter(code => /^[a-z][a-z0-9-]{0,63}$/.test(code)).slice(0,5).join('、')); return true; }
+                if (media.pending && (!media.unsupported || media.localReadinessEligible) && !media.inaccessible) { this._waitForStartup(); return true; }
+                if ((media.unsupported && !media.localExecutionEligible) || media.inaccessible) { this._block((media.tasks?.find(task => task.executable === false)?.reason || '附件清单无法验证') + '：' + (media.reasons || []).filter(code => /^[a-z][a-z0-9-]{0,63}$/.test(code)).slice(0,5).join('、')); return true; }
                 const pending = media.tasks.find(task => task.kind === 'document' ? !this._processedTasks.has(task.attachment) : !this._mediaDone(task.element));
                 if (pending?.kind === 'document') {
                     const scope = this._taskSet();
@@ -1974,13 +2042,14 @@
                 return pending;
             },
             _verifyExternal(attempt) {
+                if(this._waitPartialTasks())return;
                 const record = this._externalCompletion;
                 if (!record?.localDone || !this._taskContextValid(record)) return this._block('本地任务完成上下文无效');
                 this._state = 'VERIFYING_COMPLETION';
                 const scope = this._taskSet();
                 if (!scope || scope.invalid) return this._block('任务范围无法验证');
                 const media = this._playableMedia();
-                if (media.inaccessible || media.unsupported || media.navigationSafe === false) return this._block('任务包含未知或不可访问的内容');
+                if (media.inaccessible || (media.unsupported && !media.localExecutionEligible) || (media.navigationSafe === false && !media.localExecutionEligible)) return this._block('任务包含未知或不可访问的内容');
                 if (scope.tasks.some(task => !this._processedTasks.has(task.element)) ||
                     media.videos.some(video => !this._mediaDone(video))) {
                     this._liveReturnPendingNavigation = false;
@@ -1994,6 +2063,7 @@
                 this.nextUnit();
             },
             _externalNavigationEligible(target) {
+                if(this._partialSession)return false;
                 const record = this._externalCompletion;
                 if (record?.kind === 'document' && !this._taskContextValid(record)) return false;
                 if (!record || this._isPlaying || !record.localDone || record.node !== catalog.current() ||
@@ -2001,11 +2071,12 @@
                 if (record.kind === 'assessment') return this._assessmentTarget(record.node) === target;
                 if (this._isChapterTest() || !this._taskContextValid(record) || this._targetAfter(record.node) !== target) return false;
                 const media = this._playableMedia();
-                if (media.inaccessible || media.unsupported || media.navigationSafe === false || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
+                if (media.inaccessible || (media.unsupported && !media.localExecutionEligible) || (media.navigationSafe === false && !media.localExecutionEligible) || record.scope.tasks.some(task => !this._processedTasks.has(task.element))) return false;
                 if ((record.kind === 'document' || this._hadLive || media.videos.length) && catalog.status(record.node) !== 'completed') return false;
                 return media.videos.every(video => (this._attachmentCredit(video) === 'platform-completed' || (video.ended && this._completedVideos.has(video))));
             },
             _navigationEligible(target) {
+                if(this._partialSession)return false;
                 if (this._platformCompletion) return this._priorCompletionValid(this._platformCompletion) && this._targetAfter(this._completionNode) === target && !this._isPlaying;
                 if (this._externalCompletion) return this._externalNavigationEligible(target);
                 if (!this._refreshVideoContext()) return false;
@@ -2106,7 +2177,7 @@
                     (!context.chapter?.isConnected && !context.chapterId && context.topology && this._catalogTopology() === context.topology));
                 if (!sameChapter) return false;
                 const media = this._playableMedia();
-                if (media.inaccessible || media.unsupported || !media.videos.includes(context.video)) return false;
+                if (media.inaccessible || (media.unsupported && !media.localExecutionEligible) || !media.videos.includes(context.video)) return false;
                 const source = context.video.currentSrc || context.video.getAttribute('src') || '';
                 if (context.source && source !== context.source) return false;
                 if (!context.source && source) context.source = source;
@@ -2157,6 +2228,7 @@
                 this._clearCheckInterval();
             },
             _block(reason) {
+                if(this._partialSession)this._partialEvent('GLOBAL_BLOCKED',this._partialSession.selected,'unsafe-scope');
                 this._recovery?.cancel('terminal-block');
                 this._state = 'BLOCKED';
                 this._isPlaying = false;
@@ -2195,8 +2267,8 @@
                     return this._block('完成事件与当前目录不匹配');
                 }
                 const tasks = this._playableMedia();
-                if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
-                if (tasks.navigationSafe === false) return this._block('未确认的任务内容禁止自动离开课节');
+                if (tasks.inaccessible || (tasks.unsupported && !tasks.localExecutionEligible)) return this._block('存在不可访问或不支持的媒体组件');
+                if ((tasks.navigationSafe === false && !tasks.localExecutionEligible)) return this._block('未确认的任务内容禁止自动离开课节');
                 if (!tasks.videos.includes(this._completionVideo)) return this._block('播放器已替换，完成状态不明确');
                 const next = tasks.videos.find(video => !this._mediaDone(video));
                 if (next) {
@@ -2226,6 +2298,8 @@
                 }
             },
             _startVideoMonitoring() {
+                const partial=this._partialSession, task=partial?.selected;
+                if(task&&!partial.started.has(task.ordinal)){partial.started.add(task.ordinal);this._partialEvent('TASK_STARTED',task,'known-owned');}
                 this._clearCheckInterval();
                 this._guardLastTime = 0;
                 this._guardLastWallTs = 0;
@@ -2364,6 +2438,7 @@
                 this._priorFailure = ''; return true;
             },
             _checkPriorCompletion() {
+                if(this._partialSession)return false;
                 if (this._videoContext || this._isPlaying) return false;
                 const node = catalog.current(), doc = videoAdapter.cardDocument();
                 if (!node || !doc || (this._priorChecked?.node === node && this._priorChecked.doc === doc) || !this._priorProof(node)) return false;
@@ -2412,7 +2487,7 @@
                     const media = this._playableMedia();
                     if (node !== catalog.current() || node?.id !== id || this._nodeTitle(node) !== title ||
                         (source && source !== (el.currentSrc || el.getAttribute('src') || '')) || doc !== videoAdapter.cardDocument() || href !== location.href ||
-                        !el.isConnected || media.unsupported || media.inaccessible || !media.videos.includes(el)) { cleanup(); return this._block('等待期间媒体任务已变化'); }
+                        !el.isConnected || (media.unsupported && !media.localExecutionEligible) || media.inaccessible || !media.videos.includes(el)) { cleanup(); return this._block('等待期间媒体任务已变化'); }
                     if (el.readyState >= 2) { cleanup(); this._state = 'READY'; this.play(actionReady); return; }
                     if (++tries >= 80) { cleanup(); return this._block('选中媒体未就绪，请手动加载后重试'); }
                     timer = setTimeout(tick, 250); this._timers.add(timer);
@@ -2507,7 +2582,7 @@
                         this._advanceChapterTest();
                         return;
                     }
-                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_DOCUMENT', 'WAITING_ATTACHMENT', 'WAITING_AUDIO_GESTURE', 'AUDIO_STARTING', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
+                    if (this._destroyed || ['BLOCKED', 'ADVANCING', 'WAITING_CATALOG', 'WAITING_STARTUP', 'WAITING_CREDIT', 'WAITING_MEDIA', 'WAITING_MANUAL_TASKS', 'WAITING_DOCUMENT', 'WAITING_ATTACHMENT', 'WAITING_AUDIO_GESTURE', 'AUDIO_STARTING', 'VERIFYING_PLATFORM_COMPLETION', 'VERIFYING_COMPLETION', 'NAVIGATION_COOLDOWN', 'WAITING_LIVE', 'READING_DOCUMENT', 'PAUSED_AUTOMATION', 'FINISHED'].includes(this._state)) return;
                     if (this._state === 'PLAYING' && !this._refreshVideoContext()) {
                         return this._block('当前播放页面或播放器已变化');
                     }
@@ -2516,7 +2591,7 @@
                     if (this._processSupportedTask()) return;
                     this._state = 'DISCOVERING';
                     const tasks = this._playableMedia();
-                    if (tasks.inaccessible || tasks.unsupported) return this._block('存在不可访问或不支持的媒体组件');
+                    if (tasks.inaccessible || (tasks.unsupported && !tasks.localExecutionEligible)) return this._block('存在不可访问或不支持的媒体组件');
                     const el = this._getVideoEl();
                     if (el == null) {
                         if (this._advanceLearningStep()) {
@@ -2884,7 +2959,7 @@
                     return null;
                 }
                 const tasks = this._playableMedia();
-                if (tasks.inaccessible || tasks.unsupported) {
+                if (tasks.inaccessible || (tasks.unsupported && !tasks.localExecutionEligible)) {
                     if (this._state !== 'BLOCKED') this._block('存在不可访问或不支持的媒体组件');
                     return null;
                 }
@@ -3055,7 +3130,10 @@
         window[APP_KEY] = app;
 
         try {
-            if (app._recoveryEntryAllowed()) { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
+            let partialPaused=false;
+            try { const saved=JSON.parse(sessionStorage.getItem('xuexitong.v3.partial-pause.v1')||'null');partialPaused=!!saved&&saved[0]===pacingCourse(window)&&saved[1]===catalog.current()?.id; } catch (_) { partialPaused=true; }
+            if(partialPaused){app.stopAutomation();app._state='WAITING_MANUAL_TASKS';app._notify('此前有未解决附件，请显式 recheckCurrentLesson() 重新核对；不会恢复历史播放完成证据');}
+            else if (app._recoveryEntryAllowed()) { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
         } catch (error) {
             console.error("%c脚本运行失败: ", "color:#F44336;font-weight:bold", error.message);

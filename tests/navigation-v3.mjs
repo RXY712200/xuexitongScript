@@ -2579,11 +2579,13 @@ try {
         assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
         assert.notEqual(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
     }));
-    for(const sequence of [['video','audio'],['audio','video'],['audio','document'],['document','audio'],['video','document','audio','document'],['audio','audio','video','document']])await check(`composable dispatcher ${sequence.join(' -> ')}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
+    for(const sequence of [['video','manual','audio'],['video','unknown','audio','document','video'],['unknown','video'],['video','unknown'],['unknown','unknown','video'],['video','audio'],['audio','video'],['audio','document'],['document','audio'],['video','document','audio','document'],['audio','audio','video','document']])await check(`composable dispatcher ${sequence.join(' -> ')}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
         await page.evaluate(({sequence,audioFixture})=>{
             app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';window.__mixed=[];
             Object.defineProperty(performance,'now',{configurable:true,value:()=>window.__clock});
-            for(const kind of sequence){const frame=root.createElement('iframe');frame.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[kind]);frame.style.height='150px';root.body.append(frame);const d=frame.contentDocument;
+            for(const kind of sequence){const frame=root.createElement('iframe');frame.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[kind]||'');frame.style.height='150px';root.body.append(frame);const d=frame.contentDocument;
+                if(kind==='manual'){frame.setAttribute('data','{"module":"insertflash"}');d.body.innerHTML='<object type="application/x-shockwave-flash"></object>';window.__mixed.push({kind,frame});continue;}
+                if(kind==='unknown'){d.body.innerHTML='<p>Independent unsupported task</p>';window.__mixed.push({kind,frame});continue;}
                 if(kind==='document'){d.body.style.margin='0';d.body.innerHTML='<canvas width="100" height="1200"></canvas>';window.__mixed.push({kind,frame});continue;}
                 d.body.innerHTML=kind==='audio'?audioFixture:'<video id="video_html5_api"></video>';const el=d.querySelector(kind==='audio'?'#audio_html5_api':'video');el.__paused=true;el.__ended=false;el.__plays=0;
                 Object.defineProperties(el,{readyState:{get:()=>4},paused:{get:()=>el.__paused},ended:{get:()=>el.__ended}});el.play=()=>{el.__paused=false;el.__plays++;return Promise.resolve();};window.__mixed.push({kind,frame,el});
@@ -2593,7 +2595,10 @@ try {
             const s=structuredClone(app.settings);s.features.document=true;s.randomDelaysEnabled=false;s.rest.enabled=false;app.updateSettings(s);app.run();
         },{sequence,audioFixture});
         for(let i=0;i<sequence.length;i++){
+            if(['unknown','manual'].includes(sequence[i]))continue;
+            await page.evaluate(async()=>{for(let n=0;n<6;n++)await Promise.resolve();});
             if(sequence[i]==='document'){
+                await page.evaluate(async()=>{await Promise.resolve();await Promise.resolve();});
                 assert.equal(await state(page),'READING_DOCUMENT');
                 await page.evaluate(async()=>{for(let n=0;n<90&&app._state==='READING_DOCUMENT';n++){const entry=[...window.__timeoutDelays].sort((a,b)=>a[1]-b[1])[0];if(!entry)break;const [id,delay]=entry;const fn=window.__timeouts.get(id);window.__timeouts.delete(id);window.__timeoutDelays.delete(id);window.__clock+=delay;fn();await Promise.resolve();}});
             }else{
@@ -2601,6 +2606,13 @@ try {
                 await page.evaluate(i=>{const el=window.__mixed[i].el;el.__paused=true;el.__ended=true;el.dispatchEvent(new Event('ended'));},i);await flush(page,2);
             }
             assert.equal(await page.evaluate(()=>document.querySelector('.posCatalog_active').id),'node0');
+        }
+        if(sequence.includes('unknown')||sequence.includes('manual')){
+            assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+            const count=await page.evaluate(()=>app._pacing.getStatus().count);assert.equal(count,sequence.filter(k=>!['unknown','manual'].includes(k)).length);
+            await page.evaluate(()=>{app._decisionJournal.clear();app.recheckCurrentLesson();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+            await page.evaluate(()=>{const n=document.querySelector('#node0');n.querySelector('input')?.remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');app.recheckCurrentLesson();});await flush(page,1);
+            assert.notEqual(await state(page),'WAITING_MANUAL_TASKS');
         }
     }));
     await check('optional adapters recognize owned public structures without execution or navigation',()=>using([outer(),0,false,null,false,'pacing'],async page=>{
@@ -2669,6 +2681,11 @@ try {
                 return {safety,valid,resumed,changed,misleading};
             });
         },{kind,audioFixture});assert.deepEqual(result,{safety:'VERIFIED_PLANNING_ONLY',valid:true,resumed:true,changed:false,misleading:'GLOBAL_UNSAFE'});
+    }));
+    await check('partial session refuses crossing when required journal write fails',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument,v=root.querySelector('video');root.body.innerHTML='<iframe class="ans-attach-online"></iframe><iframe class="ans-attach-online ans-insertvideo-online"></iframe>';const frames=root.querySelectorAll('iframe');frames[0].contentDocument.body.innerHTML='<p>Independent unknown</p>';frames[1].contentDocument.body.append(v);v.__paused=true;window.__blockedPlayer=v;app._decisionJournal={reference:()=> 'ref-00000000-0000-4000-8000-000000000000',append:()=>({durable:false})};app.run();});
+        assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__blockedPlayer.__plays),1); // Only initial fixture playback, never crossed the unknown.
+        assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
