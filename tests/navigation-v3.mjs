@@ -2610,7 +2610,13 @@ try {
         if(sequence.includes('unknown')||sequence.includes('manual')){
             assert.equal(await state(page),'WAITING_MANUAL_TASKS');
             const count=await page.evaluate(()=>app._pacing.getStatus().count);assert.equal(count,sequence.filter(k=>!['unknown','manual'].includes(k)).length);
-            await page.evaluate(()=>{app._decisionJournal.clear();app.recheckCurrentLesson();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+            const plays=await page.evaluate(()=>window.__mixed.filter(t=>t.el).map(t=>t.el.__plays));
+            await page.evaluate(()=>{app.run();app.stopAutomation();app.run();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');assert.deepEqual(await page.evaluate(()=>window.__mixed.filter(t=>t.el).map(t=>t.el.__plays)),plays);
+            await page.evaluate(()=>{const item=window.__mixed.find(t=>['unknown','manual'].includes(t.kind));const copy=item.frame.cloneNode(true);item.frame.replaceWith(copy);item.frame=copy;app._decisionJournal.clear();app.recheckCurrentLesson();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+            if(sequence.join(',')==='unknown,video'){
+                await page.addScriptTag({content:source});await page.evaluate(()=>{for(const fn of [...window.__intervals.values()])fn();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+                assert.deepEqual(await page.evaluate(()=>window.__mixed.filter(t=>t.el).map(t=>t.el.__plays)),plays);
+            }
             await page.evaluate(()=>{const n=document.querySelector('#node0');n.querySelector('input')?.remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');app.recheckCurrentLesson();});await flush(page,1);
             assert.notEqual(await state(page),'WAITING_MANUAL_TASKS');
         }
@@ -2686,6 +2692,18 @@ try {
         await page.evaluate(()=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument,v=root.querySelector('video');root.body.innerHTML='<iframe class="ans-attach-online"></iframe><iframe class="ans-attach-online ans-insertvideo-online"></iframe>';const frames=root.querySelectorAll('iframe');frames[0].contentDocument.body.innerHTML='<p>Independent unknown</p>';frames[1].contentDocument.body.append(v);v.__paused=true;window.__blockedPlayer=v;app._decisionJournal={reference:()=> 'ref-00000000-0000-4000-8000-000000000000',append:()=>({durable:false})};app.run();});
         assert.equal(await state(page),'BLOCKED');assert.equal(await page.evaluate(()=>window.__blockedPlayer.__plays),1); // Only initial fixture playback, never crossed the unknown.
         assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
+    }));
+    await check('partial pause survives unresolved catalog identity and clears only verified mismatch',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        const result=await page.evaluate(()=>{app.stopAutomation();const key='xuexitong.v3.partial-pause.v1',marker=JSON.stringify(['synthetic','node0']);sessionStorage.setItem(key,marker);const n=document.querySelector('#node0');n.classList.remove('posCatalog_active');const missing=app._partialPauseApplies();n.classList.add('posCatalog_active');const matching=app._partialPauseApplies();sessionStorage.setItem(key,'broken');const malformed=app._partialPauseApplies();sessionStorage.setItem(key,JSON.stringify(['different','node0']));const mismatch=app._partialPauseApplies();return{missing,matching,malformed,mismatch,cleared:sessionStorage.getItem(key)===null};});
+        assert.deepEqual(result,{missing:true,matching:true,malformed:true,mismatch:false,cleared:true});
+    }));
+    await check('partial actual page reload pauses before active catalog identity is ready',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();sessionStorage.setItem('xuexitong.v3.partial-pause.v1',JSON.stringify(['synthetic','node0']));});
+        await page.context().route('https://course.test/course?courseId=synthetic',route=>route.fulfill({contentType:'text/html',body:outer().replace('posCatalog_active','')}));
+        await page.reload();await page.addScriptTag({content:jquery});await page.addScriptTag({content:source});await page.waitForFunction(()=>!!window.app);
+        assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+        await page.evaluate(()=>{document.querySelector('#node0').classList.add('posCatalog_active');app.run({startup:true});});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+        assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;

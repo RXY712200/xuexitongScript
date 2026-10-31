@@ -1156,7 +1156,19 @@
                 this._notify(status.stopped ? '用户已停止自动操作，请明确重新自动检测' : '当前小节自动恢复已终止；不会再次尝试，请手动重新检测');
                 return false;
             },
+            _partialPauseApplies() {
+                try {
+                    const raw=sessionStorage.getItem('xuexitong.v3.partial-pause.v1');if(!raw)return false;
+                    const saved=JSON.parse(raw),node=catalog.current(),course=pacingCourse(window);
+                    if(!Array.isArray(saved)||saved.length!==2||!saved.every(x=>typeof x==='string'&&x.length>0))return true;
+                    if(!course||!node?.id||!node.isConnected||!this._catalogTopology()||[...document.querySelectorAll('[id]')].filter(el=>el.id===node.id).length!==1)return true;
+                    if(saved[0]===course&&saved[1]===node.id)return true;
+                    sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');return false;
+                }catch(_){return true;}
+            },
             run({ startup = false, transition = false } = {}) {
+                if(this._partialPauseApplies()){this.stopAutomation();this._state='WAITING_MANUAL_TASKS';this._notify('未解决附件等待显式 recheckCurrentLesson()；普通运行不会恢复历史本地完成');return;}
+                this._partialSession=null;
                 if (!this._recoveryEntryAllowed()) return;
                 this._partialSuspended=false;
                 console.log("%c=== 学习通自动刷课脚本 V3 优化版启动 ===", "color:#4CAF50;font-size:16px;font-weight:bold");
@@ -1726,7 +1738,7 @@
                     if(plan.globalSafety==='VERIFIED_PLANNING_ONLY'&&plan.validateScope()&&plan.tasks.some(t=>t.classification.startsWith('DEFERRED'))){
                         if(plan.tasks.some(t=>t.classification==='LOADING'))return {loading:true};
                         try { sessionStorage.setItem('xuexitong.v3.partial-pause.v1',JSON.stringify([plan.lesson.course,plan.lesson.id])); } catch (_) { return {invalid:true}; }
-                        session=this._partialSession={plan,credited:new Set(),started:new Set(),decisions:new Set(),reference:this._decisionJournal?.reference(catalog.current()),selected:null};
+                        session=this._partialSession={plan,topology:this._catalogTopology(),credited:new Set(),started:new Set(),decisions:new Set(),reference:this._decisionJournal?.reference(catalog.current()),selected:null};
                         this._partialEvent('INVENTORY_CONFIRMED',null,'known-owned');
                         for(const task of plan.tasks)this._partialEvent('TASK_RECOGNIZED',task,task.kind==='unknown'?'isolated-unknown':'known-owned');
                     }
@@ -1760,12 +1772,16 @@
                 this._notify(`尚有 ${tasks.length} 项需人工处理：`+tasks.map(t=>`${t.ordinal+1}.${t.kind}`).join('、'));return true;
             },
             recheckCurrentLesson() {
-                const session=this._partialSession;
-                if(!session){const plan=this._planningSnapshot();if(plan.globalSafety!=='VERIFIED_PLANNING_ONLY'||!plan.validateScope())return this._block('人工复核上下文无法确认');sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._recovery?.resumeExplicitly();this.run({startup:true});return;}
-                if(!session.plan.validateScope())return this._block('人工复核上下文已变化');
+                const old=this._partialSession, fresh=this._planningSnapshot();
+                let saved;try{saved=JSON.parse(sessionStorage.getItem('xuexitong.v3.partial-pause.v1')||'null');}catch(_){return this._block('人工复核暂停记录无效');}
+                const identity=old?.plan.lesson;
+                if(fresh.globalSafety!=='VERIFIED_PLANNING_ONLY'||!fresh.validateScope()||
+                    (identity&&(identity.course!==fresh.lesson.course||identity.id!==fresh.lesson.id||identity.title!==fresh.lesson.title||old.topology!==this._catalogTopology()))||
+                    (saved&&(!Array.isArray(saved)||saved[0]!==fresh.lesson.course||saved[1]!==fresh.lesson.id)))return this._block('人工复核课程身份或安全条件无法确认');
                 this._partialEvent('MANUAL_RECHECK',null,'context-changed');
-                if(this._priorProof(catalog.current())){sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._partialSession=null;this._priorChecked=null;this._state='READY';return this._checkPriorCompletion();}
-                if(!this._waitPartialTasks()){this._state='READY';this.play();}
+                this._cancelTasks();this._detachVideoEvents();this._partialSession=null;this._partialSuspended=true;
+                if(!this._priorProof(catalog.current())){this._state='WAITING_MANUAL_TASKS';this._notify('附件已重新发现，但平台尚未确认整课完成；保持人工等待，不重放历史任务');return;}
+                sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._recovery?.resumeExplicitly();this.run({startup:true});
             },
             _playableMedia() {
                 let media = this._discoverMedia();
@@ -3109,8 +3125,7 @@
         window[APP_KEY] = app;
 
         try {
-            let partialPaused=false;
-            try { const saved=JSON.parse(sessionStorage.getItem('xuexitong.v3.partial-pause.v1')||'null');partialPaused=!!saved&&saved[0]===pacingCourse(window)&&saved[1]===catalog.current()?.id; } catch (_) { partialPaused=true; }
+            const partialPaused=app._partialPauseApplies();
             if(partialPaused){app.stopAutomation();app._state='WAITING_MANUAL_TASKS';app._notify('此前有未解决附件，请显式 recheckCurrentLesson() 重新核对；不会恢复历史播放完成证据');}
             else if (app._recoveryEntryAllowed()) { if (!gmLive?.restore(app)) app.run({ startup: true }); app._recovery.observe(); }
             if (app.settings.features.background && !app._pageGuards) app._bindPageGuards();
