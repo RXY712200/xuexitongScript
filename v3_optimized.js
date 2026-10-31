@@ -1412,6 +1412,7 @@
                 this._pageGuards = null;
             },
             _notify(message, status = '') {
+                try { this._refreshDiagnostics?.(); } catch (_) { /* Diagnostics must not interrupt playback or safety notices. */ }
                 this._lastNotice = message; if (status) this._attemptStatus = status;
                 const output = this._noticePanel?.shadowRoot?.querySelector('[role=status]');
                 if (output && output.textContent !== message) output.textContent = message;
@@ -1448,6 +1449,41 @@
                 const player = media.videos.find(el => !this._mediaDone(el));
                 const kind = pending?.kind || task?.kind || (player ? player.tagName === 'AUDIO' ? 'audio' : 'video' : null);
                 return { kind, task, player, scope, media, completed: !!catalog.current() && this._priorProof(catalog.current()) };
+            },
+            _diagnosticReport() {
+                const session=this._partialSession, valid=!!session?.plan.validateScope();
+                const state=/^[A-Z_]{1,40}$/.test(this._state)?this._state:'UNKNOWN';
+                const tasks=valid?session.plan.tasks.map(task=>({ordinal:task.ordinal+1,kind:task.kind,classification:task.classification,reason:task.reason,
+                    locallyProcessed:task.classification==='EXECUTABLE_KNOWN'&&(task.kind==='document'?this._processedTasks.has(task.owner):this._completedVideos.has(task.target))})):null;
+                return {version:'3.4.0',session:this._decisionJournal?.reference?.(this)||null,generatedAt:new Date().toISOString(),state,inventory:tasks,
+                    inventoryStatus:valid?'current':'stale-or-unavailable',platformCredit:this._priorProof(catalog.current())===true,
+                    events:this._decisionJournal?.read?.()||[]};
+            },
+            _appendDiagnostics(section) {
+                const details=document.createElement('details');details.dataset.diagnostics='';
+                const summary=document.createElement('summary');summary.textContent='任务记录与诊断';details.append(summary);
+                const output=document.createElement('p'),history=document.createElement('pre'),status=document.createElement('p'),fallback=document.createElement('textarea');
+                output.dataset.diagnosticSummary='';history.style.cssText='white-space:pre-wrap;max-height:120px;overflow:auto;font-size:11px';fallback.hidden=true;fallback.readOnly=true;fallback.setAttribute('aria-label','手动复制诊断报告');fallback.style.width='100%';
+                const refresh=()=>{
+                    const report=this._diagnosticReport(),tasks=report.inventory;
+                    const labels={WAITING_MANUAL_TASKS:'等待人工处理',BLOCKED:'安全阻断',PAUSED_AUTOMATION:'已暂停',PLAYING:'运行中',READING_DOCUMENT:'运行中',FINISHED:'已结束'};
+                    const deferred=tasks?.filter(t=>t.classification.startsWith('DEFERRED'));
+                    output.textContent=`状态：${labels[report.state]||'检测中'}；本地已处理：${tasks?tasks.filter(t=>t.locallyProcessed).length:'未知'}；未解决：${deferred?deferred.length:'未知'}；整课平台信用：${report.platformCredit?'已观察确认':'未确认'}。`+
+                        (tasks?deferred.map(t=>`${t.ordinal}.${t.kind}：${t.reason==='isolated-unknown'?'独立未知附件，需人工处理':'已识别，缺少执行证据'}`).join('；'):'等待重新检测；不能从历史日志恢复完成状态');
+                    if(details.open)history.textContent=report.events.slice(-8).map(e=>`${e.type} · ${e.ordinal+1}.${e.kind} · ${e.reason}`).join('\n')||'暂无记录';
+                };
+                for(const [action,label]of [['copy','复制诊断报告'],['clear','清除诊断历史'],['recheck','重新核对当前小节']]){
+                    const button=document.createElement('button');button.type='button';button.dataset.diagnosticAction=action;button.textContent=label;
+                    button.onclick=async event=>{
+                        if(!event.isTrusted)return;
+                        if(action==='clear'){status.textContent=this._decisionJournal?.clear()?'诊断历史已清除；任务状态保持不变':'清除失败';refresh();return;}
+                        if(action==='recheck'){this.recheckCurrentLesson();refresh();return;}
+                        const text=JSON.stringify(this._diagnosticReport(),null,2);
+                        try{await window.navigator.clipboard.writeText(text);status.textContent='已复制脱敏诊断报告';fallback.hidden=true;}
+                        catch(_){fallback.value=text;fallback.hidden=false;fallback.focus();fallback.select();status.textContent='剪贴板不可用，请选中下方报告手动复制';}
+                    };details.append(button);
+                }
+                details.append(output,history,status,fallback);details.addEventListener('toggle',refresh);section.append(details);this._refreshDiagnostics=refresh;refresh();
             },
             _appendTaskControls(section) {
                 const details = document.createElement('details'); details.dataset.taskControls = '';
@@ -1586,6 +1622,7 @@
                     }
                     root.querySelector('[data-status]').textContent = this._settingsMessage || '设置仅存本机；节奏记录使用课程与附件标识，不保存账号或媒体链接';
                     this._appendTaskControls(root.querySelector('section'));
+                    this._appendDiagnostics(root.querySelector('section'));
                     root.querySelector('details').addEventListener('toggle', event => {
                         this.settings.collapsed = !event.target.open;
                         try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(validateSettings(this.settings))); } catch (_) { /* Page-only settings remain usable. */ }
@@ -1728,7 +1765,7 @@
             _partialEvent(type, task, reason, required = false) {
                 const journal=this._decisionJournal, session=this._partialSession;
                 if(!journal||!session)return !required;
-                const result=journal.append({lesson:session.reference,ordinal:task?.ordinal||0,type,kind:task?.kind||'unknown',reason,evidence:'owned-inventory'});
+                const result=journal.append({lesson:session.reference,ordinal:task?.ordinal||0,type,kind:task?.kind||'unknown',reason,evidence:type==='TASK_LOCAL_COMPLETED'?'local-operation':type==='TASK_PLATFORM_CREDITED'?'platform-marker':'owned-inventory'});
                 return result.durable || !required;
             },
             _partialSelect(media) {

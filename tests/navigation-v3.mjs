@@ -2579,7 +2579,7 @@ try {
         assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
         assert.notEqual(await page.evaluate(()=>app._recovery.getStatus().stage),'terminal');
     }));
-    for(const sequence of [['video','manual','audio'],['video','unknown','audio','document','video'],['unknown','video'],['video','unknown'],['unknown','unknown','video'],['video','audio'],['audio','video'],['audio','document'],['document','audio'],['video','document','audio','document'],['audio','audio','video','document']])await check(`composable dispatcher ${sequence.join(' -> ')}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
+    for(const sequence of [['video','manual','audio'],['video','unknown','audio','document','video'],['unknown','video'],['video','unknown'],['unknown','unknown','video'],['video','audio','document'],['video','audio'],['audio','video'],['audio','document'],['document','audio'],['video','document','audio','document'],['audio','audio','video','document']])await check(`composable dispatcher ${sequence.join(' -> ')}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
         await page.evaluate(({sequence,audioFixture})=>{
             app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';window.__mixed=[];
             Object.defineProperty(performance,'now',{configurable:true,value:()=>window.__clock});
@@ -2610,6 +2610,7 @@ try {
         if(sequence.includes('unknown')||sequence.includes('manual')){
             assert.equal(await state(page),'WAITING_MANUAL_TASKS');
             const count=await page.evaluate(()=>app._pacing.getStatus().count);assert.equal(count,sequence.filter(k=>!['unknown','manual'].includes(k)).length);
+            assert.equal(await page.evaluate(()=>app._decisionJournal.read().filter(e=>e.type==='TASK_LOCAL_COMPLETED').every(e=>e.evidence==='local-operation')),true);
             const plays=await page.evaluate(()=>window.__mixed.filter(t=>t.el).map(t=>t.el.__plays));
             await page.evaluate(()=>{app.run();app.stopAutomation();app.run();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');assert.deepEqual(await page.evaluate(()=>window.__mixed.filter(t=>t.el).map(t=>t.el.__plays)),plays);
             await page.evaluate(()=>{const item=window.__mixed.find(t=>['unknown','manual'].includes(t.kind));const copy=item.frame.cloneNode(true);item.frame.replaceWith(copy);item.frame=copy;app._decisionJournal.clear();app.recheckCurrentLesson();});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
@@ -2640,7 +2641,7 @@ try {
         await page.evaluate(kind=>{history.replaceState({},'','?courseId=synthetic');app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';const f=root.createElement('iframe');f.className='ans-attach-online';f.setAttribute('data',JSON.stringify({module:kind==='legacy-flash'?'insertflash':'insertbook'}));f.src='https://mooc1.chaoxing.com/readsvr/book/mooc?timing=60';root.body.append(f);window.__additionalOwner=f;},kind);
         await page.waitForFunction(()=>window.__additionalOwner.contentDocument?.URL.includes('/readsvr/book/mooc'));
         const result=await page.evaluate(()=>{const m=app._discoverMedia();window.__additionalTask=m.tasks?.find(t=>t.executable===false);app.run();return {k:window.__additionalTask?.kind,state:app._state,notice:app._lastNotice,count:app._pacing.getStatus().count};});
-        assert.equal(result.k,kind);assert.equal(result.state,'BLOCKED');assert.ok(result.notice.includes('manual-'+kind));assert.equal(result.count,0);assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
+        assert.equal(result.k,kind);assert.equal(result.state,'WAITING_MANUAL_TASKS');assert.ok(result.notice.includes(kind));assert.equal(result.count,0);assert.equal(await page.evaluate(()=>app._actions.pending.has('navigation')),false);
         assert.equal(await page.evaluate(()=>app._planningSnapshot().tasks.find(t=>t.kind===window.__additionalTask.kind)?.classification),'DEFERRED_RECOGNIZED');
         const recognitionChanged=await page.evaluate(({kind,markup})=>{const plan=app._planningSnapshot(),f=window.__additionalOwner,d=f.contentDocument;const valid=plan.validateScope();
             if(kind==='legacy-flash')f.setAttribute('data','{}');else if(kind==='book-reader')d.querySelector('#ReadWeb').remove();else if(kind==='timed-reader')d.querySelector('#pagejump').remove();else if(kind==='audio-slides')d.querySelector('.swiper-slide').remove();else d.querySelector('#hyperlink').remove();
@@ -2649,7 +2650,7 @@ try {
         for(const known of ['video','audio','document']){
             const mixed=await page.evaluate(({known,audioFixture})=>{const root=window.__additionalOwner.ownerDocument;const f=root.createElement('iframe');f.className='ans-attach-online '+({video:'ans-insertvideo-online',audio:'ans-insertaudio',document:'insertdoc-online-pdf'}[known]);root.body.insertBefore(f,window.__additionalOwner);f.contentDocument.body.innerHTML=known==='audio'?audioFixture:known==='video'?'<video id="video_html5_api"></video>':'<canvas height="1200"></canvas>';
                 app._recovery.resumeExplicitly();app.run();const m=app._discoverMedia();const row={kinds:m.tasks.map(t=>t.kind),claimed:!!window.__xuexitongTaskSupport.inspectAdditionalAttachment(f,0,root),state:app._state,count:app._pacing.getStatus().count,nav:app._actions.pending.has('navigation')};app.stopAutomation();f.remove();return row;
-            },{known,audioFixture});assert.deepEqual(mixed.kinds,[known,kind]);assert.equal(mixed.claimed,false);assert.equal(mixed.state,'BLOCKED');assert.equal(mixed.count,0);assert.equal(mixed.nav,false);
+            },{known,audioFixture});assert.deepEqual(mixed.kinds,[known,kind]);assert.equal(mixed.claimed,false);assert.ok(['PLAYING','AUDIO_STARTING','READING_DOCUMENT','WAITING_STARTUP','WAITING_DOCUMENT','WAITING_ATTACHMENT','WAITING_MANUAL_TASKS'].includes(mixed.state),mixed.state);assert.equal(mixed.count,0);assert.equal(mixed.nav,false);
         }
         const stale=await page.evaluate(()=>{const n=document.querySelector('.posCatalog_active');const old=n.id;n.id='different-lesson';const valid=window.__additionalTask.validateScope();n.id=old;return valid;});assert.equal(stale,false);
         for(const variant of ['missing','near-match','metadata','inaccessible']){
@@ -2718,6 +2719,17 @@ try {
         if(mode==='credit')assert.ok(['ADVANCING','WAITING_CATALOG','NAVIGATION_COOLDOWN','VERIFYING_PLATFORM_COMPLETION'].includes(await state(page)),await state(page));
         else assert.equal(await state(page),mode==='no-credit'?'WAITING_MANUAL_TASKS':'BLOCKED');
         assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
+    }));
+    await check('diagnostics mounted UI copy fallback clear privacy and explicit recheck',()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online"></iframe>';root.querySelector('iframe').contentDocument.body.innerHTML='<p>SECRET_STUDENT_TOKEN https://private.invalid/?token=secret</p>';app.run();app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-diagnostics]').open=true;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>Promise.reject(Error('denied'))}});});
+        const host=page.locator('#xuexitong-v3-settings');assert.equal(await host.locator('[data-diagnostics]').count(),1);assert.match(await host.locator('[data-diagnostic-summary]').textContent(),/未解决：1/);
+        await host.locator('[data-diagnostic-action="copy"]').click();const text=await host.locator('textarea[aria-label="手动复制诊断报告"]').inputValue();assert.ok(text.includes('WAITING_MANUAL_TASKS'));assert.ok(!text.includes('SECRET_STUDENT_TOKEN'));assert.ok(!text.includes('private.invalid'));assert.ok(!text.includes('courseId'));assert.ok(!text.includes('<p>'));
+        const marker=await page.evaluate(()=>sessionStorage.getItem('xuexitong.v3.partial-pause.v1'));await host.locator('[data-diagnostic-action="clear"]').click();assert.equal(await page.evaluate(()=>app._decisionJournal.read().length),0);assert.equal(await state(page),'WAITING_MANUAL_TASKS');assert.equal(await page.evaluate(()=>sessionStorage.getItem('xuexitong.v3.partial-pause.v1')),marker);
+        await host.locator('[data-diagnostic-action="recheck"]').click();assert.equal(await state(page),'WAITING_MANUAL_TASKS');assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
+    }));
+    await check('diagnostics clear and copy preserve unrelated managed playback',()=>using([outer(),1,false,null,false,'pacing'],async page=>{
+        const plays=await page.evaluate(()=>app._videoEl.__plays);await page.evaluate(()=>{app._settingsPanel.shadowRoot.querySelector('details').open=true;app._settingsPanel.shadowRoot.querySelector('[data-diagnostics]').open=true;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:text=>{window.__copiedDiagnostics=text;return Promise.resolve();}}});});
+        const host=page.locator('#xuexitong-v3-settings');await host.locator('[data-diagnostic-action="copy"]').click();await host.locator('[data-diagnostic-action="clear"]').click();assert.equal(await state(page),'PLAYING');assert.equal(await page.evaluate(()=>app._videoEl.__plays),plays);assert.equal(await page.evaluate(()=>JSON.parse(window.__copiedDiagnostics).inventoryStatus),'stale-or-unavailable');
     }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
