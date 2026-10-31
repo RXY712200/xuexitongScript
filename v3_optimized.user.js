@@ -1759,7 +1759,7 @@
                     if(plan.globalSafety==='VERIFIED_PLANNING_ONLY'&&plan.validateScope()&&plan.tasks.some(t=>t.classification.startsWith('DEFERRED'))){
                         if(plan.tasks.some(t=>t.classification==='LOADING'))return {loading:true};
                         try { sessionStorage.setItem('xuexitong.v3.partial-pause.v1',JSON.stringify([plan.lesson.course,plan.lesson.id])); } catch (_) { return {invalid:true}; }
-                        session=this._partialSession={plan,topology:this._catalogTopology(),credited:new Set(),started:new Set(),decisions:new Set(),reference:this._decisionJournal?.reference(catalog.current()),selected:null};
+                        session=this._partialSession={plan,href:location.href,topology:this._catalogTopology(),credited:new Set(),started:new Set(),decisions:new Set(),reference:this._decisionJournal?.reference(catalog.current()),selected:null};
                         this._partialEvent('INVENTORY_CONFIRMED',null,'known-owned');
                         for(const task of plan.tasks)this._partialEvent('TASK_RECOGNIZED',task,task.kind==='unknown'?'isolated-unknown':'known-owned');
                     }
@@ -1793,15 +1793,27 @@
                 this._notify(`尚有 ${tasks.length} 项需人工处理：`+tasks.map(t=>`${t.ordinal+1}.${t.kind}`).join('、'));return true;
             },
             recheckCurrentLesson() {
-                const old=this._partialSession, fresh=this._planningSnapshot();
+                const old=this._partialSession,node=catalog.current(),course=pacingCourse(window),doc=videoAdapter.cardDocument(),topology=this._catalogTopology();
                 let saved;try{saved=JSON.parse(sessionStorage.getItem('xuexitong.v3.partial-pause.v1')||'null');}catch(_){return this._block('人工复核暂停记录无效');}
                 const identity=old?.plan.lesson;
-                if(fresh.globalSafety!=='VERIFIED_PLANNING_ONLY'||!fresh.validateScope()||
-                    (identity&&(identity.course!==fresh.lesson.course||identity.id!==fresh.lesson.id||identity.title!==fresh.lesson.title||old.topology!==this._catalogTopology()))||
-                    (saved&&(!Array.isArray(saved)||saved[0]!==fresh.lesson.course||saved[1]!==fresh.lesson.id)))return this._block('人工复核课程身份或安全条件无法确认');
+                if(!course||!node?.id||!node.isConnected||!doc||!topology||[...document.querySelectorAll('[id]')].filter(el=>el.id===node.id).length!==1||
+                    (identity&&(identity.course!==course||identity.id!==node.id||identity.title!==this._nodeTitle(node)||old.topology!==topology||old.href!==location.href||old.plan.frame!==videoAdapter.cardFrame()||old.plan.document!==doc))||
+                    (saved&&(!Array.isArray(saved)||saved.length!==2||saved[0]!==course||saved[1]!==node.id)))return this._block('人工复核课程身份或安全条件无法确认');
+                const credited=this._priorProof(node);
+                if(credited){
+                    const record={node,doc,id:node.id,topology,chapter:this._chapterOf(node),generation:this._generation,href:location.href,title:this._currentStepTitle(),name:this._nodeTitle(node)};
+                    const media=videoAdapter.discover();
+                    if(media.documents.some(d=>[...d.querySelectorAll('video,audio')].some(el=>!el.paused&&!el.ended||el.seeking))||!this._priorCompletionValid(record))return this._block('整课信用存在，但当前安全或身份验证未通过');
+                }else{
+                    const fresh=this._planningSnapshot();
+                    // Missing owners never establish completion or authorize execution.
+                    if(fresh.globalSafety!=='VERIFIED_PLANNING_ONLY'||!fresh.validateScope()){
+                        this._cancelTasks();this._detachVideoEvents();this._partialSession=null;this._partialSuspended=true;this._state='WAITING_MANUAL_TASKS';this._notify('附件范围尚不可验证，且平台未确认整课完成；保持人工等待');return;
+                    }
+                }
                 this._partialEvent('MANUAL_RECHECK',null,'context-changed');
                 this._cancelTasks();this._detachVideoEvents();this._partialSession=null;this._partialSuspended=true;
-                if(!this._priorProof(catalog.current())){this._state='WAITING_MANUAL_TASKS';this._notify('附件已重新发现，但平台尚未确认整课完成；保持人工等待，不重放历史任务');return;}
+                if(!credited){this._state='WAITING_MANUAL_TASKS';this._notify('附件已重新发现，但平台尚未确认整课完成；保持人工等待，不重放历史任务');return;}
                 sessionStorage.removeItem('xuexitong.v3.partial-pause.v1');this._recovery?.resumeExplicitly();this.run({startup:true});
             },
             _playableMedia() {

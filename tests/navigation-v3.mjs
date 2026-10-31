@@ -2705,6 +2705,20 @@ try {
         await page.evaluate(()=>{document.querySelector('#node0').classList.add('posCatalog_active');app.run({startup:true});});assert.equal(await state(page),'WAITING_MANUAL_TASKS');
         assert.equal(await page.evaluate(()=>app._recovery.getStatus().attempts),0);
     }));
+    for(const mode of ['credit','no-credit','verification','duplicate','course','active'])await check(`manual recheck missing owners ${mode}`,()=>using([outer(2),0,false,null,false,'pacing'],async page=>{
+        await page.evaluate(()=>{app.stopAutomation();app._recovery.resumeExplicitly();const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='<iframe class="ans-attach-online"></iframe>';root.querySelector('iframe').contentDocument.body.innerHTML='<p>Independent manual task</p>';app.run();});
+        assert.equal(await state(page),'WAITING_MANUAL_TASKS');
+        await page.evaluate(mode=>{const root=document.querySelector('iframe[info="card"]').contentDocument;root.body.innerHTML='';const n=document.querySelector('#node0');if(mode!=='no-credit'){n.querySelector('input')?.remove();n.insertAdjacentHTML('beforeend','<span class="icon_Completed"></span>');}
+            if(mode==='verification')root.body.innerHTML='<input type="password">';
+            if(mode==='duplicate')n.after(n.cloneNode(true));
+            if(mode==='course')history.pushState({},'','?courseId=other');
+            if(mode==='active'){const a=root.createElement('audio');a.controls=true;Object.defineProperty(a,'paused',{get:()=>false});root.body.append(a);}
+            app.recheckCurrentLesson();
+        },mode);await flush(page,1);
+        if(mode==='credit')assert.ok(['ADVANCING','WAITING_CATALOG','NAVIGATION_COOLDOWN','VERIFYING_PLATFORM_COMPLETION'].includes(await state(page)),await state(page));
+        else assert.equal(await state(page),mode==='no-credit'?'WAITING_MANUAL_TASKS':'BLOCKED');
+        assert.equal(await page.evaluate(()=>app._pacing.getStatus().count),0);
+    }));
     console.log(`RESULT: ${passed} passed, ${failures.length} failed; local Chrome DOM tests, simulated media/timers, no live platform.`);
     if (failures.length) process.exitCode = 1;
 } finally { await browser.close(); }
